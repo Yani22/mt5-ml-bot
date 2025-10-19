@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+.venv/
+venv/
+linux_venv/
+# Distribution / packaging
+.Python
+build/
+dist/
+wheels/
+*.egg-info/
+# Logs and data
+data/
+logs/
+models/
+optuna_params/
+optuna_results/
+results/
+# Environment variables
+.env
+# OS generated files
+.DS_Store
+.Trashes
+ehthumbs.db
+Thumbs.db
+ts_risk_controller_state.json
+risk_metrics.csv
+monitor_state.json
