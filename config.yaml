@@ -20,7 +20,12 @@ roc_lags_options:
   - [1, 2, 3]
 
 # --- ML & CV Settings ---
-cv_samples_per_split: 250 # Affects number of splits in TimeSeriesSplit. Higher -> fewer splits -> faster but less robust CV.
+cv_samples_per_split: 340 # Affects number of splits in TimeSeriesSplit. Higher -> fewer splits -> faster but less robust CV.
+
+# --- Ensemble Training Control ---
+ensemble_training:
+  min_samples_for_ensemble: 1000   # don’t fit ensemble if fewer samples available
+  min_samples_for_fit: 250
 
 # --- Fetch / Data Management ---
 fetch:
@@ -30,14 +35,10 @@ fetch:
   retrain_in_background: true      # whether retrain runs async
   retrain_time_utc: "23:55"           #null set to "23:55" if you want scheduled daily retrain, null = disabled
 
-# --- Ensemble Training Control ---
-ensemble_training:
-  min_samples_for_ensemble: 1000   # don’t fit ensemble if fewer samples available
-
 # --- Symbols & timeframe ---
 # historical_data symbols for .csv needed: M5-EURUSD#, H1-EURUSD#, and M5-USDX-DEC25
 # symbols: ["EURUSD#", "GBPUSD#", "USDJPY#"] #"EURUSD#", "GBPUSD#", "USDJPY#", "USDX-DEC25"
-symbols: ["GBPUSDm#"] # "EURUSDm#", "GOLDm#", "GBPUSDm#"
+symbols: ["EURUSDm#"] # "EURUSDm#", "GOLDm#", "GBPUSDm#", "USDX-DEC25"
 timeframe: "M5"            # One of: M1, M5, M15, M30, H1, H4
 history_bars: 36000          #6048 18000 36000 105,000
 retrain_every_bars: 1000     # ~3.5 days at M5

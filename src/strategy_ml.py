@@ -23,12 +23,10 @@ try:
 except Exception:
     LGBMClassifier = None
 
-# Min samples required to safely train a model and get a reliable CV score
-# Raised for production / retrain safety
-MIN_SAMPLES_FOR_FIT = 1000
+
 
 class MLStrategy:
-    def __init__(self, model="lgbm", random_state: int = 42, calibrate: bool = True, cv_samples_per_split: int = 300, **kwargs):
+    def __init__(self, cfg, model="lgbm", random_state: int = 42, calibrate: bool = True, cv_samples_per_split: int = 300, **kwargs):
         self.model_name = model.lower()
         self.random_state = random_state
         self.calibrate = bool(calibrate)
@@ -37,6 +35,8 @@ class MLStrategy:
         device = model_params.pop("device", "cpu")
         self._calibrator = None
         np.random.seed(self.random_state)
+        self.cfg = cfg
+        self.min_samples_for_fit = cfg.min_samples_for_fit
 
         if self.model_name == "rf":
             base = RandomForestClassifier(
@@ -157,7 +157,7 @@ class MLStrategy:
         Xc = self._sanitize(X)
         yc = y.reindex(Xc.index)
 
-        if len(Xc) < MIN_SAMPLES_FOR_FIT:
+        if len(Xc) < self.min_samples_for_fit:
             logger.warning(f"Not enough data to fit model: {len(Xc)} < {MIN_SAMPLES_FOR_FIT}. Skipping fit.")
             self.cv_auc_ = 0.5
             return False
