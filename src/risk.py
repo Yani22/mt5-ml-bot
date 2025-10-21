@@ -234,111 +234,103 @@ class RiskManager:
         import MetaTrader5 as mt5  # type: ignore
         """
         Ensure open_positions_cache matches MT5 positions and apply BE/trailing rules.
+        This function now iterates through all MT5 positions, identifies closed trades
+        by checking against the cache, and processes them. It is symbol-agnostic inside
+        the closure-checking loop.
         Returns a list of SimPosition objects for trades that were closed in this cycle.
         """
-        self.recently_closed_trades.clear() # Clear for this cycle
+        self.recently_closed_trades.clear()
 
         try:
-            mt5_positions = mt5.positions_get(symbol=symbol) or []
+            # Fetch all open positions from MT5, not just for one symbol
+            mt5_positions = mt5.positions_get() or []
             current_tickets = {int(p.ticket) for p in mt5_positions}
         except Exception as e:
-            logger.exception(f"Failed to get MT5 positions for {symbol}: {e}")
+            logger.exception(f"Failed to get all MT5 positions: {e}")
             return []
 
-        # Identify and process closed positions
-        closed_tickets_in_cache = []
-        for sym_key, pos_data in list(self.open_positions_cache.items()):
-            ticket = pos_data.get("ticket")
-            if ticket is not None and ticket not in current_tickets:
-                closed_tickets_in_cache.append(ticket)
-                # Remove from cache
-                del self.open_positions_cache[sym_key]
-                logger.info(f"[{symbol}] Removed closed position {ticket} from cache.")
+        # Identify and process closed positions by comparing cache against current open tickets
+        closed_tickets = set(self.open_positions_cache.keys()) - current_tickets
+        
+        for ticket in closed_tickets:
+            pos_data = self.open_positions_cache.pop(ticket) # Remove from cache
+            position_symbol = pos_data.get("symbol", "UNKNOWN")
+            logger.info(f"[{position_symbol}] Removed closed position {ticket} from cache.")
 
-                # Fetch deal history to reconstruct SimPosition
-                deals = mt5.history_deals_get(position=ticket)
-                if deals:
-                    # Find the deal that closed the position (usually the last one)
-                    closing_deal = None
-                    for deal in deals:
-                        # Check for actual trade deals (buy/sell) that have profit/loss
-                        if (deal.type == mt5.DEAL_TYPE_BUY or deal.type == mt5.DEAL_TYPE_SELL) and abs(deal.profit) > 1e-9:
-                            closing_deal = deal
-                    
-                    if closing_deal:
-                        # Reconstruct SimPosition from deal and cached info
-                        entry_price = pos_data.get("entry_price", 0.0)
-                        direction = pos_data.get("direction", "long")
-                        lots = pos_data.get("lots", 0.0)
-                        entry_time = pos_data.get("entry_time", datetime.datetime.now(timezone.utc))
-                        sl = pos_data.get("sl", 0.0)
-                        tp = pos_data.get("tp", 0.0)
-                        entry_auc = pos_data.get("entry_auc", 0.5)
-                        risk_fraction = pos_data.get("risk_fraction", 0.0)
-                        atr_at_entry = pos_data.get("atr", 0.0)
+            # Fetch deal history to reconstruct SimPosition
+            deals = mt5.history_deals_get(position=ticket)
+            if deals:
+                closing_deal = None
+                for deal in deals:
+                    if (deal.type == mt5.DEAL_TYPE_BUY or deal.type == mt5.DEAL_TYPE_SELL) and abs(deal.profit) > 1e-9:
+                        closing_deal = deal
+                
+                if closing_deal:
+                    pnl = float(closing_deal.profit)
+                    exit_price = float(closing_deal.price)
+                    exit_time = datetime.datetime.fromtimestamp(closing_deal.time, tz=timezone.utc)
 
-                        pnl = float(closing_deal.profit)
-                        exit_price = float(closing_deal.price)
-                        exit_time = datetime.datetime.fromtimestamp(closing_deal.time, tz=timezone.utc)
+                    account_info = mt5.account_info()
+                    exit_equity = getattr(account_info, "equity", 0.0) if account_info else 0.0
 
-                        closed_sim_pos = SimPosition(
-                            symbol=symbol,
-                            direction=direction,
-                            lots=lots,
-                            entry_price=entry_price,
-                            sl=sl,
-                            tp=tp,
-                            entry_time=entry_time,
-                            atr=atr_at_entry,
-                            entry_auc=entry_auc,
-                            risk_fraction=risk_fraction
-                        )
-                        closed_sim_pos.close(exit_price, exit_time, pnl)
-                        self.recently_closed_trades.append(closed_sim_pos)
-                        logger.info(f"[{symbol}] Detected closed trade {ticket}. PnL: {pnl:.2f}")
-                    else:
-                        logger.warning(f"[{symbol}] Could not find a valid closing deal for ticket {ticket}.")
+                    closed_sim_pos = SimPosition(
+                        symbol=position_symbol,
+                        direction=pos_data.get("direction", "long"),
+                        lots=pos_data.get("lots", 0.0),
+                        entry_price=pos_data.get("entry_price", 0.0),
+                        sl=pos_data.get("sl", 0.0),
+                        tp=pos_data.get("tp", 0.0),
+                        entry_time=pos_data.get("entry_time"),
+                        atr=pos_data.get("atr", 0.0),
+                        entry_auc=pos_data.get("entry_auc", 0.5),
+                        risk_fraction=pos_data.get("risk_fraction", 0.0)
+                    )
+                    closed_sim_pos.close(exit_price, exit_time, pnl, exit_equity)
+                    self.recently_closed_trades.append(closed_sim_pos)
+                    logger.info(f"[{position_symbol}] Detected closed trade {ticket}. PnL: {pnl:.2f}")
                 else:
-                    logger.warning(f"[{symbol}] No deal history found for closed position {ticket}.")
+                    logger.warning(f"[{position_symbol}] Could not find a valid closing deal for ticket {ticket}.")
+            else:
+                logger.warning(f"[{position_symbol}] No deal history found for closed position {ticket}.")
 
-        if not mt5_positions:
-            logger.debug(f"[{symbol}] No open positions in MT5.")
-            return self.recently_closed_trades
-
-        symbol_info = mt5.symbol_info(symbol)
-        if not symbol_info:
-            logger.warning(f"[{symbol}] Symbol info unavailable")
-            return self.recently_closed_trades
-        point = float(symbol_info.point)
-        tick = mt5.symbol_info_tick(symbol)
-        if not tick:
-            logger.warning(f"[{symbol}] Tick info unavailable")
-            return self.recently_closed_trades
-
+        # Update cache and apply trailing stops for currently open positions
         for pos in mt5_positions:
+            ticket = int(pos.ticket)
+            pos_symbol = pos.symbol
+
+            # Update cache with latest data from MT5
+            self.open_positions_cache[ticket] = {
+                **self.open_positions_cache.get(ticket, {}), # Preserve existing data like entry_auc
+                "ticket": ticket,
+                "symbol": pos_symbol,
+                "entry_price": float(pos.price_open),
+                "direction": "long" if int(pos.type) == int(mt5.ORDER_TYPE_BUY) else "short",
+                "lots": float(pos.volume),
+                "entry_time": datetime.datetime.fromtimestamp(pos.time, tz=timezone.utc),
+                "sl": float(getattr(pos, "sl", 0.0)),
+                "tp": float(getattr(pos, "tp", 0.0)),
+            }
+
+            # Apply trailing logic only for the symbol this function was called for
+            if pos_symbol != symbol:
+                continue
+
+            symbol_info = mt5.symbol_info(symbol)
+            if not symbol_info:
+                logger.warning(f"[{symbol}] Symbol info unavailable for trailing stop logic")
+                continue
+            point = float(symbol_info.point)
+            
+            tick = mt5.symbol_info_tick(symbol)
+            if not tick:
+                logger.warning(f"[{symbol}] Tick info unavailable for trailing stop logic")
+                continue
+
             entry = float(pos.price_open)
             sl = float(getattr(pos, "sl", 0.0))
             tp = float(getattr(pos, "tp", 0.0))
             direction = "long" if int(pos.type) == int(mt5.ORDER_TYPE_BUY) else "short"
 
-            # Update open_positions_cache with more details for later reconstruction
-            # Ensure existing details are preserved if not updated here
-            cached_pos_data = self.open_positions_cache.get(symbol, {})
-            self.open_positions_cache[symbol] = {
-                "risk": cached_pos_data.get("risk", 0.0), # Keep existing risk
-                "ticket": int(pos.ticket),
-                "entry_price": entry,
-                "direction": direction,
-                "lots": float(pos.volume),
-                "entry_time": datetime.datetime.fromtimestamp(pos.time_setup, tz=timezone.utc),
-                "sl": sl,
-                "tp": tp,
-                "atr": cached_pos_data.get("atr", 0.0), # Preserve ATR from entry
-                "entry_auc": cached_pos_data.get("entry_auc", 0.5), # Preserve AUC from entry
-                "risk_fraction": cached_pos_data.get("risk_fraction", 0.0), # Preserve risk_fraction from entry
-            }
-
-            # profit in pips
             if direction == "long":
                 profit_pips = (float(tick.bid) - entry) / point
             else:
@@ -347,11 +339,9 @@ class RiskManager:
             one_r = (self.risk_cfg.atr_multiplier_sl * float(atr)) / point
             new_sl = sl
 
-            # Breakeven at 1R
             if profit_pips >= one_r and ((direction == "long" and sl < entry) or (direction == "short" and sl > entry)):
                 new_sl = entry
 
-            # ATR trailing
             trailing = float(atr) * float(self.risk_cfg.trailing_atr_mult)
             if direction == "long":
                 new_sl = max(new_sl, float(tick.bid) - trailing)
@@ -362,18 +352,16 @@ class RiskManager:
                 try:
                     request = {
                         "action": mt5.TRADE_ACTION_SLTP,
-                        "position": int(pos.ticket),
+                        "position": ticket,
                         "sl": float(new_sl),
                         "tp": float(tp),
                     }
                     result = mt5.order_send(request)
                     if result is None or getattr(result, "retcode", None) != getattr(mt5, "TRADE_RETCODE_DONE", 10009):
-                        logger.error(f"[{symbol}] Failed SL update for ticket {pos.ticket}: {result}")
+                        logger.error(f"[{symbol}] Failed SL update for ticket {ticket}: {result}")
                     else:
-                        logger.info(f"[{symbol}] Updated SL for ticket {pos.ticket}: new SL={new_sl:.6f}")
+                        logger.info(f"[{symbol}] Updated SL for ticket {ticket}: new SL={new_sl:.6f}")
                 except Exception as e:
-                    logger.exception(f"[{symbol}] Exception updating SL for ticket {pos.ticket}: {e}")
-            else:
-                logger.debug(f"[{symbol}] No SL adjustment needed for ticket {pos.ticket}")
+                    logger.exception(f"[{symbol}] Exception updating SL for ticket {ticket}: {e}")
         
         return self.recently_closed_trades

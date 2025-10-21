@@ -20,7 +20,7 @@ roc_lags_options:
   - [1, 2, 3]
 
 # --- ML & CV Settings ---
-cv_samples_per_split: 1000 # Affects number of splits in TimeSeriesSplit. Higher -> fewer splits -> faster but less robust CV.
+cv_samples_per_split: 250 # Affects number of splits in TimeSeriesSplit. Higher -> fewer splits -> faster but less robust CV.
 
 # --- Fetch / Data Management ---
 fetch:
@@ -36,8 +36,8 @@ ensemble_training:
 
 # --- Symbols & timeframe ---
 # historical_data symbols for .csv needed: M5-EURUSD#, H1-EURUSD#, and M5-USDX-DEC25
-symbols: ["EURUSD#", "GBPUSD#", "USDJPY#"] #"EURUSD#", "GBPUSD#", "USDJPY#", "USDX-DEC25"
-# symbols: ["EURUSDm#", "GOLDm#", "GBPUSDm#"] 
+# symbols: ["EURUSD#", "GBPUSD#", "USDJPY#"] #"EURUSD#", "GBPUSD#", "USDJPY#", "USDX-DEC25"
+symbols: ["GBPUSDm#"] # "EURUSDm#", "GOLDm#", "GBPUSDm#"
 timeframe: "M5"            # One of: M1, M5, M15, M30, H1, H4
 history_bars: 36000          #6048 18000 36000 105,000
 retrain_every_bars: 1000     # ~3.5 days at M5
@@ -201,6 +201,7 @@ watchdog:
 
 # --- Monitoring ---
 monitoring:
+  enabled: false #true false Master switch for Telegram notifications
   lookback_days: 30 # Period over which to calculate performance metrics
   monitor_state_file: "monitor_state.json" # File to save LivePerformanceMonitor state
   telegram_bot_token: "" # Your Telegram Bot Token

@@ -200,7 +200,7 @@ class Execution:
 
         except Exception as e:
             logger.exception(f"Failed to check/reconcile closed trades: {e}")
-        
+
         return closed_trades_list
 
     def trade(self, symbol: str, X: pd.DataFrame | None = None, atr: float | None = None, auc_score: float | None = 0.5, total_open_risk: float = 0.0, sl_mult: Optional[float] = None, tp_mult: Optional[float] = None, atr_idx: int = -1, min_prob_idx: int = -1) -> OrderResult:
@@ -367,3 +367,5 @@ class Execution:
             if self.notifier: self.notifier.send_message(f"<b>WARNING:</b> Could not record open position in cache for {symbol}: {e}", level="WARNING")
 
         return OrderResult(True, position_id, "OK")
+
+

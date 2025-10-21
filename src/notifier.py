@@ -10,7 +10,10 @@ class TelegramNotifier:
         self.chat_id = cfg.monitoring.telegram_chat_id
         self.base_url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
 
-        if not self.bot_token or not self.chat_id:
+        if not cfg.monitoring.enabled:
+            logger.info("Telegram notifications are disabled by configuration.")
+            self.enabled = False
+        elif not self.bot_token or not self.chat_id:
             logger.warning("Telegram Notifier not fully configured (missing bot_token or chat_id). Notifications will be disabled.")
             self.enabled = False
         else:
