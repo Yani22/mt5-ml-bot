@@ -187,7 +187,7 @@ class Ensemble:
                 params["device"] = params.get("device", "gpu")
 
             try:
-                self.members[name] = MLStrategy(self.cfg, model=name, calibrate=True, cv_samples_per_split=self.cv_samples, **params)
+                self.members[name] = MLStrategy(model=name, calibrate=True, cv_samples_per_split=self.cv_samples, **params)
             except Exception as e:
                 logger.error(f"Ensemble.__init__: failed to init member {name}: {e}")
                 # do not include in members

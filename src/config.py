@@ -92,7 +92,6 @@ class WatchdogCfg:
 
 @dataclass
 class MonitoringCfg:
-    enabled: bool = False # Master switch for Telegram notifications
     lookback_days: int = 30
     monitor_state_file: str = "monitor_state.json"
     telegram_bot_token: Optional[str] = None
@@ -184,7 +183,6 @@ class Cfg:
     trading_costs: TradingCostsCfg = field(default_factory=TradingCostsCfg)
     fetch: FetchCfg = field(default_factory=FetchCfg)
     min_samples_for_ensemble: int = 1000
-    min_samples_for_fit: int = 250
     force_retrain_on_startup: bool = False # New: Force retraining of all models on bot startup
     retraining_window_bars: Optional[int] = None # New: Number of recent bars for rolling window retraining
     startup_logging: bool = True
@@ -333,7 +331,6 @@ class Cfg:
             thompson_sampling=ts_obj,
             trading_costs=tc_obj,
             min_samples_for_ensemble=int(raw.get("min_samples_for_ensemble", 1000)),
-            min_samples_for_fit=int(raw.get("ensemble_training", {}).get("min_samples_for_fit", 250)),
             force_retrain_on_startup=bool(raw.get("force_retrain_on_startup", False)),
             retraining_window_bars=raw.get("retraining_window_bars", None),
             startup_logging=bool(raw.get("startup_logging", True)),

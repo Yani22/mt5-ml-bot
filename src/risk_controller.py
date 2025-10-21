@@ -351,16 +351,14 @@ class RiskController:
 
         # 1. Compute normalized reward (Sharpe-like: return per unit of risk)
         reward = 0.0
-        trade_pnl = getattr(trade, 'pnl', getattr(trade, 'profit', None))
-
-        if trade_pnl is not None and trade.risk_fraction is not None and trade.risk_fraction > 0 and trade.exit_equity is not None and trade.exit_equity > 0:
+        if trade.pnl is not None and trade.risk_fraction is not None and trade.risk_fraction > 0 and trade.exit_equity is not None and trade.exit_equity > 0:
             # Calculate return per unit of risk
-            raw_reward = trade_pnl / (trade.exit_equity * trade.risk_fraction)
+            raw_reward = trade.pnl / (trade.exit_equity * trade.risk_fraction)
             # Apply log utility and normalize
             shaped = np.sign(raw_reward) * np.log1p(abs(raw_reward))
             reward = float(np.clip(shaped / ts_cfg.reward_normalization_factor, -5.0, 5.0))
-        elif trade_pnl is not None and trade.exit_equity is not None and trade.exit_equity > 0: # Fallback to simple PnL/Equity if risk_fraction is not available or zero
-            raw_reward = trade_pnl / trade.exit_equity
+        elif trade.pnl is not None and trade.entry_equity is not None and trade.entry_equity > 0: # Fallback to simple PnL/Equity if risk_fraction is not available or zero
+            raw_reward = trade.pnl / trade.entry_equity
             shaped = np.sign(raw_reward) * np.log1p(abs(raw_reward))
             reward = float(np.clip(shaped / ts_cfg.reward_normalization_factor, -5.0, 5.0))
         

@@ -266,7 +266,6 @@ def run(dry_run: bool = False):
     trading_blocked_by_low_new_model_auc = {sym: False for sym in cfg.symbols} # NEW: Track if trading is blocked due to low new model AUC
     last_diagnostics_log_time = 0.0 # NEW: For throttling diagnostics logging
     last_retrain_date = None # NEW: Track last retraining date
-    logged_low_confidence = set()
 
     try:
         while True:
@@ -302,13 +301,13 @@ def run(dry_run: bool = False):
                 # Assuming trades are sorted by close time from check_closed_trades()
                 total_profit_this_cycle = sum(t.profit for t in closed_trades_this_cycle)
                 equity_before_cycle = equity - total_profit_this_cycle
-
+                
                 running_equity = equity_before_cycle
                 for trade in closed_trades_this_cycle:
                     try:
                         # Calculate the exact equity at the moment this trade closed
                         exit_equity = running_equity + trade.profit
-
+                        
                         # Set exit_equity on the trade object so RiskController can compute accurate reward
                         # This assumes the trade object is mutable and the controller knows to use this attribute.
                         trade.exit_equity = exit_equity
@@ -428,22 +427,6 @@ def run(dry_run: bool = False):
                     if not risk.should_trade(pd.Timestamp.now(), drawdown):
                         logger.info(f"[{sym}] Trade skipped due to drawdown/session rules")
                         continue
-
-                    # NEW: Check ensemble confidence before trading
-                    ens = ens_per_symbol[sym]
-                    min_auc = risk.risk_cfg.min_ensemble_auc
-                    current_auc = getattr(ens, "ensemble_cv_auc_", getattr(ens, "cv_auc_", 0.5))
-
-                    if current_auc < min_auc:
-                        if sym not in logged_low_confidence:
-                            message = f"[{sym}] Trading blocked due to low ensemble confidence (AUC={current_auc:.4f} < {min_auc:.4f})."
-                            logger.info(message)
-                            notifier.send_message(message, level="WARNING")
-                            logged_low_confidence.add(sym)
-                        continue  # Skip to next symbol
-                    else:
-                        if sym in logged_low_confidence:
-                            logged_low_confidence.remove(sym)
 
                     # Get dynamic risk params from RiskController
                     auc_score = getattr(ens_per_symbol[sym], "ensemble_cv_auc_", getattr(ens_per_symbol[sym], "cv_auc_", 0.5))
@@ -568,8 +551,8 @@ def run(dry_run: bool = False):
             # --- Live Dashboard (throttled) ---
             print_dashboard(cfg, risk, ens_per_symbol, X_per_symbol, bar_counter=sum(bar_counters.values()))
 
-            # time.sleep(cfg.timeframe_seconds() or 60)
-            time.sleep(60)
+            time.sleep(cfg.timeframe_seconds() or 60)
+            # time.sleep(60)
 
     except KeyboardInterrupt:
         logger.info("=== Stopping MT5 ML Bot ===")
