@@ -39,7 +39,7 @@ ensemble_training:
 symbols: ["GBPUSD#"] #"EURUSD#", "GBPUSD#", "USDJPY#", "USDX-DEC25"
 # symbols: ["EURUSDm#", "GOLDm#", "GBPUSDm#"] 
 timeframe: "M5"            # One of: M1, M5, M15, M30, H1, H4
-history_bars: 18000          #6048 18000 36000 105,000 #12000-for-tuner.py #5000-for-backtesting
+history_bars: 5000          #6048 18000 36000 105,000 #12000-for-tuner.py #5000-for-backtesting
 retrain_every_bars: 1000     # ~3.5 days at M5
 prediction_horizon: 12       # 6 Bars ahead for label (~30 min on M5)
 retraining_window_bars: 20000         # Number of recent bars for rolling window retraining. null for expanding window.
@@ -98,20 +98,11 @@ trading_costs:
     retry_order_send: 3            # number of retries for failed order sends
 
 # --- Thompson Sampling Configuration ---
+thompson_sampling:
   enabled: true
   atr_grid: [1.0, 1.5, 2.0, 2.5] # ATR multiplier - provides options for the stop-loss distance
-  min_prob_grid_long:
-  - 0.50
-  - 0.52
-  - 0.54
-  - 0.56
-  - 0.58
-  min_prob_grid_short:
-  - 0.66
-  - 0.68
-  - 0.70
-  - 0.72
-  - 0.74
+  min_prob_grid_long: [0.50, 0.55, 0.60, 0.65] # Discrete choices for long min_prob
+  min_prob_grid_short: [0.50, 0.55, 0.60, 0.65] # Discrete choices for short min_prob
   prior_mean: 0.0
   prior_var: 1.0
   obs_var: 1.0
@@ -164,8 +155,8 @@ risk:
   atr_multiplier_tp: 2.0
   breakeven_at_1R: true
   trailing_atr_mult: 1.0
-  min_prob_long: 0.56
-  min_prob_short: 0.70
+  min_prob_long: 0.60          
+  min_prob_short: 0.65
   block_on_drawdown: 1.0         # 0.1 pause if drawdown from equity peak exceeds 10%     #disable 1.0
   min_auc_improvement: 0.005     # 0.005 default # minimum improvement in AUC to accept a new model
   max_drawdown_for_pruning: 1.0 # New: Max drawdown allowed before Optuna trial pruning  #disable 1.0
@@ -177,7 +168,7 @@ risk:
 
 # --- Logging ---
 logging:
-  level: DEBUG
+  level: INFO
   to_file: true
   rotate: 10 MB
   retention: 7 days

@@ -96,7 +96,8 @@ class SymbolRiskState:
 
         # Store current dynamic grid values
         self.atr_grid_values: List[float] = list(ts_cfg.atr_grid)
-        self.min_prob_grid_values: List[float] = list(ts_cfg.min_prob_grid)
+        self.min_prob_grid_long_values: List[float] = list(ts_cfg.min_prob_grid_long)
+        self.min_prob_grid_short_values: List[float] = list(ts_cfg.min_prob_grid_short)
 
         self.atr_bandit = ThompsonBandit(
             num_arms=len(self.atr_grid_values),
@@ -104,8 +105,14 @@ class SymbolRiskState:
             prior_var=ts_cfg.prior_var,
             min_var=1e-6
         )
-        self.min_prob_bandit = ThompsonBandit(
-            num_arms=len(self.min_prob_grid_values),
+        self.min_prob_bandit_long = ThompsonBandit(
+            num_arms=len(self.min_prob_grid_long_values),
+            prior_mean=ts_cfg.prior_mean,
+            prior_var=ts_cfg.prior_var,
+            min_var=1e-6
+        )
+        self.min_prob_bandit_short = ThompsonBandit(
+            num_arms=len(self.min_prob_grid_short_values),
             prior_mean=ts_cfg.prior_mean,
             prior_var=ts_cfg.prior_var,
             min_var=1e-6
@@ -140,9 +147,11 @@ class SymbolRiskState:
     def get_state(self):
         d = {
             "atr_bandit": self.atr_bandit.get_state(),
-            "min_prob_bandit": self.min_prob_bandit.get_state(),
+            "min_prob_bandit_long": self.min_prob_bandit_long.get_state(),
+            "min_prob_bandit_short": self.min_prob_bandit_short.get_state(),
             "atr_grid_values": self.atr_grid_values,
-            "min_prob_grid_values": self.min_prob_grid_values,
+            "min_prob_grid_long_values": self.min_prob_grid_long_values,
+            "min_prob_grid_short_values": self.min_prob_grid_short_values,
             "peak_equity": self.peak_equity,
             "current_equity": self.current_equity,
             "consecutive_losses": self.consecutive_losses,
@@ -158,10 +167,45 @@ class SymbolRiskState:
     def from_state(cls, cfg: Cfg, state: dict) -> "SymbolRiskState":
         inst = cls(cfg)
         inst.atr_grid_values = state.get("atr_grid_values", list(cfg.thompson_sampling.atr_grid))
-        inst.min_prob_grid_values = state.get("min_prob_grid_values", list(cfg.thompson_sampling.min_prob_grid))
-        # Re-initialize bandits with loaded grid sizes
-        inst.atr_bandit = ThompsonBandit.from_state(state["atr_bandit"])
-        inst.min_prob_bandit = ThompsonBandit.from_state(state["min_prob_bandit"])
+        inst.min_prob_grid_long_values = state.get("min_prob_grid_long_values", list(cfg.thompson_sampling.min_prob_grid_long))
+        inst.min_prob_grid_short_values = state.get("min_prob_grid_short_values", list(cfg.thompson_sampling.min_prob_grid_short))
+
+        # Check if the number of arms has changed for the atr_bandit
+        if state.get("atr_bandit") and state["atr_bandit"].get("num_arms") == len(inst.atr_grid_values):
+            inst.atr_bandit = ThompsonBandit.from_state(state["atr_bandit"])
+        else:
+            logger.warning("Number of arms for atr_bandit has changed. Re-initializing bandit.")
+            inst.atr_bandit = ThompsonBandit(
+                num_arms=len(inst.atr_grid_values),
+                prior_mean=cfg.thompson_sampling.prior_mean,
+                prior_var=cfg.thompson_sampling.prior_var,
+                min_var=1e-6
+            )
+
+        # Check if the number of arms has changed for the min_prob_bandit_long
+        if state.get("min_prob_bandit_long") and state["min_prob_bandit_long"].get("num_arms") == len(inst.min_prob_grid_long_values):
+            inst.min_prob_bandit_long = ThompsonBandit.from_state(state["min_prob_bandit_long"])
+        else:
+            logger.warning("Number of arms for min_prob_bandit_long has changed. Re-initializing bandit.")
+            inst.min_prob_bandit_long = ThompsonBandit(
+                num_arms=len(inst.min_prob_grid_long_values),
+                prior_mean=cfg.thompson_sampling.prior_mean,
+                prior_var=cfg.thompson_sampling.prior_var,
+                min_var=1e-6
+            )
+
+        # Check if the number of arms has changed for the min_prob_bandit_short
+        if state.get("min_prob_bandit_short") and state["min_prob_bandit_short"].get("num_arms") == len(inst.min_prob_grid_short_values):
+            inst.min_prob_bandit_short = ThompsonBandit.from_state(state["min_prob_bandit_short"])
+        else:
+            logger.warning("Number of arms for min_prob_bandit_short has changed. Re-initializing bandit.")
+            inst.min_prob_bandit_short = ThompsonBandit(
+                num_arms=len(inst.min_prob_grid_short_values),
+                prior_mean=cfg.thompson_sampling.prior_mean,
+                prior_var=cfg.thompson_sampling.prior_var,
+                min_var=1e-6
+            )
+
         inst.peak_equity = state.get("peak_equity", inst.peak_equity)
         inst.current_equity = state.get("current_equity", inst.current_equity)
         inst.consecutive_losses = state.get("consecutive_losses", inst.consecutive_losses)
@@ -296,7 +340,8 @@ class RiskController:
         else:
             atr_idx = sym_state.atr_bandit.sample()
 
-        min_prob_idx = sym_state.min_prob_bandit.sample()
+        min_prob_long_idx = sym_state.min_prob_bandit_long.sample()
+        min_prob_short_idx = sym_state.min_prob_bandit_short.sample()
 
         # 2. Apply rule-based scaling
         rule_scale = self._calculate_rule_scale(symbol, context)
@@ -304,17 +349,14 @@ class RiskController:
         # Apply rule_scale to ATR-related parameters
         atr_choice = sym_state.atr_grid_values[atr_idx] * rule_scale
         # For min_prob, scaling might be different or not applied directly
-        min_prob_choice = sym_state.min_prob_grid_values[min_prob_idx]
+        min_prob_long_choice = sym_state.min_prob_grid_long_values[min_prob_long_idx]
+        min_prob_short_choice = sym_state.min_prob_grid_short_values[min_prob_short_idx]
 
         # Note: For trailing_atr_mult, we can either optimize it with its own bandit
         # or scale it based on atr_choice or rule_scale. For simplicity, let's scale it with rule_scale
         trailing_atr_mult_choice = self.cfg.risk.trailing_atr_mult * rule_scale # Use default and scale
 
-        # For min_prob_short, we can either optimize it with its own bandit
-        # or assume it's the same as min_prob_long for simplicity
-        min_prob_short_choice = min_prob_choice # Assuming symmetric for now
-
-        logger.debug(f"[{symbol}] TS Params: ATR={atr_choice:.2f} (idx:{atr_idx}), MinProb={min_prob_choice:.2f} (idx:{min_prob_idx}), RuleScale={rule_scale:.2f}")
+        logger.debug(f"[{symbol}] TS Params: ATR={atr_choice:.2f} (idx:{atr_idx}), MinProbLong={min_prob_long_choice:.2f} (idx:{min_prob_long_idx}), MinProbShort={min_prob_short_choice:.2f} (idx:{min_prob_short_idx}), RuleScale={rule_scale:.2f}")
 
         # Exploration safety: if arm is under-visited, apply exploration risk multiplier
         ts_cfg = self.cfg.thompson_sampling
@@ -330,10 +372,11 @@ class RiskController:
             "atr_multiplier_sl": atr_choice,
             "atr_multiplier_tp": atr_choice,
             "trailing_atr_mult": trailing_atr_mult_choice,
-            "min_prob_long": min_prob_choice,
+            "min_prob_long": min_prob_long_choice,
             "min_prob_short": min_prob_short_choice,
             "atr_idx": atr_idx,
-            "min_prob_idx": min_prob_idx,
+            "min_prob_long_idx": min_prob_long_idx,
+            "min_prob_short_idx": min_prob_short_idx,
             "rule_scale": rule_scale,
             "is_exploratory": is_exploratory,
             "exploration_risk_mult": exploration_risk_mult,
@@ -366,19 +409,32 @@ class RiskController:
         if not np.isfinite(reward):
             reward = 0.0
 
+        logger.debug(f"[{symbol}] Trade closed. Reward: {reward:.4f}. Updating bandits.")
         # 2. Update bandits
         if trade.atr_idx is not None and trade.atr_idx != -1:
             if trade.atr_idx < sym_state.atr_bandit.num_arms:
                 sym_state.atr_bandit.update(trade.atr_idx, reward, ts_cfg.decay)
                 sym_state.atr_updates_since_last_adaptation += 1
+                logger.debug(f"[{symbol}] ATR bandit updated for arm {trade.atr_idx}.")
             else:
                 logger.warning(f"[{symbol}] atr_idx {trade.atr_idx} from a stale trade is out of bounds for the current atr_bandit with {sym_state.atr_bandit.num_arms} arms. Skipping bandit update for this trade.")
-        if trade.min_prob_idx is not None and trade.min_prob_idx != -1:
-            if trade.min_prob_idx < sym_state.min_prob_bandit.num_arms:
-                sym_state.min_prob_bandit.update(trade.min_prob_idx, reward, ts_cfg.decay)
-                sym_state.min_prob_updates_since_last_adaptation += 1
-            else:
-                logger.warning(f"[{symbol}] min_prob_idx {trade.min_prob_idx} from a stale trade is out of bounds for the current min_prob_bandit with {sym_state.min_prob_bandit.num_arms} arms. Skipping bandit update for this trade.")
+        # 2b. Update the correct min_prob bandit based on trade direction
+        if trade.direction == "long":
+            if trade.min_prob_long_idx is not None and trade.min_prob_long_idx != -1:
+                if trade.min_prob_long_idx < sym_state.min_prob_bandit_long.num_arms:
+                    sym_state.min_prob_bandit_long.update(trade.min_prob_long_idx, reward, ts_cfg.decay)
+                    sym_state.min_prob_updates_since_last_adaptation += 1 # Note: this adaptation counter is now shared
+                    logger.debug(f"[{symbol}] MinProb Long bandit updated for arm {trade.min_prob_long_idx}.")
+                else:
+                    logger.warning(f"[{symbol}] min_prob_long_idx {trade.min_prob_long_idx} out of bounds for min_prob_bandit_long with {sym_state.min_prob_bandit_long.num_arms} arms. Skipping.")
+        elif trade.direction == "short":
+            if trade.min_prob_short_idx is not None and trade.min_prob_short_idx != -1:
+                if trade.min_prob_short_idx < sym_state.min_prob_bandit_short.num_arms:
+                    sym_state.min_prob_bandit_short.update(trade.min_prob_short_idx, reward, ts_cfg.decay)
+                    sym_state.min_prob_updates_since_last_adaptation += 1 # Note: this adaptation counter is now shared
+                    logger.debug(f"[{symbol}] MinProb Short bandit updated for arm {trade.min_prob_short_idx}.")
+                else:
+                    logger.warning(f"[{symbol}] min_prob_short_idx {trade.min_prob_short_idx} out of bounds for min_prob_bandit_short with {sym_state.min_prob_bandit_short.num_arms} arms. Skipping.")
 
         # contextual update (if enabled)
         if getattr(ts_cfg, "contextual_enabled", False) and sym_state.contextual_bandit is not None:
@@ -460,23 +516,43 @@ class RiskController:
                         logger.warning(f"[{symbol}] Contextual bandit re-initialized due to ATR grid adaptation. Previous learning for contextual bandit is reset.")
                 sym_state.atr_updates_since_last_adaptation = 0
 
-            # Check MinProb grid adaptation
+            # Check MinProb grid adaptation (Long)
             if sym_state.min_prob_updates_since_last_adaptation >= ts_cfg.adaptation_interval_updates:
-                best_min_prob_arm_idx = int(np.argmax(sym_state.min_prob_bandit.sum_rewards / np.maximum(1.0, sym_state.min_prob_bandit.counts)))
-                new_min_prob_grid = self._refine_grid(
-                    sym_state.min_prob_grid_values, best_min_prob_arm_idx, ts_cfg.adaptation_refinement_factor,
+                best_min_prob_long_arm_idx = int(np.argmax(sym_state.min_prob_bandit_long.sum_rewards / np.maximum(1.0, sym_state.min_prob_bandit_long.counts)))
+                new_min_prob_long_grid = self._refine_grid(
+                    sym_state.min_prob_grid_long_values, best_min_prob_long_arm_idx, ts_cfg.adaptation_refinement_factor,
                     ts_cfg.min_grid_size, ts_cfg.max_grid_size
                 )
-                if new_min_prob_grid != sym_state.min_prob_grid_values:
-                    logger.info(f"[{symbol}] Adapting MinProb grid. Old: {sym_state.min_prob_grid_values} -> New: {new_min_prob_grid}")
-                    old_min_prob_bandit = sym_state.min_prob_bandit
-                    old_min_prob_grid = sym_state.min_prob_grid_values
-                    sym_state.min_prob_grid_values = new_min_prob_grid
-                    sym_state.min_prob_bandit = ThompsonBandit(
-                        num_arms=len(new_min_prob_grid), prior_mean=ts_cfg.prior_mean,
+                if new_min_prob_long_grid != sym_state.min_prob_grid_long_values:
+                    logger.info(f"[{symbol}] Adapting MinProb Long grid. Old: {sym_state.min_prob_grid_long_values} -> New: {new_min_prob_long_grid}")
+                    old_min_prob_bandit_long = sym_state.min_prob_bandit_long
+                    old_min_prob_long_grid = sym_state.min_prob_grid_long_values
+                    sym_state.min_prob_grid_long_values = new_min_prob_prob_long_grid
+                    sym_state.min_prob_bandit_long = ThompsonBandit(
+                        num_arms=len(new_min_prob_long_grid), prior_mean=ts_cfg.prior_mean,
                         prior_var=ts_cfg.prior_var, min_var=1e-6
                     )
-                    self._transfer_bandit_state(old_min_prob_bandit, old_min_prob_grid, sym_state.min_prob_bandit, new_min_prob_grid)
+                    self._transfer_bandit_state(old_min_prob_bandit_long, old_min_prob_long_grid, sym_state.min_prob_bandit_long, new_min_prob_long_grid)
+                    logger.debug(f"[{symbol}] Transferred state for MinProb Long bandit.")
+                
+                # Check MinProb grid adaptation (Short)
+                best_min_prob_short_arm_idx = int(np.argmax(sym_state.min_prob_bandit_short.sum_rewards / np.maximum(1.0, sym_state.min_prob_bandit_short.counts)))
+                new_min_prob_short_grid = self._refine_grid(
+                    sym_state.min_prob_grid_short_values, best_min_prob_short_arm_idx, ts_cfg.adaptation_refinement_factor,
+                    ts_cfg.min_grid_size, ts_cfg.max_grid_size
+                )
+                if new_min_prob_short_grid != sym_state.min_prob_grid_short_values:
+                    logger.info(f"[{symbol}] Adapting MinProb Short grid. Old: {sym_state.min_prob_grid_short_values} -> New: {new_min_prob_short_grid}")
+                    old_min_prob_bandit_short = sym_state.min_prob_bandit_short
+                    old_min_prob_short_grid = sym_state.min_prob_grid_short_values
+                    sym_state.min_prob_grid_short_values = new_min_prob_short_grid
+                    sym_state.min_prob_bandit_short = ThompsonBandit(
+                        num_arms=len(new_min_prob_short_grid), prior_mean=ts_cfg.prior_mean,
+                        prior_var=ts_cfg.prior_var, min_var=1e-6
+                    )
+                    self._transfer_bandit_state(old_min_prob_bandit_short, old_min_prob_short_grid, sym_state.min_prob_bandit_short, new_min_prob_short_grid)
+                    logger.debug(f"[{symbol}] Transferred state for MinProb Short bandit.")
+                
                 sym_state.min_prob_updates_since_last_adaptation = 0
 
         # 4. Update rule state
@@ -558,10 +634,13 @@ class RiskController:
                 "recent_returns_count": len(sym_state.recent_returns),
                 "atr_bandit_counts": sym_state.atr_bandit.counts.tolist(),
                 "atr_bandit_sum_rewards": sym_state.atr_bandit.sum_rewards.tolist(),
-                "min_prob_bandit_counts": sym_state.min_prob_bandit.counts.tolist(),
-                "min_prob_bandit_sum_rewards": sym_state.min_prob_bandit.sum_rewards.tolist(),
+                "min_prob_bandit_long_counts": sym_state.min_prob_bandit_long.counts.tolist(),
+                "min_prob_bandit_long_sum_rewards": sym_state.min_prob_bandit_long.sum_rewards.tolist(),
+                "min_prob_bandit_short_counts": sym_state.min_prob_bandit_short.counts.tolist(),
+                "min_prob_bandit_short_sum_rewards": sym_state.min_prob_bandit_short.sum_rewards.tolist(),
                 "atr_grid_values": sym_state.atr_grid_values,
-                "min_prob_grid_values": sym_state.min_prob_grid_values,
+                "min_prob_grid_long_values": sym_state.min_prob_grid_long_values,
+                "min_prob_grid_short_values": sym_state.min_prob_grid_short_values,
             }
             all_diagnostics[sym] = sym_diag
         return all_diagnostics
@@ -580,12 +659,19 @@ class RiskController:
             prior_var=ts_cfg.prior_var,
             min_var=1e-6
         )
-        sym_state.min_prob_bandit = ThompsonBandit(
-            num_arms=len(ts_cfg.min_prob_grid),
+        sym_state.min_prob_bandit_long = ThompsonBandit(
+            num_arms=len(ts_cfg.min_prob_grid_long),
             prior_mean=ts_cfg.prior_mean,
             prior_var=ts_cfg.prior_var,
             min_var=1e-6
         )
+        sym_state.min_prob_bandit_short = ThompsonBandit(
+            num_arms=len(ts_cfg.min_prob_grid_short),
+            prior_mean=ts_cfg.prior_mean,
+            prior_var=ts_cfg.prior_var,
+            min_var=1e-6
+        )
+        logger.debug(f"[{symbol}] MinProb Long and Short bandits re-initialized.")
 
         # Reset contextual bandit if enabled
         if getattr(ts_cfg, "contextual_enabled", False) and sym_state.contextual_bandit is not None:
@@ -594,7 +680,8 @@ class RiskController:
 
         # Reset dynamic grids to initial config values
         sym_state.atr_grid_values = list(ts_cfg.atr_grid)
-        sym_state.min_prob_grid_values = list(ts_cfg.min_prob_grid)
+        sym_state.min_prob_grid_long_values = list(ts_cfg.min_prob_grid_long)
+        sym_state.min_prob_grid_short_values = list(ts_cfg.min_prob_grid_short)
 
         # Reset adaptation counters
         sym_state.atr_updates_since_last_adaptation = 0

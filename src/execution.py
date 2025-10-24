@@ -1,5 +1,8 @@
 # src/execution.py
 from __future__ import annotations
+import os
+import copy
+import json
 from dataclasses import dataclass
 import MetaTrader5 as mt5  # type: ignore
 from loguru import logger
@@ -10,8 +13,8 @@ import pandas as pd
 import numpy as np
 from typing import List, Optional, Dict # Import Dict
 # from backtester import SimPosition # Import SimPosition - REMOVED as not used
-import datetime # NEW
-from .notifier import TelegramNotifier # NEW import
+import datetime
+from .notifier import TelegramNotifier
 
 @dataclass
 class OrderResult:
@@ -30,20 +33,21 @@ class ClosedTrade:
     exit_price: float
     entry_time: datetime
     exit_time: datetime
-    profit: float
+    pnl: float
     risk_fraction: float
-    exit_equity: float
     atr: float
     atr_idx: int
     min_prob_idx: int
     entry_auc: float
+    entry_equity: Optional[float] = None
+    exit_equity: Optional[float] = None
     adx: float = 0.0
     macd_diff: float = 0.0
     volatility_10: float = 0.0
     dist_from_ema_200: float = 0.0
 
     def __repr__(self):
-        return f"<ClosedTrade ticket={self.ticket}, profit={self.profit:.2f}>"
+        return f"<ClosedTrade ticket={self.ticket}, pnl={self.pnl:.2f}>"
 
 class Execution:
     """ Handles trade decision & order sending with retries + dry-run. """
@@ -51,54 +55,106 @@ class Execution:
     def __init__(self, ens_per_symbol: Dict[str, Ensemble], risk_manager: RiskManager, mt5_client, dry_run: bool = False, notifier: Optional[TelegramNotifier] = None):
         self.ens_per_symbol = ens_per_symbol # Changed from self.ens = ensemble
         self.risk = risk_manager
-        self.mt5_client = mt5_client # NEW: Store MT5 client
+        self.mt5_client = mt5_client # Store MT5 client
         self.dry_run = dry_run
-        self.notifier = notifier # NEW
+        self.notifier = notifier
         self._open_tickets = {}   # ticket -> dict of trade details from risk.open_positions_cache
         self._seen_closed = set() # to avoid reporting the same trade twice
-        self._last_deal_time = 0  # NEW: Timestamp of the last deal processed
+        self._last_deal_time = 0  # Timestamp of the last deal processed
+        self.state_file = "results/open_positions_state.json" # File to persist open positions state
+        os.makedirs(os.path.dirname(self.state_file), exist_ok=True) # Ensure directory exists
+
+    def _save_open_positions_state(self):
+        """Saves the current open_positions_cache to a JSON file."""
+        try:
+            # Convert datetime objects to ISO format strings for JSON serialization
+            serializable_cache = copy.deepcopy(self.risk.open_positions_cache)
+            for pos_id, details in serializable_cache.items():
+                if "entry_time" in details and isinstance(details["entry_time"], datetime.datetime):
+                    details["entry_time"] = details["entry_time"].isoformat()
+            
+            with open(self.state_file, 'w') as f:
+                json.dump(serializable_cache, f, indent=4)
+            logger.info(f"Open positions state saved to {self.state_file}")
+        except Exception as e:
+            logger.exception(f"Failed to save open positions state: {e}")
+
+    def _load_open_positions_state(self) -> Dict[int, Dict[str, Any]]:
+        """Loads the open_positions_cache from a JSON file."""
+        if not os.path.exists(self.state_file):
+            return {}
+        try:
+            with open(self.state_file, 'r') as f:
+                loaded_state = json.load(f)
+            
+            # Convert ISO format strings back to datetime objects
+            for pos_id, details in loaded_state.items():
+                if "entry_time" in details and isinstance(details["entry_time"], str):
+                    details["entry_time"] = datetime.datetime.fromisoformat(details["entry_time"])
+            logger.info(f"Open positions state loaded from {self.state_file}")
+            return loaded_state
+        except Exception as e:
+            logger.exception(f"Failed to load open positions state: {e}")
+            return {}
+
 
     def reconcile_open_positions_with_mt5(self):
         """
         Queries MT5 for all currently open positions and updates the internal
         open_positions_cache to reflect the ground truth from the broker.
         This is crucial for maintaining state across bot restarts.
+        It attempts to restore detailed information from a saved state.
         """
         logger.info("Reconciling open positions with MT5...")
         try:
-            # 1. Get all open positions from MT5
+            # 1. Load previously saved detailed state for open positions
+            loaded_state = self._load_open_positions_state()
+            
+            # 2. Get all open positions from MT5 (ground truth)
             mt5_open_positions = mt5.positions_get() or []
             
-            # 2. Clear the existing internal cache
+            # 3. Clear the existing internal cache
             self.risk.open_positions_cache.clear()
 
-            # 3. Populate the internal cache with positions from MT5
+            # 4. Populate the internal cache with positions from MT5, prioritizing loaded_state details
             for pos in mt5_open_positions:
                 direction = "long" if pos.type == mt5.POSITION_TYPE_BUY else "short"
                 entry_time_dt = datetime.datetime.fromtimestamp(pos.time, tz=datetime.timezone.utc)
 
-                self.risk.open_positions_cache[pos.ticket] = {
-                    "risk": 0.0, # Cannot infer from MT5 position directly
-                    "ticket": pos.ticket,
-                    "symbol": pos.symbol,
-                    "entry_price": pos.price_open,
-                    "direction": direction,
-                    "lots": pos.volume,
-                    "entry_time": entry_time_dt,
-                    "atr": 0.0, # Placeholder
-                    "entry_auc": 0.5, # Placeholder
-                    "risk_fraction": 0.0, # Placeholder
-                    "entry_equity": 0.0, # Placeholder
-                    "sl": pos.sl,
-                    "tp": pos.tp,
-                    "atr_idx": -1, # Placeholder
-                    "min_prob_idx": -1, # Placeholder
-                    "adx": 0.0, # Placeholder
-                    "macd_diff": 0.0, # Placeholder
-                    "volatility_10": 0.0, # Placeholder
-                    "dist_from_ema_200": 0.0, # Placeholder
-                }
-                logger.info(f"Reconciled open position: Ticket={pos.ticket}, Symbol={pos.symbol}, Direction={direction}, Lots={pos.volume}")
+                # Check if this position was in our previously saved state
+                if pos.ticket in loaded_state:
+                    # Restore full details from loaded state
+                    self.risk.open_positions_cache[pos.ticket] = loaded_state[pos.ticket]
+                    # Ensure entry_time is a datetime object (might be string from JSON)
+                    if isinstance(self.risk.open_positions_cache[pos.ticket]["entry_time"], str):
+                        self.risk.open_positions_cache[pos.ticket]["entry_time"] = datetime.datetime.fromisoformat(self.risk.open_positions_cache[pos.ticket]["entry_time"])
+                    logger.info(f"Reconciled open position (restored from state): Ticket={pos.ticket}, Symbol={pos.symbol}, Direction={direction}, Lots={pos.volume}")
+                else:
+                    # New position or position opened while bot was down, use placeholders
+                    self.risk.open_positions_cache[pos.ticket] = {
+                        "risk": 0.0, # Cannot infer from MT5 position directly, will be updated on next trade decision
+                        "ticket": pos.ticket,
+                        "symbol": pos.symbol,
+                        "entry_price": pos.price_open,
+                        "direction": direction,
+                        "lots": pos.volume,
+                        "entry_time": entry_time_dt,
+                        "atr": 0.0, # Placeholder, will be updated on next trade decision
+                        "entry_auc": 0.5, # Placeholder, will be updated on next trade decision
+                        "risk_fraction": 0.0, # Placeholder, will be updated on next trade decision
+                        "entry_equity": 0.0, # Placeholder, will be updated on next trade decision
+                        "sl": pos.sl,
+                        "tp": pos.tp,
+                        "atr_idx": -1, # Placeholder
+                        "min_prob_idx": -1, # Placeholder
+                        "adx": 0.0, # Placeholder
+                        "macd_diff": 0.0, # Placeholder
+                        "volatility_10": 0.0, # Placeholder
+                        "dist_from_ema_200": 0.0, # Placeholder
+                        "inter_market_feature": 0.0, # Placeholder
+                        "mta_feature": 0.0, # Placeholder
+                    }
+                    logger.info(f"Reconciled open position (new/placeholder): Ticket={pos.ticket}, Symbol={pos.symbol}, Direction={direction}, Lots={pos.volume}")
             
             logger.info(f"Reconciliation complete. {len(self.risk.open_positions_cache)} open positions tracked.")
 
@@ -156,7 +212,8 @@ class Execution:
                 last_exit_price = None
                 for deal in sorted(deals, key=lambda d: d.time):
                     if deal.entry == mt5.DEAL_ENTRY_OUT:
-                        final_profit += deal.profit
+                        # Account for commission and swap explicitly
+                        final_profit += (deal.profit + deal.commission + deal.swap)
                         last_exit_time = deal.time
                         last_exit_price = deal.price
 
@@ -180,13 +237,14 @@ class Execution:
                     exit_price=last_exit_price or 0.0,
                     entry_time=trade_details.get("entry_time"),
                     exit_time=exit_time_dt,
-                    profit=final_profit,
+                    pnl=final_profit,
                     risk_fraction=trade_details.get("risk_fraction", 0.0),
-                    exit_equity=actual_equity,
                     atr=trade_details.get("atr", 0.0),
                     atr_idx=trade_details.get("atr_idx", -1),
                     min_prob_idx=trade_details.get("min_prob_idx", -1),
                     entry_auc=trade_details.get("entry_auc", 0.5),
+                    entry_equity=trade_details.get("entry_equity", 0.0),
+                    exit_equity=actual_equity,
                     adx=trade_details.get("adx", 0.0),
                     macd_diff=trade_details.get("macd_diff", 0.0),
                     volatility_10=trade_details.get("volatility_10", 0.0),
@@ -201,6 +259,8 @@ class Execution:
         except Exception as e:
             logger.exception(f"Failed to check/reconcile closed trades: {e}")
         
+        # Sort closed trades by exit_time before returning
+        closed_trades_list.sort(key=lambda trade: trade.exit_time)
         return closed_trades_list
 
     def trade(self, symbol: str, X: pd.DataFrame | None = None, atr: float | None = None, auc_score: float | None = 0.5, total_open_risk: float = 0.0, sl_mult: Optional[float] = None, tp_mult: Optional[float] = None, atr_idx: int = -1, min_prob_idx: int = -1) -> OrderResult:
@@ -259,12 +319,24 @@ class Execution:
         if pip_value is None:
             pip_size = getattr(symbol_info, "point", None)
             contract_size = getattr(symbol_info, "trade_contract_size", 1.0)
-            if pip_size and contract_size:
-                pip_value = pip_size * contract_size
+            
+            if pip_size is None or pip_size <= 0:
+                error_msg = f"CRITICAL: symbol_info.point is invalid ({pip_size}) for {symbol}. Cannot calculate position size. Please set pip_value in config.yaml under symbol_overrides."
+                logger.critical(error_msg)
+                if self.notifier: self.notifier.send_message(error_msg, level="CRITICAL")
+                return OrderResult(False, None, "Invalid pip_size")
+            
+            if contract_size is None or contract_size <= 0:
+                error_msg = f"CRITICAL: symbol_info.trade_contract_size is invalid ({contract_size}) for {symbol}. Cannot calculate position size. Please set pip_value in config.yaml under symbol_overrides."
+                logger.critical(error_msg)
+                if self.notifier: self.notifier.send_message(error_msg, level="CRITICAL")
+                return OrderResult(False, None, "Invalid contract_size")
+
+            pip_value = pip_size * contract_size
         
         # 3. Final check and fail-safe
         if pip_value is None or pip_value <= 0:
-            error_msg = f"CRITICAL: Could not determine pip_value for {symbol}. Cannot calculate position size. Please set it in config.yaml under symbol_overrides."
+            error_msg = f"CRITICAL: Could not determine pip_value for {symbol} after all attempts. Cannot calculate position size. Please set it in config.yaml under symbol_overrides."
             logger.critical(error_msg)
             if self.notifier: self.notifier.send_message(error_msg, level="CRITICAL")
             return OrderResult(False, None, "Invalid pip_value")
@@ -341,7 +413,7 @@ class Execution:
             self.risk.open_positions_cache[position_id] = { # Use position_id as key
                 "risk": float(risk_amt), # Store the dollar amount at risk
                 "ticket": position_id, # Store position_id for consistency
-                "symbol": symbol, # NEW: Store symbol
+                "symbol": symbol, # Store symbol
                 "entry_price": price,
                 "direction": direction,
                 "lots": float(lots),
@@ -358,7 +430,7 @@ class Execution:
                 "macd_diff": float(X["macd_diff"].iloc[-1]) if "macd_diff" in X.columns else 0.0,
                 "volatility_10": float(X["volatility_10"].iloc[-1]) if "volatility_10" in X.columns else 0.0,
                 "dist_from_ema_200": float(X["dist_from_ema_200"].iloc[-1]) if "dist_from_ema_200" in X.columns else 0.0,
-                # NEW: Add inter_market_feature and mta_feature to open_positions_cache
+                # Add inter_market_feature and mta_feature to open_positions_cache
                 "inter_market_feature": float(X["inter_market_feature"].iloc[-1]) if "inter_market_feature" in X.columns else 0.0,
                 "mta_feature": float(X["mta_feature"].iloc[-1]) if "mta_feature" in X.columns else 0.0,
             }

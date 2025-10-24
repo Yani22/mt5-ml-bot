@@ -44,6 +44,7 @@ class FeatureCfg:
     rsi_os_level: int = 30
     adx_trend_thresh: int = 25
     timeframe_minutes: int = 5
+    min_pct_change: float = 0.0001 # New: Minimum percentage change for label generation
 
 @dataclass
 class RiskCfg:
@@ -124,7 +125,8 @@ class FetchCfg:
 class ThompsonSamplingCfg:
     enabled: bool = True
     atr_grid: List[float] = field(default_factory=lambda: [0.6, 0.8, 1.0, 1.25, 1.5])
-    min_prob_grid: List[float] = field(default_factory=lambda: [0.51, 0.55, 0.60])
+    min_prob_grid_long: List[float] = field(default_factory=lambda: [0.51, 0.55, 0.60])
+    min_prob_grid_short: List[float] = field(default_factory=lambda: [0.51, 0.55, 0.60])
     prior_mean: float = 0.0
     prior_var: float = 1.0
     obs_var: float = 1.0

@@ -10,11 +10,11 @@ import optuna
 import numpy as np # Added numpy import
 
 from src.config import Cfg
-from src.features import FeatureConfig
+from src.features import FeatureCfg
 from src.risk import RiskManager
 from src.utils import get_training_data, load_ensemble, save_ensemble, setup_logging, safe_retrain_ensemble, load_optuna_params
 from src.trade import SimPosition
-from src.risk_controller import RiskController # NEW
+from src.risk_controller import RiskController
 
 # NOTE: For backtesting, we assume a standard pip size. This is a simplification.
 # For a more precise backtest, this could be fetched per-symbol.
@@ -44,18 +44,19 @@ class HybridBacktester:
         self.initial_equity = cfg.initial_equity # Store initial equity for drawdown pruning
         self.positions: list[SimPosition] = []
         self.equity_curve = []
-        self.bar_counters = {sym: 0 for sym in cfg.symbols}
         self.risk_manager = RiskManager(cfg)
-        self.risk_controller = RiskController(cfg) # NEW: Instantiate RiskController
-        self.ts_param_history = [] # NEW: To store Thompson Sampling parameter evolution
+        self.bar_counters = {sym: 0 for sym in cfg.symbols}
+        self.risk_controller = RiskController(cfg) # Instantiate RiskController
+        self.ts_param_history = [] # To store Thompson Sampling parameter evolution
         self.save_state_every_bars = getattr(cfg, "save_ts_state_every_bars", 500)
-        ts_ts = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        ts_ts = datetime.datetime.now(datetime.UTC).strftime("%Y%m%dT%H%M%SZ")
         self.backtest_ts_state_file = f"results/ts_risk_controller_state_backtest_{ts_ts}.json"
         self.ts_history_csv = f"results/ts_param_evolution_backtest_{ts_ts}.csv"
         os.makedirs("results", exist_ok=True)
         
         logger.info(f"Initializing backtester with starting equity: {self.equity}")
-        self.ens_per_symbol = {sym: load_ensemble(cfg, sym) for sym in cfg.symbols}
+        self.ens_per_symbol_long = {sym: load_ensemble(cfg, sym, "long") for sym in cfg.symbols}
+        self.ens_per_symbol_short = {sym: load_ensemble(cfg, sym, "short") for sym in cfg.symbols}
         
         self.cost_in_points = getattr(cfg.risk, 'transaction_cost_pips', 0.0) * PIP_SIZE_ASSUMPTION
         if self.cost_in_points > 0:
@@ -99,7 +100,7 @@ class HybridBacktester:
 
     def _update_positions(self, sym, row):
         """Check open positions for SL/TP, calculate PnL, and update equity."""
-        closed_trades_this_cycle = [] # NEW: Collect trades closed in this cycle
+        closed_trades_this_cycle = [] # Collect trades closed in this cycle
         for pos in [p for p in self.positions if p.symbol==sym and p.status=="open"]:
             price = row["close"]
             exit_reason = None
@@ -121,15 +122,15 @@ class HybridBacktester:
                 net_pnl = gross_pnl - transaction_cost
                 
                 # Pass current equity to pos.close for reward normalization
-                pos.close(price, row.name, net_pnl, self.equity + net_pnl) # NEW: Pass exit_equity
+                pos.close(price, row.name, net_pnl, self.equity + net_pnl) # Pass exit_equity
                 self.equity += net_pnl
-                closed_trades_this_cycle.append(pos) # NEW: Add to list
+                closed_trades_this_cycle.append(pos) # Add to list
                 logger.info(
                     f"[{sym}] Closed {pos.direction} position at {price:.5f} due to {exit_reason}. "
                     f"Entry: {pos.entry_price:.5f}, PnL: {net_pnl:.2f}, Equity: {self.equity:.2f}"
                 )
         
-        # NEW: Update RiskController for each closed trade
+        # Update RiskController for each closed trade
         for trade in closed_trades_this_cycle:
             self.risk_controller.update_after_trade(sym, trade)
     
@@ -143,7 +144,7 @@ class HybridBacktester:
             # --- FIX: Guard against retraining with insufficient data ---
             # A safe threshold to ensure enough samples for cross-validation.
             # This value should be comfortably larger than the sum of CV splits and min samples per model.
-            MIN_BARS_FOR_RETRAIN = 0
+            MIN_BARS_FOR_RETRAIN = 100
             if window_size < MIN_BARS_FOR_RETRAIN:
                 logger.warning(f"[{sym}] Skipping retraining at {bar_time}: not enough data in window ({window_size} < {MIN_BARS_FOR_RETRAIN} bars).")
                 return self.ens_per_symbol[sym]
@@ -166,7 +167,8 @@ class HybridBacktester:
 
     def _process_bar(self, sym: str, data: pd.DataFrame, X: pd.DataFrame, y: pd.DataFrame, trial: optuna.Trial | None = None, pruning_interval: int = 0):
         """Processes each bar of data for a given symbol."""
-        ens = self.ens_per_symbol[sym]
+        ens_long = self.ens_per_symbol_long[sym]
+        ens_short = self.ens_per_symbol_short[sym]
         risk_mgr = self.risk_manager
 
         logger.info(f"Processing {len(data)} bars for {sym}...")
@@ -190,14 +192,15 @@ class HybridBacktester:
                     risk_mgr._trigger_cooldown(now=now_utc)
 
             # --- Consecutive Loss Check ---
-            max_losses = getattr(risk_mgr.watchdog_cfg, "max_consecutive_losses", None)
-            if max_losses is not None and max_losses > 0:
-                consecutive_losses = self._count_consecutive_losses_backtest()
-                if consecutive_losses >= max_losses:
-                    if risk_mgr.cooldown_until is None:
-                        logger.warning(f"[{sym}][{bar_time}] Watchdog: consecutive losses {consecutive_losses} >= threshold {max_losses}. Triggering cooldown.")
-                        now_utc = bar_time.to_pydatetime().replace(tzinfo=datetime.timezone.utc)
-                        risk_mgr._trigger_cooldown(now=now_utc)
+            if risk_mgr.watchdog_cfg.enabled:
+                max_losses = getattr(risk_mgr.watchdog_cfg, "max_consecutive_losses", None)
+                if max_losses is not None and max_losses > 0:
+                    consecutive_losses = self._count_consecutive_losses_backtest()
+                    if consecutive_losses >= max_losses:
+                        if risk_mgr.cooldown_until is None:
+                            logger.warning(f"[{sym}][{bar_time}] Watchdog: consecutive losses {consecutive_losses} >= threshold {max_losses}. Triggering cooldown.")
+                            now_utc = bar_time.to_pydatetime().replace(tzinfo=datetime.timezone.utc)
+                            risk_mgr._trigger_cooldown(now=now_utc)
 
             now_utc = bar_time.to_pydatetime().replace(tzinfo=datetime.timezone.utc)
             if risk_mgr.cooldown_active(now=now_utc):
@@ -219,41 +222,18 @@ class HybridBacktester:
                 continue
 
             # Retrain if needed
-            ens = self._perform_retraining(sym, bar_time, i, data, X)
-
-            # Check ensemble confidence before trading
-            if ens.ensemble_cv_auc_ is not None and ens.ensemble_cv_auc_ < risk_mgr.risk_cfg.min_ensemble_auc:
-                if sym not in self.logged_low_confidence:
-                    logger.info(f"[{sym}] Trading blocked due to low ensemble confidence (AUC={ens.ensemble_cv_auc_:.4f} < {risk_mgr.risk_cfg.min_ensemble_auc:.4f}).")
-                    self.logged_low_confidence.add(sym)
-                self.equity_curve.append((bar_time, self.equity))
-                # --- Pruning Check (if in tuning mode) ---
-                if trial and pruning_interval > 0 and (i % pruning_interval == 0) and self.cfg.symbols.index(sym) == 0:
-                    current_returns = pd.Series([eq for _, eq in self.equity_curve]).pct_change().dropna()
-                    if not current_returns.empty:
-                        intermediate_sharpe = 0.0
-                        if current_returns.std() != 0:
-                            timeframe_minutes = self.cfg.timeframe_minutes()
-                            if timeframe_minutes is not None:
-                                annualization_factor = np.sqrt(252 * (24 * 60 / timeframe_minutes))
-                                intermediate_sharpe = current_returns.mean() / current_returns.std() * annualization_factor
-                        trial.report(intermediate_sharpe, i)
-                        if trial.should_prune():
-                            raise optuna.TrialPruned()
-                continue
-            else:
-                if sym in self.logged_low_confidence:
-                    self.logged_low_confidence.remove(sym)
+            # ens = self._perform_retraining(sym, bar_time, i, data, X)
 
             # Decide on new trades
-            prob_up = ens.predict_proba(last_features).iloc[0]
+            prob_long = ens_long.predict_proba(last_features).iloc[0]
+            prob_short = ens_short.predict_proba(last_features).iloc[0]
 
-            # NEW: Get dynamic risk parameters from RiskController
+            # Get dynamic risk parameters from RiskController
             context = {
                 "vol": atr,
                 "equity": self.equity,
                 "peak_equity": self.risk_manager.equity_peak,
-                "ensemble_auc": ens.ensemble_cv_auc_, # Pass current model confidence
+                "ensemble_auc": ens_long.ensemble_cv_auc_, # Pass current model confidence
                 "adx": float(last_features["adx"].iloc[0]) if "adx" in last_features.columns else 0.0,
                 "macd_diff": float(last_features["macd_diff"].iloc[0]) if "macd_diff" in last_features.columns else 0.0,
                 "volatility_10": float(last_features["volatility_10"].iloc[0]) if "volatility_10" in last_features.columns else 0.0,
@@ -267,18 +247,24 @@ class HybridBacktester:
             min_prob_long = dynamic_risk_params["min_prob_long"]
             min_prob_short = dynamic_risk_params["min_prob_short"]
             atr_idx = dynamic_risk_params["atr_idx"]
-            min_prob_idx = dynamic_risk_params["min_prob_idx"]
+            min_prob_long_idx = dynamic_risk_params.get("min_prob_long_idx", -1)
+            min_prob_short_idx = dynamic_risk_params.get("min_prob_short_idx", -1)
 
-            if ens.best_threshold_ is not None:
-                threshold = ens.best_threshold_
-                direction = "long" if prob_up >= threshold else "short"
+            direction = None
+            if prob_long >= min_prob_long and ens_long.ensemble_cv_auc_ >= risk_mgr.risk_cfg.min_ensemble_auc:
+                direction = "long"
+            elif prob_short >= min_prob_short and ens_short.ensemble_cv_auc_ >= risk_mgr.risk_cfg.min_ensemble_auc:
+                direction = "short"
             else:
-                direction = "long" if prob_up >= min_prob_long else "short" if (1 - prob_up) >= min_prob_short else None
+                if prob_long >= min_prob_long and ens_long.ensemble_cv_auc_ < risk_mgr.risk_cfg.min_ensemble_auc:
+                    logger.info(f"[{sym}] Long trade blocked due to low ensemble confidence (AUC={ens_long.ensemble_cv_auc_:.4f} < {risk_mgr.risk_cfg.min_ensemble_auc:.4f}).")
+                if prob_short >= min_prob_short and ens_short.ensemble_cv_auc_ < risk_mgr.risk_cfg.min_ensemble_auc:
+                    logger.info(f"[{sym}] Short trade blocked due to low ensemble confidence (AUC={ens_short.ensemble_cv_auc_:.4f} < {risk_mgr.risk_cfg.min_ensemble_auc:.4f}).")
 
             if direction:
-                total_open_risk = sum(p.risk_fraction for p in self.positions if p.status == "open")
+                total_open_risk = sum(p.entry_equity * p.risk_fraction for p in self.positions if p.status == "open")
                 risk_per_trade = risk_mgr._get_dynamic_value(
-                    risk_mgr.risk_cfg.dynamic_risk, ens.ensemble_cv_auc_, getattr(risk_mgr.risk_cfg, "risk_per_trade", 0.005)
+                    risk_mgr.risk_cfg.dynamic_risk, ens_long.ensemble_cv_auc_, getattr(risk_mgr.risk_cfg, "risk_per_trade", 0.005)
                 )
                 max_risk_allowed = max(0.0, float(risk_mgr.risk_cfg.max_portfolio_risk) - float(total_open_risk))
                 effective_risk = min(risk_per_trade, max_risk_allowed)
@@ -286,41 +272,52 @@ class HybridBacktester:
                 exploration_mult = dynamic_risk_params.get("exploration_risk_mult", 1.0)
                 effective_risk *= float(exploration_mult)
 
+                # Determine pip_value for position sizing
+                pip_value = None
+                if sym in self.cfg.symbol_overrides and "pip_value" in self.cfg.symbol_overrides[sym]:
+                    pip_value = self.cfg.symbol_overrides[sym]["pip_value"]
+                if pip_value is None:
+                    pip_value = PIP_SIZE_ASSUMPTION * CONTRACT_SIZE
+
                 lots = risk_mgr.position_size(
-                    self.equity, atr, 10.0, PIP_SIZE_ASSUMPTION, ens.ensemble_cv_auc_, total_open_risk
+                    self.equity, atr, pip_value, PIP_SIZE_ASSUMPTION, ens_long.ensemble_cv_auc_, total_open_risk
                 )
 
                 if lots > 0:
                     price = current_row["close"]
                     # Use dynamic SL/TP multipliers
-                    sl, tp = risk_mgr.stop_targets(price, atr, direction, ens.ensemble_cv_auc_, sym, sl_mult=atr_multiplier_sl, tp_mult=atr_multiplier_tp)
+                    sl, tp = risk_mgr.stop_targets(price, atr, direction, ens_long.ensemble_cv_auc_, sym, sl_mult=atr_multiplier_sl, tp_mult=atr_multiplier_tp)
                     pos = SimPosition(
-                        sym, direction, lots, price, sl, tp, bar_time, atr, ens.ensemble_cv_auc_, effective_risk,
-                        atr_idx=atr_idx, min_prob_idx=min_prob_idx # NEW: Store discrete choices
+                        sym, direction, lots, price, sl, tp, bar_time, atr, ens_long.ensemble_cv_auc_, effective_risk,
+                        entry_equity=self.equity,
+                        atr_idx=atr_idx,
+                        min_prob_long_idx=min_prob_long_idx,
+                        min_prob_short_idx=min_prob_short_idx # Store discrete choices
                     )
                     self.positions.append(pos)
                     logger.info(
-                        f"[{sym}][{bar_time}] Opened {direction} position at {price:.5f}. "
-                        f"Lots: {lots:.2f}, SL: {sl:.5f}, TP: {tp:.5f}, AUC: {ens.ensemble_cv_auc_:.4f}, Risk: {effective_risk:.4f}"
+                        f"[{sym}][{bar_time}] Opened {direction} position at {price:.5f}. "f"Lots: {lots:.2f}, SL: {sl:.5f}, TP: {tp:.5f}, AUC: {ens_long.ensemble_cv_auc_:.4f}, Risk: {effective_risk:.4f}"
                     )
+                    # Log chosen parameters and diagnostics for Thompson Sampling analysis
+                    ts_diagnostics = self.risk_controller.diagnostics()
+                    self.ts_param_history.append({
+                        "bar_time": bar_time,
+                        "symbol": sym,
+                        "atr_idx": atr_idx,
+                        "min_prob_long_idx": min_prob_long_idx,
+                        "min_prob_short_idx": min_prob_short_idx,
+                        "diagnostics": ts_diagnostics # Store full diagnostics for later parsing
+                    })
                 else:
                     logger.info(f"[{sym}] Trade skipped due to risk limits or position size zero.")
             else:
-                logger.info(f"[{sym}] No trade signal. Probs: (Up: {prob_up:.3f}, Down: {1-prob_up:.3f}) ")
+                logger.info(f"[{sym}] No trade signal. Probs: (Long: {prob_long:.3f}, Short: {prob_short:.3f}) ")
 
             self.equity_curve.append((bar_time, self.equity))
 
 
 
-            # Log chosen parameters and diagnostics for Thompson Sampling analysis
-            ts_diagnostics = self.risk_controller.diagnostics()
-            self.ts_param_history.append({
-                "bar_time": bar_time,
-                "symbol": sym,
-                "atr_idx": atr_idx,
-                "min_prob_idx": min_prob_idx,
-                "diagnostics": ts_diagnostics # Store full diagnostics for later parsing
-            })
+
             
             # Periodic persistence of Thompson state + CSV (avoid overwriting prod state)
             total_bars = sum(self.bar_counters.values())
@@ -356,11 +353,24 @@ class HybridBacktester:
 
         # Generate quantstats report
         try:
-            returns = eq_df["equity"].pct_change().dropna()
+            trades = [p for p in self.positions]
+            long_trades = [t for t in trades if t.direction == "long"]
+            short_trades = [t for t in trades if t.direction == "short"]
+            logger.info(f"Number of long trades: {len(long_trades)}")
+            logger.info(f"Number of short trades: {len(short_trades)}")
+
+            returns = pd.Series([t.pnl for t in trades if t.pnl is not None], index=[t.exit_time for t in trades if t.pnl is not None])
             returns.index = pd.to_datetime(returns.index)
-            report_path = f"results/report_{symbol_str}_hybrid_adaptive.html"
-            qs.reports.html(returns, output=report_path, title=f"{symbol_str} Hybrid Adaptive Strategy")
-            logger.info(f"QuantStats report saved to {report_path}")
+            
+            if not returns.empty:
+                try:
+                    report_path = f"results/report_{symbol_str}_hybrid_adaptive.html"
+                    qs.reports.html(returns, output=report_path, title=f"{symbol_str} Hybrid Adaptive Strategy")
+                    logger.info(f"QuantStats report saved to {report_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to generate QuantStats report: {e}")
+            else:
+                logger.warning("Skipping QuantStats report generation: No returns data available.")
         except Exception as e:
             logger.exception(f"Failed to generate QuantStats report: {e}")
 
@@ -411,47 +421,64 @@ class HybridBacktester:
 
     def run(self, trial: optuna.Trial | None = None, pruning_interval: int = 0):
         logger.info("=== Starting Hybrid Adaptive Backtest ===")
+        try:
+            for sym in self.cfg.symbols:
+                logger.info(f"--- Backtesting Symbol: {sym} ---")
+                
+                # Load best feature params from optuna study
+                optuna_params = load_optuna_params(sym, self.cfg)
+                feature_params = optuna_params.get('features', {}) if optuna_params else {}
+                feature_cfg = FeatureCfg(**feature_params)
 
-        for sym in self.cfg.symbols:
-            logger.info(f"--- Backtesting Symbol: {sym} ---")
-            
-            # Load best feature params from optuna study
-            optuna_params = load_optuna_params(sym)
-            feature_params = optuna_params.get('features', {}) if optuna_params else {}
-            feature_cfg = FeatureConfig(**feature_params)
+                # Load context data
+                from src.data_manager import DataManager
+                dm = DataManager(self.cfg)
+                mta_df = None
+                if self.cfg.context_features.mta.enabled:
+                    mta_df = dm.load_local_history(sym, self.cfg.context_features.mta.timeframe)
+                inter_market_df = None
+                if self.cfg.context_features.inter_market.enabled:
+                    im_sym = self.cfg.context_features.inter_market.symbol
+                    inter_market_df = dm.load_local_history(im_sym, self.cfg.timeframe)
 
-            data, X, y = get_training_data(self.cfg, sym, feature_cfg=feature_cfg, source=self.cfg.data_source)
-            if data.empty:
-                logger.warning(f"No data for {sym}, skipping.")
-                continue
+                data, X, y = get_training_data(self.cfg, sym, feature_cfg=feature_cfg, source=self.cfg.data_source, min_pct_change=feature_cfg.min_pct_change, mta_df=mta_df, inter_market_df=inter_market_df)
+                if data.empty:
+                    logger.warning(f"No data for {sym}, skipping.")
+                    continue
 
-            self._process_bar(sym, data, X, y, trial, pruning_interval)
+                self._process_bar(sym, data, X, y, trial, pruning_interval)
 
-            logger.info(f"--- Completed Backtest for Symbol: {sym} ---")
+                logger.info(f"--- Completed Backtest for Symbol: {sym} ---")
 
-            # --- Close any positions left open for the current symbol ---
-            logger.info(f"Closing any remaining open positions for {sym}...")
-            for pos in [p for p in self.positions if p.symbol == sym and p.status == "open"]:
-                last_row = data.iloc[-1]
-                last_price = last_row["close"]
-                gross_pnl = ((last_price - pos.entry_price) * pos.lots * CONTRACT_SIZE) if pos.direction == "long" else ((pos.entry_price - last_price) * pos.lots * CONTRACT_SIZE)
-                transaction_cost = self.cost_in_points * pos.lots * CONTRACT_SIZE
-                net_pnl = gross_pnl - transaction_cost
+                # --- Close any positions left open for the current symbol ---
+                logger.info(f"Closing any remaining open positions for {sym}...")
+                for pos in [p for p in self.positions if p.symbol == sym and p.status == "open"]:
+                    last_row = data.iloc[-1]
+                    last_price = last_row["close"]
+                    gross_pnl = ((last_price - pos.entry_price) * pos.lots * CONTRACT_SIZE) if pos.direction == "long" else ((pos.entry_price - last_price) * pos.lots * CONTRACT_SIZE)
+                    transaction_cost = self.cost_in_points * pos.lots * CONTRACT_SIZE
+                    net_pnl = gross_pnl - transaction_cost
 
-                pos.close(last_price, last_row.name, net_pnl, self.equity + net_pnl)
-                self.equity += net_pnl
-                logger.info(
-                    f"[{pos.symbol}] Force-closed open {pos.direction} position at final price {last_price:.5f}. "
-                    f"PnL: {net_pnl:.2f}, Final Equity: {self.equity:.2f}"
-                )
-
+                    pos.close(last_price, last_row.name, net_pnl, self.equity + net_pnl)
+                    self.equity += net_pnl
+                    logger.info(
+                        f"[{pos.symbol}] Force-closed open {pos.direction} position at final price {last_price:.5f}. "
+                        f"PnL: {net_pnl:.2f}, Final Equity: {self.equity:.2f}"
+                    )
+        except KeyboardInterrupt:
+            logger.warning("Backtest interrupted by user. Generating results for completed portion...")
+        
         return self._generate_results()
 
 if __name__ == "__main__":
+    import numpy as np
+    import random
+    np.random.seed(42)
+    random.seed(42)
     cfg = Cfg.from_yaml("config.yaml")
     setup_logging(level=cfg.logging["level"], to_file=cfg.logging["to_file"], rotate=cfg.logging["rotate"], retention=cfg.logging["retention"])
     
-    cfg.thompson_sampling.state_file = f"ts_risk_controller_state_backtest_{datetime.datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}.json"
+    cfg.thompson_sampling.state_file = f"ts_risk_controller_state_backtest_{datetime.datetime.now(datetime.UTC).strftime('%Y%m%dT%H%M%SZ')}.json"
 
     
     bt = HybridBacktester(cfg)

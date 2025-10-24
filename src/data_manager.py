@@ -10,7 +10,8 @@ from typing import Optional, Tuple
 import datetime
 
 from src.config import Cfg
-from src.features import FeatureConfig, build_features, make_labels
+from src.features import FeatureCfg, build_features
+from src.labels import generate_labels
 
 def ensure_dir(path: str):
     if path is None:
@@ -133,7 +134,7 @@ class DataManager:
         else:
             logger.debug(f"[{symbol}] Local history OK ({len(current)} rows).")
 
-    def fetch_live(self, symbol: str, feature_cfg: FeatureConfig) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    def fetch_live(self, symbol: str, feature_cfg: FeatureConfig, min_pct_change: float) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         # 1. Fetch latest N bars for feature calculation lookback
         # Use history_bars as a safe lookback for feature calculation
         lookback_bars = self.cfg.history_bars 
@@ -148,62 +149,89 @@ class DataManager:
         if data.empty:
             return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-        X, y = self._build_features_and_labels(data, feature_cfg, symbol)
+        # Load MTA data if enabled
+        mta_df = None
+        if self.cfg.context_features.mta.enabled:
+            mta_df = self.load_local_history(symbol, self.cfg.context_features.mta.timeframe, count=lookback_bars)
+            if mta_df.empty:
+                logger.warning(f"[{symbol}] No MTA data loaded for timeframe {self.cfg.context_features.mta.timeframe}. Disabling MTA features.")
+                self.cfg.context_features.mta.enabled = False # Temporarily disable to prevent errors
+                mta_df = None
+            else:
+                logger.info(f"[{symbol}] Successfully loaded MTA data for timeframe {self.cfg.context_features.mta.timeframe}.")
+
+        # Load Inter-Market data if enabled
+        inter_market_df = None
+        if self.cfg.context_features.inter_market.enabled:
+            im_sym = self.cfg.context_features.inter_market.symbol
+            inter_market_df = self.load_local_history(im_sym, self.cfg.timeframe, count=lookback_bars)
+            if inter_market_df.empty:
+                logger.warning(f"[{symbol}] No Inter-Market data loaded for symbol {im_sym}. Disabling Inter-Market features.")
+                self.cfg.context_features.inter_market.enabled = False # Temporarily disable to prevent errors
+                inter_market_df = None
+            else:
+                logger.info(f"[{symbol}] Successfully loaded Inter-Market data for symbol {im_sym}.")
+
+        X, y = self._build_features_and_labels(data, feature_cfg, symbol, min_pct_change, mta_df=mta_df, inter_market_df=inter_market_df)
+
+        # Align X, y, and data by index
+        common_idx = X.index.intersection(y.index)
+        X = X.loc[common_idx]
+        y = y.loc[common_idx]
+        data = data.loc[common_idx] # Align data here
+
         return data, X, y
 
-    def load_cached(self, symbol: str, feature_cfg: FeatureConfig, count: Optional[int] = None) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    def load_cached(self, symbol: str, feature_cfg: FeatureConfig, count: Optional[int] = None, min_pct_change: float = 0.0) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         data = self.load_local_history(symbol, self.cfg.timeframe, count=count)
         if data.empty:
             return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-        X, y = self._build_features_and_labels(data, feature_cfg, symbol)
+        # Load MTA data if enabled
+        mta_df = None
+        if self.cfg.context_features.mta.enabled:
+            mta_df = self.load_local_history(symbol, self.cfg.context_features.mta.timeframe, count=count)
+            if mta_df.empty:
+                logger.warning(f"[{symbol}] No MTA data loaded for timeframe {self.cfg.context_features.mta.timeframe}. Disabling MTA features.")
+                self.cfg.context_features.mta.enabled = False # Temporarily disable to prevent errors
+                mta_df = None
+            else:
+                logger.info(f"[{symbol}] Successfully loaded MTA data for timeframe {self.cfg.context_features.mta.timeframe}.")
+
+        # Load Inter-Market data if enabled
+        inter_market_df = None
+        if self.cfg.context_features.inter_market.enabled:
+            im_sym = self.cfg.context_features.inter_market.symbol
+            inter_market_df = self.load_local_history(im_sym, self.cfg.timeframe, count=count)
+            if inter_market_df.empty:
+                logger.warning(f"[{symbol}] No Inter-Market data loaded for symbol {im_sym}. Disabling Inter-Market features.")
+                self.cfg.context_features.inter_market.enabled = False # Temporarily disable to prevent errors
+                inter_market_df = None
+            else:
+                logger.info(f"[{symbol}] Successfully loaded Inter-Market data for symbol {im_sym}.")
+
+        X, y = self._build_features_and_labels(data, feature_cfg, symbol, min_pct_change, mta_df=mta_df, inter_market_df=inter_market_df)
+
+        # Align X, y, and data by index
+        common_idx = X.index.intersection(y.index)
+        X = X.loc[common_idx]
+        y = y.loc[common_idx]
+        data = data.loc[common_idx] # Align data here
+
+        logger.debug(f"[{symbol}] load_cached returning X with shape: {X.shape}")
+
         return data, X, y
 
-    def _build_features_and_labels(self, data: pd.DataFrame, feature_cfg: FeatureConfig, symbol: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        # This can be a shared method for both live and cached data loading
-        mta_df = None
-        inter_market_df = None
-
-        # Fetch MTA data if enabled
-        if self.cfg.context_features.mta.enabled:
-            mta_timeframe = self.cfg.context_features.mta.timeframe
-            # Fetch enough bars for MTA lookback (e.g., ema_period, rsi_period)
-            mta_lookback = max(self.cfg.context_features.mta.ema_period, self.cfg.context_features.mta.rsi_period) * 2 # A bit extra
-            
-            if self.cfg.data_source == "csv":
-                mta_df = self.load_local_history(symbol, mta_timeframe, count=mta_lookback)
-            elif self.cfg.data_source == "mt5":
-                mta_df = self._fetch_bars_from_mt5_chunked(symbol, mta_timeframe, mta_lookback)
-            else:
-                raise ValueError(f"Unknown data source: {self.cfg.data_source}")
-
-            if mta_df.empty:
-                logger.warning(f"[{symbol}] No MTA data fetched for timeframe {mta_timeframe}.")
-                mta_df = None
-
-        # Fetch Inter-Market data if enabled
-        if self.cfg.context_features.inter_market.enabled:
-            im_symbol = self.cfg.context_features.inter_market.symbol
-            im_lags = max(self.cfg.context_features.inter_market.roc_lags) if self.cfg.context_features.inter_market.roc_lags else 1
-            im_lookback = im_lags * 2 # A bit extra
-            
-            if self.cfg.data_source == "csv":
-                inter_market_df = self.load_local_history(im_symbol, self.cfg.timeframe, count=im_lookback)
-            elif self.cfg.data_source == "mt5":
-                inter_market_df = self._fetch_bars_from_mt5_chunked(im_symbol, self.cfg.timeframe, im_lookback)
-            else:
-                raise ValueError(f"Unknown data source: {self.cfg.data_source}")
-
-            if inter_market_df.empty:
-                logger.warning(f"[{symbol}] No Inter-Market data fetched for symbol {im_symbol}.")
-                inter_market_df = None
-
-        X = build_features(data.copy(), feature_cfg, self.cfg, symbol)
-        y = make_labels(data.copy(), self.cfg.prediction_horizon)
+    def _build_features_and_labels(self, df: pd.DataFrame, feature_cfg: FeatureCfg, symbol: str, min_pct_change: float, mta_df: pd.DataFrame | None = None, inter_market_df: pd.DataFrame | None = None) -> Tuple[pd.DataFrame, pd.Series]:
+        # Build features and labels
+        X = build_features(df.copy(), feature_cfg, self.cfg, symbol=symbol, mta_df=mta_df, inter_market_df=inter_market_df)
+        y = generate_labels(df, self.cfg.prediction_horizon, min_pct_change)
 
         # Align X and y by index
-        aligned_idx = X.index.intersection(y.index)
-        X = X.loc[aligned_idx]
-        y = y.loc[aligned_idx]
+        common_idx = X.index.intersection(y.index)
+        X = X.loc[common_idx]
+        y = y.loc[common_idx]
+
+        logger.debug(f"[{symbol}] _build_features_and_labels returning X with shape: {X.shape}")
 
         return X, y

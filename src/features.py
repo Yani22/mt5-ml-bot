@@ -3,19 +3,7 @@ import pandas as pd
 import numpy as np
 import ta
 from loguru import logger
-
-class FeatureConfig:
-    def __init__(self, rsi_period=14, ema_fast=12, ema_slow=26, window_vol=20, roc_lags=(1,3,5,10), adx_period=14, rsi_ob_level=70, rsi_os_level=30, adx_trend_thresh=25, timeframe_minutes=5):
-        self.rsi_period = rsi_period
-        self.ema_fast = ema_fast
-        self.ema_slow = ema_slow
-        self.window_vol = window_vol
-        self.roc_lags = list(roc_lags)
-        self.adx_period = adx_period
-        self.rsi_ob_level = rsi_ob_level
-        self.rsi_os_level = rsi_os_level
-        self.adx_trend_thresh = adx_trend_thresh
-        self.timeframe_minutes = timeframe_minutes
+from src.config import FeatureCfg # Import FeatureConfig from src.config
 
 def add_contextual_features(df: pd.DataFrame, mta_df: pd.DataFrame = None, inter_market_df: pd.DataFrame = None, mta_cfg: "MtaCfg" = None, im_cfg: "InterMarketCfg" = None) -> pd.DataFrame:
     """
@@ -107,9 +95,26 @@ def build_static_features(df: pd.DataFrame, symbol: str = None, pa_cfg: "PriceAc
         X['bars_since_high'] = is_new_high.cumsum().groupby((is_new_high).cumsum()).cumcount()
         X['bars_since_low'] = is_new_low.cumsum().groupby((is_new_low).cumsum()).cumcount()
 
+    # --- New Momentum Indicators ---
+    stoch = ta.momentum.StochasticOscillator(df["high"], df["low"], df["close"], window=14, smooth_window=3)
+    X["stoch"] = stoch.stoch()
+    X["stoch_signal"] = stoch.stoch_signal()
+    X["willr"] = ta.momentum.WilliamsRIndicator(df["high"], df["low"], df["close"], lbp=14).williams_r()
+
+    # --- New Volume Indicators ---
+    if "volume" in df.columns:
+        X["obv"] = ta.volume.OnBalanceVolumeIndicator(df["close"], df["volume"]).on_balance_volume()
+        X["cmf"] = ta.volume.ChaikinMoneyFlowIndicator(df["high"], df["low"], df["close"], df["volume"], window=20).chaikin_money_flow()
+
+    # --- New Volatility Indicators ---
+    donchian = ta.volatility.DonchianChannel(df["high"], df["low"], df["close"], window=20)
+    X["donchian_h"] = donchian.donchian_channel_hband()
+    X["donchian_l"] = donchian.donchian_channel_lband()
+    X["donchian_m"] = donchian.donchian_channel_mband()
+
     return X
 
-def build_dynamic_features(df: pd.DataFrame, static_features: pd.DataFrame, cfg: FeatureConfig, symbol: str = None) -> pd.DataFrame:
+def build_dynamic_features(df: pd.DataFrame, static_features: pd.DataFrame, cfg: FeatureCfg, symbol: str = None) -> pd.DataFrame:
     """
     Builds features that depend on tunable hyperparameters, using pre-calculated static features.
     """
@@ -142,6 +147,11 @@ def build_dynamic_features(df: pd.DataFrame, static_features: pd.DataFrame, cfg:
         X["bb_touch_upper"] = (df["high"] >= X["bb_high"]).astype(int)
         X["bb_touch_lower"] = (df["low"] <= X["bb_low"]).astype(int)
 
+        # --- Interaction Features ---
+        X["rsi_x_adx"] = X["rsi"] * X["adx"]
+        X["macd_x_adx"] = X["macd"] * X["adx"]
+        X["ema_diff_x_adx"] = X["ema_diff"] * X["adx"]
+
         # --- handle NaNs and infs ---
         nan_count = X.isna().sum().sum()
         inf_count = np.isinf(X.values).sum()
@@ -156,7 +166,7 @@ def build_dynamic_features(df: pd.DataFrame, static_features: pd.DataFrame, cfg:
 
 from src.config import Cfg # Import Cfg
 
-def build_features(df: pd.DataFrame, feature_cfg: FeatureConfig, main_cfg: Cfg, symbol: str = None, mta_df: pd.DataFrame = None, inter_market_df: pd.DataFrame = None) -> pd.DataFrame:
+def build_features(df: pd.DataFrame, feature_cfg: FeatureCfg, main_cfg: Cfg, symbol: str = None, mta_df: pd.DataFrame = None, inter_market_df: pd.DataFrame = None) -> pd.DataFrame:
     """
     Original build_features function, now delegates to static and dynamic builders.
     This remains for compatibility with other scripts that may use it directly.

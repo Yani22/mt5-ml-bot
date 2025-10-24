@@ -6,8 +6,8 @@ import sys
 import copy
 from loguru import logger
 import pandas as pd
-from src.features import FeatureConfig, build_static_features, build_dynamic_features, add_contextual_features, build_features
-from src.labels import binary_up_down
+from src.features import FeatureCfg, build_static_features, build_dynamic_features, add_contextual_features, build_features
+from src.labels import generate_labels
 from src.ensemble import Ensemble
 from src import data_manager
 from src.data import merge_features_labels
@@ -27,7 +27,7 @@ def setup_logging(level="INFO", to_file=True, rotate="10 MB", retention="7 days"
         os.makedirs("logs", exist_ok=True)
         logger.add("logs/bot.log", level=level, rotation=rotate, retention=retention, enqueue=True)
 
-def load_optuna_params(symbol: str) -> dict | None:
+def load_optuna_params(symbol: str, cfg: Cfg) -> dict | None:
     # symbol names in params are saved without '#'
     file_path = os.path.join(PARAMS_DIR, f"{symbol.replace('#','')}_best_params.pkl")
     if not os.path.exists(file_path):
@@ -42,12 +42,19 @@ def load_optuna_params(symbol: str) -> dict | None:
 
     if not isinstance(loaded_params, dict) or "models" not in loaded_params:
         logger.warning(f"[{symbol}] Optuna params format unexpected; using empty model params.")
-        return {"lgbm": {}, "xgb": {}, "rf": {}, "logreg": {}}
+        # Ensure min_pct_change is always present, even if optuna_params is empty
+        return {"lgbm": {}, "xgb": {}, "rf": {}, "logreg": {}, "features": {"min_pct_change": cfg.features.min_pct_change}}
+
+    # Ensure min_pct_change is always present in features, falling back to cfg default
+    if "features" not in loaded_params:
+        loaded_params["features"] = {}
+    if "min_pct_change" not in loaded_params["features"]:
+        loaded_params["features"]["min_pct_change"] = cfg.features.min_pct_change
 
     logger.info(f"[{symbol}] Loaded Optuna best params from {file_path}")
-    return loaded_params.get("models", {})
+    return loaded_params
 
-def get_training_data(cfg: Cfg, symbol: str, feature_cfg: FeatureConfig, count: int | None = None, source: str = "csv", load_all_data: bool = False, build_dynamic: bool = True):
+def get_training_data(cfg: Cfg, symbol: str, feature_cfg: FeatureConfig, count: int | None = None, source: str = "csv", load_all_data: bool = False, build_dynamic: bool = True, min_pct_change: float = 0.0, mta_df: pd.DataFrame | None = None, inter_market_df: pd.DataFrame | None = None):
     """
     New centralized data pipeline.
     - If build_dynamic is True, returns (data, X, y) for trainers/backtesters.
@@ -102,7 +109,7 @@ def get_training_data(cfg: Cfg, symbol: str, feature_cfg: FeatureConfig, count: 
     
     # Build all features using the unified build_features function
     X = build_features(df.copy(), feature_cfg, cfg, symbol=symbol, mta_df=mta_df, inter_market_df=inter_market_df)
-    y = binary_up_down(df, cfg.prediction_horizon)
+    y = generate_labels(df, cfg.prediction_horizon, min_pct_change)
 
     # Align X and y by index
     aligned_idx = X.index.intersection(y.index)
@@ -123,10 +130,10 @@ def get_training_data(cfg: Cfg, symbol: str, feature_cfg: FeatureConfig, count: 
     logger.info(f"[{symbol}] Data pipeline complete. Final shape: {data.shape}")
     return data, X, y
 
-def load_ensemble(cfg: Cfg, symbol: str) -> Ensemble:
+def load_ensemble(cfg: Cfg, symbol: str, model_type: str) -> Ensemble:
     # New: ensemble is saved in a directory, not a single file
-    model_dir_path = os.path.join(MODEL_DIR, f"{symbol.replace('#','')}_ensemble")
-    model_params = load_optuna_params(symbol)
+    model_dir_path = os.path.join(MODEL_DIR, f"{symbol.replace('#','')}_ensemble_{model_type}")
+    model_params = load_optuna_params(symbol, cfg)
 
     if os.path.isdir(model_dir_path):
         logger.info(f"[{symbol}] Loading saved ensemble from directory {model_dir_path}")
@@ -140,9 +147,9 @@ def load_ensemble(cfg: Cfg, symbol: str) -> Ensemble:
     ens = Ensemble(cfg, model_params=model_params)
     return ens
 
-def save_ensemble(ensemble: Ensemble, symbol: str):
+def save_ensemble(ensemble: Ensemble, symbol: str, model_type: str):
     # New: save to a directory
-    model_dir_path = os.path.join(MODEL_DIR, f"{symbol.replace('#','')}_ensemble")
+    model_dir_path = os.path.join(MODEL_DIR, f"{symbol.replace('#','')}_ensemble_{model_type}")
     try:
         # Use the new instance method to save
         ensemble.save(model_dir_path)
@@ -150,7 +157,7 @@ def save_ensemble(ensemble: Ensemble, symbol: str):
     except Exception as e:
         logger.error(f"[{symbol}] Failed to save ensemble: {e}")
 
-def safe_retrain_ensemble(cfg: Cfg, symbol: str, ens_old: Ensemble, X_train: pd.DataFrame, y_train: pd.Series, prices: pd.Series, dry_run: bool = False) -> Ensemble:
+def safe_retrain_ensemble(cfg: Cfg, symbol: str, ens_old: Ensemble, X_train: pd.DataFrame, y_train: pd.Series, prices: pd.Series, dry_run: bool = False, model_type: str = "long") -> Ensemble:
     """
     Safely retrains an ensemble model.
 
@@ -168,12 +175,15 @@ def safe_retrain_ensemble(cfg: Cfg, symbol: str, ens_old: Ensemble, X_train: pd.
     """
     logger.info(f"[{symbol}] Starting safe retraining...")
     
-    ens_new = copy.deepcopy(ens_old)
+    old_auc = getattr(ens_old, "ensemble_cv_auc_", getattr(ens_old, "cv_auc_", None))
+
+    # Create a new ensemble to avoid feature mismatch issues
+    model_params = load_optuna_params(symbol, cfg)
+    ens_new = Ensemble(cfg, model_params=model_params)
 
     try:
         ens_new.fit(X_train, y_train, prices=prices)
         new_auc = getattr(ens_new, "ensemble_cv_auc_", getattr(ens_new, "cv_auc_", None))
-        old_auc = getattr(ens_old, "ensemble_cv_auc_", getattr(ens_old, "cv_auc_", None))
 
         if new_auc is None:
             logger.warning(f"[{symbol}] New ensemble reports no AUC; refusing to replace.")
@@ -181,7 +191,7 @@ def safe_retrain_ensemble(cfg: Cfg, symbol: str, ens_old: Ensemble, X_train: pd.
 
         if old_auc is None or (new_auc - old_auc) >= cfg.risk.min_auc_improvement:
             if not dry_run:
-                save_ensemble(ens_new, symbol)
+                save_ensemble(ens_new, symbol, model_type)
             logger.info(f"[{symbol}] Retrain accepted. old_auc={old_auc} new_auc={new_auc}")
             return ens_new
         else:
@@ -190,3 +200,4 @@ def safe_retrain_ensemble(cfg: Cfg, symbol: str, ens_old: Ensemble, X_train: pd.
     except Exception as e:
         logger.exception(f"[{symbol}] Retraining failed: {e}")
         return ens_old
+

@@ -62,7 +62,6 @@ def merge_features_labels(df: pd.DataFrame, X: pd.DataFrame, y: pd.Series) -> pd
         out["high"] = df["high"]
         out["low"] = df["low"]
         out["volume"] = df.get("volume")
-        out = out.dropna()
         logger.debug(f"Merged features & labels. Final shape: {out.shape}")
         return out
     except Exception as e:

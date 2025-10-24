@@ -79,7 +79,17 @@ class RiskManager:
     # ---------- SL / TP ----------
     def stop_targets(self, price: float, atr: float, direction: str, auc_score: float, symbol: str, sl_mult: float | None = None, tp_mult: float | float | None = None):
         _sl_mult = sl_mult if sl_mult is not None else float(self.risk_cfg.atr_multiplier_sl)
-        _tp_mult = tp_mult if tp_mult is not None else float(self._get_dynamic_value(self.risk_cfg.dynamic_tp, auc_score, float(self.risk_cfg.atr_multiplier_tp)))
+        
+        # Ensure a minimum risk/reward ratio is enforced
+        min_rr = getattr(self.risk_cfg, "min_risk_reward_ratio", 1.2)
+        required_tp_mult = _sl_mult * min_rr
+
+        # Determine the base TP multiplier
+        base_tp_mult = tp_mult if tp_mult is not None else float(self._get_dynamic_value(self.risk_cfg.dynamic_tp, auc_score, float(self.risk_cfg.atr_multiplier_tp)))
+
+        # Use the larger of the calculated TP multiplier or the one required by R/R
+        _tp_mult = max(base_tp_mult, required_tp_mult)
+
         price = float(price)
         atr = float(atr)
         if direction == "long":
@@ -88,7 +98,7 @@ class RiskManager:
         else:
             sl = price + _sl_mult * atr
             tp = price - _tp_mult * atr
-        logger.debug(f"Stop targets: dir={direction}, price={price:.6f}, SL={sl:.6f}, TP={tp:.6f}")
+        logger.debug(f"Stop targets: dir={direction}, price={price:.6f}, SL={sl:.6f}, TP={tp:.6f}, sl_mult={_sl_mult:.2f}, tp_mult={_tp_mult:.2f}")
         return float(sl), float(tp)
 
     # ---------- Watchdog / cooldown helpers ----------
@@ -248,6 +258,10 @@ class RiskManager:
         # Identify and process closed positions
         closed_tickets_in_cache = []
         for sym_key, pos_data in list(self.open_positions_cache.items()):
+            # FIX: Only check for closed positions relevant to the current symbol
+            if pos_data.get("symbol") != symbol:
+                continue
+
             ticket = pos_data.get("ticket")
             if ticket is not None and ticket not in current_tickets:
                 closed_tickets_in_cache.append(ticket)
@@ -281,6 +295,10 @@ class RiskManager:
                         exit_price = float(closing_deal.price)
                         exit_time = datetime.datetime.fromtimestamp(closing_deal.time, tz=timezone.utc)
 
+                        # Get equity at time of closure for reward calculation
+                        account_info = mt5.account_info()
+                        exit_equity = getattr(account_info, "equity", 0.0) if account_info else 0.0
+
                         closed_sim_pos = SimPosition(
                             symbol=symbol,
                             direction=direction,
@@ -293,7 +311,7 @@ class RiskManager:
                             entry_auc=entry_auc,
                             risk_fraction=risk_fraction
                         )
-                        closed_sim_pos.close(exit_price, exit_time, pnl)
+                        closed_sim_pos.close(exit_price, exit_time, pnl, exit_equity)
                         self.recently_closed_trades.append(closed_sim_pos)
                         logger.info(f"[{symbol}] Detected closed trade {ticket}. PnL: {pnl:.2f}")
                     else:
@@ -323,14 +341,15 @@ class RiskManager:
 
             # Update open_positions_cache with more details for later reconstruction
             # Ensure existing details are preserved if not updated here
-            cached_pos_data = self.open_positions_cache.get(symbol, {})
-            self.open_positions_cache[symbol] = {
+            cached_pos_data = self.open_positions_cache.get(pos.ticket, {})
+            self.open_positions_cache[pos.ticket] = {
                 "risk": cached_pos_data.get("risk", 0.0), # Keep existing risk
                 "ticket": int(pos.ticket),
+                "symbol": symbol, # Store symbol
                 "entry_price": entry,
                 "direction": direction,
                 "lots": float(pos.volume),
-                "entry_time": datetime.datetime.fromtimestamp(pos.time_setup, tz=timezone.utc),
+                "entry_time": datetime.datetime.fromtimestamp(pos.time, tz=timezone.utc),
                 "sl": sl,
                 "tp": tp,
                 "atr": cached_pos_data.get("atr", 0.0), # Preserve ATR from entry

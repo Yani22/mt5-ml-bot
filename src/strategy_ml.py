@@ -25,7 +25,7 @@ except Exception:
 
 # Min samples required to safely train a model and get a reliable CV score
 # Raised for production / retrain safety
-MIN_SAMPLES_FOR_FIT = 250
+MIN_SAMPLES_FOR_FIT = 1000
 
 class MLStrategy:
     def __init__(self, model="lgbm", random_state: int = 42, calibrate: bool = True, cv_samples_per_split: int = 300, **kwargs):
@@ -36,7 +36,7 @@ class MLStrategy:
         model_params = kwargs.copy()
         device = model_params.pop("device", "cpu")
         self._calibrator = None
-        np.random.seed(self.random_state)
+
 
         if self.model_name == "rf":
             base = RandomForestClassifier(
@@ -153,6 +153,20 @@ class MLStrategy:
     def _sanitize(self, X: pd.DataFrame) -> pd.DataFrame:
         return X.replace([np.inf, -np.inf], np.nan).ffill().bfill().dropna()
 
+    def _proba_raw(self, X: pd.DataFrame):
+        try:
+            if hasattr(self._pipe, "predict_proba"):
+                arr = self._pipe.predict_proba(X)[:, 1]
+                return arr
+            clf = self._pipe.named_steps.get("clf")
+            if clf is not None and hasattr(clf, "decision_function"):
+                dec = clf.decision_function(X)
+                return 1.0 / (1.0 + np.exp(-dec))
+            return np.full(len(X), 0.5)
+        except Exception as e:
+            logger.exception(f"_proba_raw failed: {e}")
+            return np.full(len(X), 0.5)
+
     def fit(self, X: pd.DataFrame, y: pd.Series):
         Xc = self._sanitize(X)
         yc = y.reindex(Xc.index)
@@ -189,7 +203,7 @@ class MLStrategy:
             # fallback: try last split if present
             try:
                 if last_tr_idx is not None and last_va_idx is not None:
-                    self._pipe.fit(Xc.iloc[last_tr_idx], yc.iloc[last_tr_idx])
+                    self._pipe.fit(Xc.iloc[last_tr_idx], yc.iloc[tr_idx])
                 else:
                     self._pipe.fit(Xc, yc)
             except Exception as ex:
@@ -208,20 +222,6 @@ class MLStrategy:
                 self._calibrator = None
 
         return True
-
-    def _proba_raw(self, X: pd.DataFrame):
-        try:
-            if hasattr(self._pipe, "predict_proba"):
-                arr = self._pipe.predict_proba(X)[:, 1]
-                return arr
-            clf = self._pipe.named_steps.get("clf")
-            if clf is not None and hasattr(clf, "decision_function"):
-                dec = clf.decision_function(X)
-                return 1.0 / (1.0 + np.exp(-dec))
-            return np.full(len(X), 0.5)
-        except Exception as e:
-            logger.exception(f"_proba_raw failed: {e}")
-            return np.full(len(X), 0.5)
 
     def online_update(self, X_new: pd.DataFrame, y_new: pd.Series, X_hist: pd.DataFrame = None, y_hist: pd.Series = None):
         Xn = self._sanitize(X_new)
