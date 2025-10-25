@@ -39,7 +39,7 @@ ensemble_training:
 symbols: ["GBPUSD#"] #"EURUSD#", "GBPUSD#", "USDJPY#", "USDX-DEC25"
 # symbols: ["EURUSDm#", "GOLDm#", "GBPUSDm#"] 
 timeframe: "M5"            # One of: M1, M5, M15, M30, H1, H4
-history_bars: 18000          #6048 18000 36000 105,000 #12000-for-tuner.py #5000-for-backtesting
+history_bars: 5000          #6048 18000 36000 105,000 #12000-for-tuner.py #5000-for-backtesting
 retrain_every_bars: 1000     # ~3.5 days at M5
 prediction_horizon: 12       # 6 Bars ahead for label (~30 min on M5)
 retraining_window_bars: 20000         # Number of recent bars for rolling window retraining. null for expanding window.
@@ -98,14 +98,17 @@ trading_costs:
     retry_order_send: 3            # number of retries for failed order sends
 
 # --- Thompson Sampling Configuration ---
-  enabled: true
+thompson_sampling:
+  enabled: false
   atr_grid: [1.0, 1.5, 2.0, 2.5] # ATR multiplier - provides options for the stop-loss distance
   min_prob_grid_long:
+  - 0.44
+  - 0.46
+  - 0.48
   - 0.50
   - 0.52
   - 0.54
   - 0.56
-  - 0.58
   min_prob_grid_short:
   - 0.66
   - 0.68
@@ -121,7 +124,7 @@ trading_costs:
   vol_threshold: 0.0005 # Example threshold for inverse_vol_scale
   dd_cut_multiplier: 2.0 # Multiplier for max_drawdown in scaling
   consec_loss_cut: 0.2 # Multiplier for consecutive losses in scaling
-  contextual_enabled: false           # Toggle contextual bandit
+  contextual_enabled: true           # Toggle contextual bandit
   context_dim: 9                      # dim of context vector if contextual_enabled
   min_visits_for_exploration: 5        # number of visits before arm is considered "known"
   exploration_risk_mult: 0.5         # fraction of normal risk to use for exploratory arms
@@ -129,7 +132,7 @@ trading_costs:
   state_file: "ts_risk_controller_state.json" # File to save RiskController state
 
   # Adaptive Grid Configuration (for Dynamic Grid Adaptation)
-  adaptive_grids_enabled: false
+  adaptive_grids_enabled: true
   adaptation_interval_updates: 500   # Number of updates to an arm before considering adaptation
   adaptation_refinement_factor: 0.3  # How much to narrow the search space (e.g., 0.3 means 30% of current interval)
   min_grid_size: 5                   # Minimum number of arms in a grid
@@ -146,8 +149,8 @@ trading_costs:
 risk:
   dynamic_risk:
     enabled: true
-    base_risk: 0.0025      # Risk when model confidence is at its lowest (e.g., 0.25%)
-    max_risk: 0.01         # Max risk when confidence is highest (e.g., 1.0%)
+    base_risk: 0.01      #0.0025  Risk when model confidence is at its lowest (e.g., 0.25%)
+    max_risk: 0.05         #0.01 Max risk when confidence is highest (e.g., 1.0%)
     auc_floor: 0.55        # The AUC score that corresponds to base_risk
     auc_ceiling: 0.65      # The AUC score that corresponds to max_risk
 
@@ -177,7 +180,7 @@ risk:
 
 # --- Logging ---
 logging:
-  level: DEBUG
+  level: INFO
   to_file: true
   rotate: 10 MB
   retention: 7 days
@@ -204,3 +207,5 @@ force_retrain_on_startup: false    # Set to true to force retraining of all mode
 symbol_overrides:
   "USDX-DEC25":
     pip_value: 0.1 # Example: Override pip_value for an index
+
+#PYTHONHASHSEED=0 

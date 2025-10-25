@@ -527,7 +527,7 @@ class RiskController:
                     logger.info(f"[{symbol}] Adapting MinProb Long grid. Old: {sym_state.min_prob_grid_long_values} -> New: {new_min_prob_long_grid}")
                     old_min_prob_bandit_long = sym_state.min_prob_bandit_long
                     old_min_prob_long_grid = sym_state.min_prob_grid_long_values
-                    sym_state.min_prob_grid_long_values = new_min_prob_prob_long_grid
+                    sym_state.min_prob_grid_long_values = new_min_prob_long_grid
                     sym_state.min_prob_bandit_long = ThompsonBandit(
                         num_arms=len(new_min_prob_long_grid), prior_mean=ts_cfg.prior_mean,
                         prior_var=ts_cfg.prior_var, min_var=1e-6

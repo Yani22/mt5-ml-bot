@@ -362,10 +362,10 @@ class HybridBacktester:
             returns = pd.Series([t.pnl for t in trades if t.pnl is not None], index=[t.exit_time for t in trades if t.pnl is not None])
             returns.index = pd.to_datetime(returns.index)
             
-            if not returns.empty:
+            if not eq_df.empty:
                 try:
                     report_path = f"results/report_{symbol_str}_hybrid_adaptive.html"
-                    qs.reports.html(returns, output=report_path, title=f"{symbol_str} Hybrid Adaptive Strategy")
+                    qs.reports.html(eq_df["equity"], output=report_path, title=f"{symbol_str} Hybrid Adaptive Strategy")
                     logger.info(f"QuantStats report saved to {report_path}")
                 except Exception as e:
                     logger.warning(f"Failed to generate QuantStats report: {e}")
