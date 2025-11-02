@@ -9,26 +9,27 @@ data_source: csv # "mt5" or "csv". Automatically switches to csv on non-windows
 optuna_n_trials: 50  # 150
 
 # --- Backtesting Settings ---
-initial_equity: 100.0
+initial_equity: 20.0
 
 optuna_pruning_interval: 100 # New: Interval for Optuna pruning checks
 n_jobs: -1 # Number of parallel jobs for tuning. -1 means all available CPU cores.
 roc_lags_options:
-  - [1, 3, 5, 10]
-  - [1, 2, 4, 8]
-  - [2, 5, 10, 15]
-  - [1, 2, 3]
+- [1, 3, 5, 10]
+- [1, 2, 4, 8]
+- [2, 5, 10, 15]
+- [1, 2, 3]
 
 # --- ML & CV Settings ---
 cv_samples_per_split: 1000 # Affects number of splits in TimeSeriesSplit. Higher -> fewer splits -> faster but less robust CV.
 
 # --- Fetch / Data Management ---
 fetch:
-  initial_fetch_bars: 36000        # 30000 how many bars to bootstrap at startup / initial fetch
+  initial_fetch_bars: 45000        # 30000 how many bars to bootstrap at startup / initial fetch
   save_raw_data_locally: true      # store raw CSV/feather parquet locally for caching
   raw_data_dir: "data/historical_data" # where to store cached data
   retrain_in_background: true      # whether retrain runs async
   retrain_time_utc: "23:55"           #null set to "23:55" if you want scheduled daily retrain, null = disabled
+force_retrain_on_startup: false    # Set to true to force retraining of all models on bot startup (e.g., after feature changes).
 
 # --- Ensemble Training Control ---
 ensemble_training:
@@ -36,13 +37,13 @@ ensemble_training:
 
 # --- Symbols & timeframe ---
 # historical_data symbols for .csv needed: M5-EURUSD#, H1-EURUSD#, and M5-USDX-DEC25
-symbols: ["GBPUSD#"] #"EURUSD#", "GBPUSD#", "USDJPY#", "USDX-DEC25"
-# symbols: ["EURUSDm#", "GOLDm#", "GBPUSDm#"] 
+symbols: ["GOLDm#"] #"EURUSD#", "GBPUSD#", "USDJPY#", "USDX-DEC25"
+# symbols: ["EURUSDm#", "GOLDm#", "GBPUSDm#", "USDJPYm#", "BTCUSD#"] 
 timeframe: "M5"            # One of: M1, M5, M15, M30, H1, H4
-history_bars: 5000          #6048 18000 36000 105,000 #12000-for-tuner.py #5000-for-backtesting
+history_bars: 45000          #6048 18000 36000 45000 #12000-for-tuner.py #5000-for-backtesting
 retrain_every_bars: 1000     # ~3.5 days at M5
 prediction_horizon: 12       # 6 Bars ahead for label (~30 min on M5)
-retraining_window_bars: 20000         # Number of recent bars for rolling window retraining. null for expanding window.
+retraining_window_bars: 45000         # Number of recent bars for rolling window retraining. null for expanding window.
 
 # --- Features (now tunable) ---
 features:
@@ -69,14 +70,14 @@ context_features:
 # For live bot: after tuning, Optuna best parameters overwrite these
 # For tuning: these ranges are used by Optuna
 models:
-  - name: lgbm
-    params: 
+- name: lgbm
+  params:
       # Tunable ranges for Optuna
-      n_estimators: [100, 500]       # min, max
-      learning_rate: [0.01, 0.1, "log"]
-      max_depth: [3, 10]
-      subsample: [0.6, 1.0]
-      colsample_bytree: [0.6, 1.0]
+    n_estimators: [100, 500]         # min, max
+    learning_rate: [0.01, 0.1, "log"]
+    max_depth: [3, 10]
+    subsample: [0.6, 1.0]
+    colsample_bytree: [0.6, 1.0]
 
 ensemble:
   method: soft_vote
@@ -99,22 +100,10 @@ trading_costs:
 
 # --- Thompson Sampling Configuration ---
 thompson_sampling:
-  enabled: false
+  enabled: true
   atr_grid: [1.0, 1.5, 2.0, 2.5] # ATR multiplier - provides options for the stop-loss distance
-  min_prob_grid_long:
-  - 0.44
-  - 0.46
-  - 0.48
-  - 0.50
-  - 0.52
-  - 0.54
-  - 0.56
-  min_prob_grid_short:
-  - 0.66
-  - 0.68
-  - 0.70
-  - 0.72
-  - 0.74
+  min_prob_grid_long: [0.53, 0.55, 0.57, 0.60, 0.63]
+  min_prob_grid_short: [0.53, 0.55, 0.57, 0.60, 0.63]
   prior_mean: 0.0
   prior_var: 1.0
   obs_var: 1.0
@@ -147,28 +136,29 @@ thompson_sampling:
 
 # --- Risk management ---
 risk:
+  risk_per_trade: 0.01
   dynamic_risk:
     enabled: true
-    base_risk: 0.01      #0.0025  Risk when model confidence is at its lowest (e.g., 0.25%)
-    max_risk: 0.05         #0.01 Max risk when confidence is highest (e.g., 1.0%)
+    base_risk: 0.02      #005 Risk 0.5% of equity on the least confident trades #0.02
+    max_risk: 0.035         #015 Risk up to 1.5% of equity on the most confident trades #0.035
     auc_floor: 0.55        # The AUC score that corresponds to base_risk
     auc_ceiling: 0.65      # The AUC score that corresponds to max_risk
 
   dynamic_tp:
     enabled: true
-    base_tp_mult: 1.8     # ATR multiplier for TP at lowest confidence
-    max_tp_mult: 2.5       # ATR multiplier for TP at highest confidence
+    base_tp_mult: 2.0     # For low-confidence trades, aim for a 2x ATR take-profit
+    max_tp_mult: 4.0      # For high-confidence trades, give them more room to run with a 4x ATR take-profit
     auc_floor: 0.55        # Same AUC floor as risk
     auc_ceiling: 0.65      # Same AUC ceiling as risk
 
   max_positions: 3               # Max concurrent positions
-  max_portfolio_risk: 1.00       #0.03 Total equity risk cap
+  max_portfolio_risk: 0.05       #0.03 Total equity risk cap 1.00-disable
   atr_multiplier_sl: 1.0
   atr_multiplier_tp: 2.0
   breakeven_at_1R: true
   trailing_atr_mult: 1.0
-  min_prob_long: 0.56
-  min_prob_short: 0.70
+  min_prob_long: 0.55 #0.65-max #0.51-0.55|low #0.56-0.65|high
+  min_prob_short: 0.55 #0.65-max #0.51-0.55|low #0.56-0.65|high
   block_on_drawdown: 1.0         # 0.1 pause if drawdown from equity peak exceeds 10%     #disable 1.0
   min_auc_improvement: 0.005     # 0.005 default # minimum improvement in AUC to accept a new model
   max_drawdown_for_pruning: 1.0 # New: Max drawdown allowed before Optuna trial pruning  #disable 1.0
@@ -200,12 +190,78 @@ monitoring:
 
 # --- Misc / Transparency ---
 startup_logging: true             # log key settings at bot launch for transparency
-force_retrain_on_startup: false    # Set to true to force retraining of all models on bot startup (e.g., after feature changes).
 
 # --- Symbol Specific Overrides ---
 # Use this section to override settings for specific symbols, like pip_value for non-forex instruments.
 symbol_overrides:
   "USDX-DEC25":
-    pip_value: 0.1 # Example: Override pip_value for an index
+    contract_size: 10.0
+    pip_size: 0.001
+  "GOLDm#":
+    # Instrument-specific values
+    contract_size: 1.0
+    pip_size: 0.01
+    # --- Strategy & Risk Overrides ---
+    min_prob_long: 0.55  #0.65-max #0.51-0.55|low #0.56-0.65|high
+    min_prob_short: 0.55 #0.65-max #0.51-0.55|low #0.56-0.65|high
+    atr_multiplier_sl: 1.0
+    atr_multiplier_tp: 2.0
+    trailing_atr_mult: 1.0
+    min_ensemble_auc: 0.55
+    min_auc_improvement: 0.005
+    # --- Thompson Sampling Grid Overrides ---
+    atr_grid: [1.0, 1.5, 2.0, 2.5]
+    min_prob_grid_long: [0.53, 0.55, 0.57, 0.60, 0.63]
+    min_prob_grid_short: [0.53, 0.55, 0.57, 0.60, 0.63]
+  "EURUSDm#":
+    # Instrument-specific values
+    contract_size: 1000.0
+    pip_size: 1e-05
+    # --- Strategy & Risk Overrides ---
+    min_prob_long: 0.55 #0.65-max #0.51-0.55|low #0.56-0.65|high
+    min_prob_short: 0.55  #0.65-max #0.51-0.55|low #0.56-0.65|high
+    atr_multiplier_sl: 1.0
+    atr_multiplier_tp: 2.0
+    trailing_atr_mult: 1.0
+    min_ensemble_auc: 0.55
+    min_auc_improvement: 0.005
+    # --- Thompson Sampling Grid Overrides ---
+    atr_grid: [1.0, 1.5, 2.0, 2.5]
+    min_prob_grid_long: [0.53, 0.55, 0.57, 0.60, 0.63]
+    min_prob_grid_short: [0.53, 0.55, 0.57, 0.60, 0.63]
+  "GBPUSDm#":
+    # Instrument-specific values
+    contract_size: 1000.0
+    pip_size: 1e-05
+    # --- Strategy & Risk Overrides ---
+    min_prob_long: 0.55 #0.65-max #0.51-0.55|low #0.56-0.65|high
+    min_prob_short: 0.55  #0.65-max #0.51-0.55|low #0.56-0.65|high
+    atr_multiplier_sl: 1.0
+    atr_multiplier_tp: 2.0
+    trailing_atr_mult: 1.0
+    min_ensemble_auc: 0.55
+    min_auc_improvement: 0.005
+    # --- Thompson Sampling Grid Overrides ---
+    atr_grid: [1.0, 1.5, 2.0, 2.5]
+    min_prob_grid_long: [0.53, 0.55, 0.57, 0.60, 0.63]
+    min_prob_grid_short: [0.53, 0.55, 0.57, 0.60, 0.63]
+  "USDJPYm#":
+    contract_size: 1000.0
+    pip_size: 0.001
+    # --- Strategy & Risk Overrides ---
+    min_prob_long: 0.55 #0.65-max #0.51-0.55|low #0.56-0.65|high
+    min_prob_short: 0.55  #0.65-max #0.51-0.55|low #0.56-0.65|high
+    atr_multiplier_sl: 1.0
+    atr_multiplier_tp: 2.0
+    trailing_atr_mult: 1.0
+    min_ensemble_auc: 0.55
+    min_auc_improvement: 0.005
+    # --- Thompson Sampling Grid Overrides ---
+    atr_grid: [1.0, 1.5, 2.0, 2.5]
+    min_prob_grid_long: [0.53, 0.55, 0.57, 0.60, 0.63]
+    min_prob_grid_short: [0.53, 0.55, 0.57, 0.60, 0.63]
 
-#PYTHONHASHSEED=0 
+
+# PYTHONHASHSEED=0 
+# WINEPREFIX=~/.mt5 WINEDEBUG=-all wine cmd
+# .win_venv\Scripts\activate

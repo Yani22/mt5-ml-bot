@@ -16,9 +16,11 @@ def generate_long_short_labels(df: pd.DataFrame, horizon: int, min_pct_change: f
     """
     Generates separate long and short labels based on forward percentage change, with a minimum threshold.
     """
-    fwd = df["close"].pct_change(horizon).shift(-horizon)
+    # Correctly calculate forward returns
+    future_close = df["close"].shift(-horizon)
+    fwd_pct_change = (future_close - df["close"]) / df["close"]
     
-    y_long = (fwd > min_pct_change).astype(int)
-    y_short = (fwd < -min_pct_change).astype(int)
+    y_long = (fwd_pct_change > min_pct_change).astype(int)
+    y_short = (fwd_pct_change < -min_pct_change).astype(int)
 
     return y_long, y_short

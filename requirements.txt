@@ -8,7 +8,9 @@ scipy>=1.13
 joblib>=1.4
 pyyaml>=6.0
 python-dotenv>=1.0
-# MetaTrader5>=5.0 this would failed in ubuntu
+MetaTrader5>=5.0 # this would failed in ubuntu
 loguru>=0.7
 optuna>=3.6
 quantstats>=0.0.62
+IPython
+ruamel.yaml

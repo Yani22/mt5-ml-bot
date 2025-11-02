@@ -52,8 +52,9 @@ class ClosedTrade:
 class Execution:
     """ Handles trade decision & order sending with retries + dry-run. """
 
-    def __init__(self, ens_per_symbol: Dict[str, Ensemble], risk_manager: RiskManager, mt5_client, dry_run: bool = False, notifier: Optional[TelegramNotifier] = None):
-        self.ens_per_symbol = ens_per_symbol # Changed from self.ens = ensemble
+    def __init__(self, ens_per_symbol_long: Dict[str, Ensemble], ens_per_symbol_short: Dict[str, Ensemble], risk_manager: RiskManager, mt5_client, dry_run: bool = False, notifier: Optional[TelegramNotifier] = None):
+        self.ens_per_symbol_long = ens_per_symbol_long
+        self.ens_per_symbol_short = ens_per_symbol_short
         self.risk = risk_manager
         self.mt5_client = mt5_client # Store MT5 client
         self.dry_run = dry_run
@@ -263,97 +264,9 @@ class Execution:
         closed_trades_list.sort(key=lambda trade: trade.exit_time)
         return closed_trades_list
 
-    def trade(self, symbol: str, X: pd.DataFrame | None = None, atr: float | None = None, auc_score: float | None = 0.5, total_open_risk: float = 0.0, sl_mult: Optional[float] = None, tp_mult: Optional[float] = None, atr_idx: int = -1, min_prob_idx: int = -1) -> OrderResult:
-        if X is None or atr is None:
-            return OrderResult(False, None, "X or ATR missing")
+    def trade(self, symbol: str, direction: str, lots: float, price: float, sl: float, tp: float, X: pd.DataFrame | None = None, atr: float | None = None, auc_score: float | None = 0.5, total_open_risk: float = 0.0, atr_idx: int = -1, min_prob_idx: int = -1) -> OrderResult:
 
-        # Predict
-        try:
-            ens = self.ens_per_symbol.get(symbol) # Get the specific ensemble for this symbol
-            if ens is None:
-                error_msg = f"<b>ERROR:</b> No ensemble found for symbol {symbol}."
-                logger.error(error_msg)
-                if self.notifier: self.notifier.send_message(error_msg, level="ERROR")
-                return OrderResult(False, None, error_msg)
 
-            prob_series = ens.predict_proba(X.iloc[[-1]])
-            # normalize to scalar
-            if hasattr(prob_series, "iloc"):
-                prob_up = float(prob_series.iloc[0])
-            elif isinstance(prob_series, (list, tuple)):
-                prob_up = float(prob_series[0])
-            else:
-                prob_up = float(prob_series)
-        except Exception as e:
-            logger.exception(f"Prediction failed for {symbol}: {e}")
-            if self.notifier: self.notifier.send_message(f"<b>ERROR:</b> Prediction failed for {symbol}: {e}", level="ERROR")
-            return OrderResult(False, None, "Prediction failed")
-
-        # Use optimized threshold if available, otherwise fallback to config
-        if ens.best_threshold_ is not None:
-            threshold = ens.best_threshold_
-            direction = "long" if prob_up >= threshold else "short"
-        else:
-            direction = "long" if prob_up >= self.risk.risk_cfg.min_prob_long else "short" if (1 - prob_up) >= self.risk.risk_cfg.min_prob_short else None
-        if direction is None:
-            return OrderResult(False, None, f"No trade: p_up={prob_up:.3f}")
-
-        account_info = mt5.account_info()
-        if not account_info:
-            if self.notifier: self.notifier.send_message(f"<b>ERROR:</b> Account info unavailable for {symbol}.", level="ERROR")
-            return OrderResult(False, None, "Account info unavailable")
-        equity = getattr(account_info, "equity", 0.0)
-
-        symbol_info = mt5.symbol_info(symbol)
-        if not symbol_info:
-            if self.notifier: self.notifier.send_message(f"<b>ERROR:</b> Symbol info unavailable for {symbol}.", level="ERROR")
-            return OrderResult(False, None, "Symbol info unavailable")
-
-        pip_value = None
-        # 1. Check for symbol override in config
-        if symbol in self.risk.cfg.symbol_overrides and "pip_value" in self.risk.cfg.symbol_overrides[symbol]:
-            pip_value = self.risk.cfg.symbol_overrides[symbol]["pip_value"]
-            logger.info(f"[{symbol}] Using configured override pip_value: {pip_value}")
-
-        # 2. If no override, try to calculate it
-        if pip_value is None:
-            pip_size = getattr(symbol_info, "point", None)
-            contract_size = getattr(symbol_info, "trade_contract_size", 1.0)
-            
-            if pip_size is None or pip_size <= 0:
-                error_msg = f"CRITICAL: symbol_info.point is invalid ({pip_size}) for {symbol}. Cannot calculate position size. Please set pip_value in config.yaml under symbol_overrides."
-                logger.critical(error_msg)
-                if self.notifier: self.notifier.send_message(error_msg, level="CRITICAL")
-                return OrderResult(False, None, "Invalid pip_size")
-            
-            if contract_size is None or contract_size <= 0:
-                error_msg = f"CRITICAL: symbol_info.trade_contract_size is invalid ({contract_size}) for {symbol}. Cannot calculate position size. Please set pip_value in config.yaml under symbol_overrides."
-                logger.critical(error_msg)
-                if self.notifier: self.notifier.send_message(error_msg, level="CRITICAL")
-                return OrderResult(False, None, "Invalid contract_size")
-
-            pip_value = pip_size * contract_size
-        
-        # 3. Final check and fail-safe
-        if pip_value is None or pip_value <= 0:
-            error_msg = f"CRITICAL: Could not determine pip_value for {symbol} after all attempts. Cannot calculate position size. Please set it in config.yaml under symbol_overrides."
-            logger.critical(error_msg)
-            if self.notifier: self.notifier.send_message(error_msg, level="CRITICAL")
-            return OrderResult(False, None, "Invalid pip_value")
-
-        tick = mt5.symbol_info_tick(symbol)
-        if not tick:
-            if self.notifier: self.notifier.send_message(f"<b>ERROR:</b> Tick info unavailable for {symbol}.", level="ERROR")
-            return OrderResult(False, None, "Tick info unavailable")
-        spread_value = float(tick.ask) - float(tick.bid)
-
-        lots = self.risk.position_size(equity, atr, pip_value, pip_size, auc_score, spread_value, total_open_risk)
-        if lots <= 0:
-            return OrderResult(False, None, "Lots <= 0")
-
-        price = float(tick.ask) if direction == "long" else float(tick.bid)
-
-        sl, tp = self.risk.stop_targets(price=price, atr=atr, direction=direction, auc_score=auc_score, symbol=symbol, sl_mult=sl_mult, tp_mult=tp_mult)
         type_map = {"long": mt5.ORDER_TYPE_BUY, "short": mt5.ORDER_TYPE_SELL}
         deviation_ticks = (float(tick.ask) - float(tick.bid)) if hasattr(tick, "ask") and hasattr(tick, "bid") else 0.0
         deviation = max(10, int(2 * (deviation_ticks) / (pip_size or 1e-6)))

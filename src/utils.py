@@ -182,7 +182,7 @@ def safe_retrain_ensemble(cfg: Cfg, symbol: str, ens_old: Ensemble, X_train: pd.
     ens_new = Ensemble(cfg, model_params=model_params)
 
     try:
-        ens_new.fit(X_train, y_train, prices=prices)
+        ens_new.fit(X_train, y_train, prices=prices, model_type=model_type)
         new_auc = getattr(ens_new, "ensemble_cv_auc_", getattr(ens_new, "cv_auc_", None))
 
         if new_auc is None:
@@ -200,4 +200,42 @@ def safe_retrain_ensemble(cfg: Cfg, symbol: str, ens_old: Ensemble, X_train: pd.
     except Exception as e:
         logger.exception(f"[{symbol}] Retraining failed: {e}")
         return ens_old
+
+def log_symbol_specific_configs(cfg: "Cfg"):
+    """Logs the resolved symbol-specific configurations to verify overrides."""
+    logger.info("--- Verifying Symbol-Specific Configurations ---")
+    logger.info(f"Thompson Sampling Enabled: {cfg.thompson_sampling.enabled}")
+    
+    # List of all keys that can be overridden per symbol
+    keys_to_check = [
+        'min_prob_long', 'min_prob_short', 'atr_multiplier_sl', 
+        'atr_multiplier_tp', 'trailing_atr_mult', 'min_ensemble_auc', 
+        'min_auc_improvement', 'atr_grid', 'min_prob_grid_long', 
+        'min_prob_grid_short'
+    ]
+
+    for sym in cfg.symbols:
+        logger.info(f"--- Settings for Symbol: {sym} ---")
+        for key in keys_to_check:
+            # Get the resolved value for the symbol
+            resolved_value = cfg.get_symbol_value(sym, key)
+
+            # Get the global default to compare against
+            global_default = None
+            if hasattr(cfg.risk, key):
+                global_default = getattr(cfg.risk, key)
+            elif hasattr(cfg.thompson_sampling, key):
+                global_default = getattr(cfg.thompson_sampling, key)
+
+            # Determine if an override was used. This is a heuristic for logging.
+            is_override = " (Override)" if resolved_value != global_default and global_default is not None else " (Default)"
+            
+            # For list (grid) comparison, the above is not sufficient. Let's refine.
+            if isinstance(resolved_value, list):
+                if sorted(resolved_value) != sorted(global_default):
+                    is_override = " (Override)"
+                else:
+                    is_override = " (Default)"
+
+            logger.info(f"  > {key}: {resolved_value}{is_override}")
 

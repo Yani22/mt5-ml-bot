@@ -1,7 +1,7 @@
 
 import pandas as pd
 
-trades_df = pd.read_csv("results/trades_GBPUSD_hybrid_adaptive.csv")
+trades_df = pd.read_csv("results/trades_GOLDm_hybrid_adaptive.csv")
 
 # Basic metrics
 num_trades = len(trades_df)

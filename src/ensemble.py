@@ -71,37 +71,52 @@ def custom_pnl(
 
 def calculate_sharpe_ratio(
     y_true: pd.Series,
-    y_pred: pd.Series,
+    y_pred: pd.Series, # These are binary 0/1 signals
     prices: pd.Series,
     cfg: "Cfg",
+    model_type: str = "long", # The crucial new parameter
     **trading_costs
 ) -> float:
-    """Calculates annualized Sharpe ratio for a given set of predictions."""
+    """Calculates annualized Sharpe ratio for a given set of predictions using forward returns."""
     if prices is None or len(prices) != len(y_pred):
         raise ValueError(f"Prices and predictions must be same length: {len(prices)} vs {len(y_pred)}")
 
-    pnl = []
-    spread = trading_costs.get("spread_pips", 2.0) * trading_costs.get("pip_value", 0.0001)
+    horizon = cfg.prediction_horizon
+    if not horizon:
+        raise ValueError("cfg.prediction_horizon must be set to calculate sharpe ratio")
 
-    # Simulate PnL per bar, assuming a position is held for one bar
-    for i in range(1, len(prices)):
-        signal = 1 if y_pred.iloc[i-1] >= 0.5 else -1
-        pnl.append(signal * (prices.iloc[i] - prices.iloc[i-1] - spread))
+    future_prices = prices.shift(-horizon)
 
-    returns = pd.Series(pnl)
-    if returns.std() == 0 or returns.empty:
+    # Correctly calculate forward returns based on model type
+    if model_type == "long":
+        forward_returns = (future_prices - prices) / prices
+    else:  # short
+        forward_returns = (prices - future_prices) / prices
+
+    # y_pred is already the binary signal, so we can use it directly
+    trade_returns = forward_returns[y_pred == 1]
+
+    # Simplified cost calculation
+    spread_pips = trading_costs.get("spread_pips", 2.0)
+    # NOTE: This uses global pip_size, as symbol is not available here. A minor inaccuracy.
+    pip_size = trading_costs.get("pip_value", 0.0001)
+    cost_per_trade = spread_pips * pip_size
+    
+    pnl = trade_returns - cost_per_trade
+
+    if pnl.std() == 0 or pnl.empty:
         return 0.0
 
-    # Annualize Sharpe Ratio
+    # Annualization
     timeframe_minutes = cfg.timeframe_minutes()
     if timeframe_minutes is None:
-        annualization_factor = 1.0 # Cannot determine timeframe, return raw Sharpe
+        annualization_factor = 1.0
     else:
-        bars_per_year = 252 * (24 * 60 / timeframe_minutes) # 252 trading days
+        bars_per_year = 252 * (24 * 60 / timeframe_minutes)
         annualization_factor = np.sqrt(bars_per_year)
 
-    sharpe = (returns.mean() / returns.std()) * annualization_factor
-    logger.debug(f"sharpe_ratio: calculated={sharpe:.4f}, returns={len(returns)}")
+    sharpe = (pnl.mean() / pnl.std()) * annualization_factor
+    logger.debug(f"sharpe_ratio: calculated={sharpe:.4f}, returns={len(pnl)}")
     return sharpe if np.isfinite(sharpe) else 0.0
 
 
@@ -323,6 +338,7 @@ class Ensemble:
         y: pd.Series,
         prices: Optional[pd.Series] = None,
         cv: bool = True,
+        model_type: str = "long" # NEW
     ) -> Ensemble:
         logger.info("Ensemble.fit: start")
 
@@ -455,7 +471,7 @@ class Ensemble:
                         # compute mean predictions across folds per sample
                         # simplest: use P_oof.mean(axis=1)
                         mean_proba = P_oof.mean(axis=1)
-                        self.best_threshold_, self.promising_thresholds_ = self._optimize_threshold(y_oof, mean_proba, price_segment)
+                        self.best_threshold_, self.promising_thresholds_ = self._optimize_threshold(y_oof, mean_proba, price_segment, model_type=model_type) # MODIFIED
                     except Exception as e:
                         logger.warning(f"Ensemble.fit: threshold optimization failed: {e}")
 
@@ -469,10 +485,10 @@ class Ensemble:
 
         return self
 
-    def _optimize_threshold(self, y_true: pd.Series, y_pred_probs: pd.Series, prices: pd.Series) -> Tuple[Optional[float], List[float]]:
+    def _optimize_threshold(self, y_true: pd.Series, y_pred_probs: pd.Series, prices: pd.Series, model_type: str = "long") -> Tuple[Optional[float], List[float]]: # MODIFIED
         if prices is None or len(y_true) != len(y_pred_probs) or len(prices) != len(y_pred_probs):
             logger.warning("Threshold optimization: input lengths mismatch; skipping optimization.")
-            return None
+            return None, []
 
         if self.threshold_grid == "auto":
             thresholds = np.linspace(0.3, 0.7, 21)
@@ -507,7 +523,7 @@ class Ensemble:
                     continue
             elif self.threshold_metric == "sharpe_ratio":
                 try:
-                    score = calculate_sharpe_ratio(y_true, preds, prices, self.cfg, **self.trading_costs)
+                    score = calculate_sharpe_ratio(y_true, preds, prices, self.cfg, model_type=model_type, **self.trading_costs) # MODIFIED
                 except Exception as e:
                     logger.warning(f"Threshold evaluation sharpe_ratio failed at thr={thr}: {e}")
                     continue

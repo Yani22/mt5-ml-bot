@@ -134,10 +134,9 @@ class DataManager:
         else:
             logger.debug(f"[{symbol}] Local history OK ({len(current)} rows).")
 
-    def fetch_live(self, symbol: str, feature_cfg: FeatureConfig, min_pct_change: float) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-        # 1. Fetch latest N bars for feature calculation lookback
-        # Use history_bars as a safe lookback for feature calculation
-        lookback_bars = self.cfg.history_bars 
+    def fetch_live(self, symbol: str, feature_cfg: "FeatureCfg", min_pct_change: float) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        # 1. Fetch latest N bars for the primary symbol
+        lookback_bars = self.cfg.history_bars
 
         if self.cfg.data_source == "csv":
             data = self.load_local_history(symbol, self.cfg.timeframe, count=lookback_bars)
@@ -149,36 +148,32 @@ class DataManager:
         if data.empty:
             return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-        # Load MTA data if enabled
+        # 2. Fetch latest N bars for context features, if enabled
         mta_df = None
         if self.cfg.context_features.mta.enabled:
-            mta_df = self.load_local_history(symbol, self.cfg.context_features.mta.timeframe, count=lookback_bars)
+            logger.debug(f"[{symbol}] Fetching live MTA data...")
+            mta_df = self._fetch_bars_from_mt5_chunked(symbol, self.cfg.context_features.mta.timeframe, lookback_bars)
             if mta_df.empty:
-                logger.warning(f"[{symbol}] No MTA data loaded for timeframe {self.cfg.context_features.mta.timeframe}. Disabling MTA features.")
-                self.cfg.context_features.mta.enabled = False # Temporarily disable to prevent errors
+                logger.warning(f"[{symbol}] No live MTA data loaded for timeframe {self.cfg.context_features.mta.timeframe}. Disabling MTA for this tick.")
                 mta_df = None
-            else:
-                logger.info(f"[{symbol}] Successfully loaded MTA data for timeframe {self.cfg.context_features.mta.timeframe}.")
 
-        # Load Inter-Market data if enabled
         inter_market_df = None
         if self.cfg.context_features.inter_market.enabled:
             im_sym = self.cfg.context_features.inter_market.symbol
-            inter_market_df = self.load_local_history(im_sym, self.cfg.timeframe, count=lookback_bars)
+            logger.debug(f"[{symbol}] Fetching live Inter-Market data for {im_sym}...")
+            inter_market_df = self._fetch_bars_from_mt5_chunked(im_sym, self.cfg.timeframe, lookback_bars)
             if inter_market_df.empty:
-                logger.warning(f"[{symbol}] No Inter-Market data loaded for symbol {im_sym}. Disabling Inter-Market features.")
-                self.cfg.context_features.inter_market.enabled = False # Temporarily disable to prevent errors
+                logger.warning(f"[{symbol}] No live Inter-Market data loaded for symbol {im_sym}. Disabling for this tick.")
                 inter_market_df = None
-            else:
-                logger.info(f"[{symbol}] Successfully loaded Inter-Market data for symbol {im_sym}.")
 
+        # 3. Build features and labels with all data
         X, y = self._build_features_and_labels(data, feature_cfg, symbol, min_pct_change, mta_df=mta_df, inter_market_df=inter_market_df)
 
-        # Align X, y, and data by index
+        # 4. Align all dataframes by index
         common_idx = X.index.intersection(y.index)
         X = X.loc[common_idx]
         y = y.loc[common_idx]
-        data = data.loc[common_idx] # Align data here
+        data = data.loc[common_idx]
 
         return data, X, y
 

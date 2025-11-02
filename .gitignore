@@ -8,6 +8,9 @@ env/
 .venv/
 venv/
 linux_venv/
+.linux_venv/
+.win_venv/
+.vscode/
 # Distribution / packaging
 .Python
 build/

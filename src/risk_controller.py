@@ -90,14 +90,14 @@ class ThompsonBandit:
         return inst
 
 class SymbolRiskState:
-    def __init__(self, cfg: Cfg):
+    def __init__(self, cfg: Cfg, atr_grid: List[float], min_prob_grid_long: List[float], min_prob_grid_short: List[float]):
         self.cfg = cfg
         ts_cfg = cfg.thompson_sampling
 
-        # Store current dynamic grid values
-        self.atr_grid_values: List[float] = list(ts_cfg.atr_grid)
-        self.min_prob_grid_long_values: List[float] = list(ts_cfg.min_prob_grid_long)
-        self.min_prob_grid_short_values: List[float] = list(ts_cfg.min_prob_grid_short)
+        # Store current dynamic grid values from arguments
+        self.atr_grid_values: List[float] = atr_grid
+        self.min_prob_grid_long_values: List[float] = min_prob_grid_long
+        self.min_prob_grid_short_values: List[float] = min_prob_grid_short
 
         self.atr_bandit = ThompsonBandit(
             num_arms=len(self.atr_grid_values),
@@ -165,10 +165,12 @@ class SymbolRiskState:
 
     @classmethod
     def from_state(cls, cfg: Cfg, state: dict) -> "SymbolRiskState":
-        inst = cls(cfg)
-        inst.atr_grid_values = state.get("atr_grid_values", list(cfg.thompson_sampling.atr_grid))
-        inst.min_prob_grid_long_values = state.get("min_prob_grid_long_values", list(cfg.thompson_sampling.min_prob_grid_long))
-        inst.min_prob_grid_short_values = state.get("min_prob_grid_short_values", list(cfg.thompson_sampling.min_prob_grid_short))
+        # When loading from state, we still need the initial grids from config as a fallback
+        atr_grid = state.get("atr_grid_values", list(cfg.thompson_sampling.atr_grid))
+        min_prob_grid_long = state.get("min_prob_grid_long_values", list(cfg.thompson_sampling.min_prob_grid_long))
+        min_prob_grid_short = state.get("min_prob_grid_short_values", list(cfg.thompson_sampling.min_prob_grid_short))
+
+        inst = cls(cfg, atr_grid, min_prob_grid_long, min_prob_grid_short)
 
         # Check if the number of arms has changed for the atr_bandit
         if state.get("atr_bandit") and state["atr_bandit"].get("num_arms") == len(inst.atr_grid_values):
@@ -229,7 +231,12 @@ class RiskController:
         self.notifier = notifier
         self.symbol_states: Dict[str, SymbolRiskState] = {}
         for sym in cfg.symbols:
-            self.symbol_states[sym] = SymbolRiskState(cfg)
+            # Use the new helper to get symbol-specific grids, with fallbacks to global config
+            atr_grid = cfg.get_symbol_value(sym, 'atr_grid', cfg.thompson_sampling.atr_grid)
+            min_prob_grid_long = cfg.get_symbol_value(sym, 'min_prob_grid_long', cfg.thompson_sampling.min_prob_grid_long)
+            min_prob_grid_short = cfg.get_symbol_value(sym, 'min_prob_grid_short', cfg.thompson_sampling.min_prob_grid_short)
+            
+            self.symbol_states[sym] = SymbolRiskState(cfg, atr_grid, min_prob_grid_long, min_prob_grid_short)
         
         self.state_file = cfg.thompson_sampling.state_file
         self.last_daily_retrain_date: Dict[str, Optional[datetime.date]] = {sym: None for sym in cfg.symbols}
@@ -279,15 +286,16 @@ class RiskController:
         Returns a dict with chosen parameters and their discrete indices.
         """
         if not self.cfg.thompson_sampling.enabled:
-            # If TS is disabled, return default risk parameters from cfg.risk
+            # If TS is disabled, return default risk parameters from cfg, respecting symbol overrides
             return {
-                "atr_multiplier_sl": self.cfg.risk.atr_multiplier_sl,
-                "atr_multiplier_tp": self.cfg.risk.atr_multiplier_tp,
-                "trailing_atr_mult": self.cfg.risk.trailing_atr_mult,
-                "min_prob_long": self.cfg.risk.min_prob_long,
-                "min_prob_short": self.cfg.risk.min_prob_short,
+                "atr_multiplier_sl": self.cfg.get_symbol_value(symbol, 'atr_multiplier_sl', 1.5),
+                "atr_multiplier_tp": self.cfg.get_symbol_value(symbol, 'atr_multiplier_tp', 2.5),
+                "trailing_atr_mult": self.cfg.get_symbol_value(symbol, 'trailing_atr_mult', 1.0),
+                "min_prob_long": self.cfg.get_symbol_value(symbol, 'min_prob_long', 0.55),
+                "min_prob_short": self.cfg.get_symbol_value(symbol, 'min_prob_short', 0.55),
                 "atr_idx": -1, # Indicate no TS choice
-                "min_prob_idx": -1,
+                "min_prob_long_idx": -1,
+                "min_prob_short_idx": -1,
             }
 
         sym_state = self.symbol_states[symbol]
@@ -352,9 +360,9 @@ class RiskController:
         min_prob_long_choice = sym_state.min_prob_grid_long_values[min_prob_long_idx]
         min_prob_short_choice = sym_state.min_prob_grid_short_values[min_prob_short_idx]
 
-        # Note: For trailing_atr_mult, we can either optimize it with its own bandit
-        # or scale it based on atr_choice or rule_scale. For simplicity, let's scale it with rule_scale
-        trailing_atr_mult_choice = self.cfg.risk.trailing_atr_mult * rule_scale # Use default and scale
+        # Use the symbol-specific value for the trailing stop multiplier
+        base_trailing_mult = self.cfg.get_symbol_value(symbol, 'trailing_atr_mult', 1.0)
+        trailing_atr_mult_choice = base_trailing_mult * rule_scale
 
         logger.debug(f"[{symbol}] TS Params: ATR={atr_choice:.2f} (idx:{atr_idx}), MinProbLong={min_prob_long_choice:.2f} (idx:{min_prob_long_idx}), MinProbShort={min_prob_short_choice:.2f} (idx:{min_prob_short_idx}), RuleScale={rule_scale:.2f}")
 

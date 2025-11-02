@@ -220,6 +220,28 @@ class Cfg:
             return seconds // 60
         return None
 
+    def get_symbol_value(self, symbol: str, key: str, default: Any = None) -> Any:
+        """
+        Gets a configuration value for a symbol, checking for an override first.
+        1. Looks in `symbol_overrides.<symbol>.<key>`
+        2. Looks in top-level sections (risk, thompson_sampling)
+        3. Returns the provided default.
+        """
+        # Check for a symbol-specific override first
+        if symbol in self.symbol_overrides and key in self.symbol_overrides[symbol]:
+            return self.symbol_overrides[symbol][key]
+
+        # Fallback to global settings in 'risk'
+        if hasattr(self.risk, key):
+            return getattr(self.risk, key)
+
+        # Fallback to global settings in 'thompson_sampling'
+        if hasattr(self.thompson_sampling, key):
+            return getattr(self.thompson_sampling, key)
+
+        # Return the default if not found anywhere
+        return default
+
     @staticmethod
     def from_yaml(path: str) -> "Cfg":
         with open(path, "r") as f:

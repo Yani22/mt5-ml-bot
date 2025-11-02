@@ -43,15 +43,17 @@ class RiskManager:
         return float(val)
 
     # ---------- Position sizing ----------
-    def position_size(self, equity: float, atr: float, pip_value: float, pip_size: float, auc_score: float, spread_value: float, total_open_risk: float = 0.0) -> float:
-        # dynamic risk fraction per trade
-        risk_per_trade = self._get_dynamic_value(self.risk_cfg.dynamic_risk, auc_score, getattr(self.risk_cfg, "risk_per_trade", 0.005))
+    def position_size(self, equity: float, atr: float, pip_value: float, pip_size: float, auc_score: float, spread_value: float, total_open_risk: float = 0.0, symbol: str | None = None) -> float:
+        # Get symbol-specific or default risk per trade
+        risk_per_trade_base = self.cfg.get_symbol_value(symbol, 'risk_per_trade', 0.005)
+        risk_per_trade = self._get_dynamic_value(self.cfg.get_symbol_value(symbol, 'dynamic_risk'), auc_score, risk_per_trade_base)
+        
         max_risk_allowed = max(0.0, float(self.risk_cfg.max_portfolio_risk) - float(total_open_risk))
         effective_risk = min(risk_per_trade, max_risk_allowed)
-        # absolute $ amount to risk
         risk_amt = float(equity) * float(effective_risk)
 
-        sl_distance_atr = float(self.risk_cfg.atr_multiplier_sl) * float(atr)
+        atr_mult_sl = self.cfg.get_symbol_value(symbol, 'atr_multiplier_sl', 1.0)
+        sl_distance_atr = float(atr_mult_sl) * float(atr)
         sl_distance = sl_distance_atr + spread_value
 
         if sl_distance <= 0 or (pip_value is None) or pip_value <= 0:
@@ -70,24 +72,26 @@ class RiskManager:
             return 0.0
 
         units = risk_amt / risk_per_lot
+
+        if units < 0.01:
+            return 0.0
+
         lots = float(np.clip(units, 0.01, 100.0))
         logger.info(f"Position sizing: equity={equity:.2f}, ATR={atr:.6f}, lots={lots:.4f}, effective_risk={effective_risk:.6f}")
 
-        # round to 2 decimal lots (depends on broker; adjust if necessary)
         return round(lots, 2)
 
     # ---------- SL / TP ----------
     def stop_targets(self, price: float, atr: float, direction: str, auc_score: float, symbol: str, sl_mult: float | None = None, tp_mult: float | float | None = None):
-        _sl_mult = sl_mult if sl_mult is not None else float(self.risk_cfg.atr_multiplier_sl)
+        _sl_mult = sl_mult if sl_mult is not None else self.cfg.get_symbol_value(symbol, 'atr_multiplier_sl', 1.5)
         
-        # Ensure a minimum risk/reward ratio is enforced
-        min_rr = getattr(self.risk_cfg, "min_risk_reward_ratio", 1.2)
+        min_rr = self.cfg.get_symbol_value(symbol, "min_risk_reward_ratio", 1.2)
         required_tp_mult = _sl_mult * min_rr
 
-        # Determine the base TP multiplier
-        base_tp_mult = tp_mult if tp_mult is not None else float(self._get_dynamic_value(self.risk_cfg.dynamic_tp, auc_score, float(self.risk_cfg.atr_multiplier_tp)))
+        default_tp_mult = self.cfg.get_symbol_value(symbol, 'atr_multiplier_tp', 2.5)
+        dynamic_tp_cfg = self.cfg.get_symbol_value(symbol, 'dynamic_tp')
+        base_tp_mult = tp_mult if tp_mult is not None else self._get_dynamic_value(dynamic_tp_cfg, auc_score, default_tp_mult)
 
-        # Use the larger of the calculated TP multiplier or the one required by R/R
         _tp_mult = max(base_tp_mult, required_tp_mult)
 
         price = float(price)
@@ -111,6 +115,7 @@ class RiskManager:
         if self.equity_peak is None:
             return False
         dd = 1.0 - (equity_value / self.equity_peak) if self.equity_peak else 0.0
+        # Note: block_on_drawdown is global, not per-symbol
         if dd >= getattr(self.risk_cfg, "block_on_drawdown", 0.10):
             logger.warning(f"Drawdown threshold exceeded: equity={equity_value:.2f}, peak={self.equity_peak:.2f}, drawdown={dd:.4f} >= {self.risk_cfg.block_on_drawdown}")
             return True
@@ -240,159 +245,85 @@ class RiskManager:
         return True
 
     # ---------- Manage open positions (unchanged mostly) ----------
-    def manage_open_positions(self, symbol: str, atr: float) -> List[SimPosition]:
-        import MetaTrader5 as mt5  # type: ignore
+    def manage_open_positions(self, symbol: str, current_atr: float):
         """
-        Ensure open_positions_cache matches MT5 positions and apply BE/trailing rules.
-        Returns a list of SimPosition objects for trades that were closed in this cycle.
+        Manages trailing stops for open positions of a given symbol.
+        Includes breakeven and ATR trailing logic, adapted for live trading.
         """
-        self.recently_closed_trades.clear() # Clear for this cycle
+        import MetaTrader5 as mt5 # type: ignore
 
-        try:
-            mt5_positions = mt5.positions_get(symbol=symbol) or []
-            current_tickets = {int(p.ticket) for p in mt5_positions}
-        except Exception as e:
-            logger.exception(f"Failed to get MT5 positions for {symbol}: {e}")
-            return []
+        breakeven_enabled = self.cfg.get_symbol_value(symbol, 'breakeven_at_1R', True)
+        trailing_mult = self.cfg.get_symbol_value(symbol, 'trailing_atr_mult', 0.0)
 
-        # Identify and process closed positions
-        closed_tickets_in_cache = []
-        for sym_key, pos_data in list(self.open_positions_cache.items()):
-            # FIX: Only check for closed positions relevant to the current symbol
-            if pos_data.get("symbol") != symbol:
-                continue
+        if not (breakeven_enabled or trailing_mult > 0):
+            return # No trailing logic enabled for this symbol
 
-            ticket = pos_data.get("ticket")
-            if ticket is not None and ticket not in current_tickets:
-                closed_tickets_in_cache.append(ticket)
-                # Remove from cache
-                del self.open_positions_cache[sym_key]
-                logger.info(f"[{symbol}] Removed closed position {ticket} from cache.")
+        positions_to_manage = [p for p in self.open_positions_cache.values() if p.get("symbol") == symbol]
 
-                # Fetch deal history to reconstruct SimPosition
-                deals = mt5.history_deals_get(position=ticket)
-                if deals:
-                    # Find the deal that closed the position (usually the last one)
-                    closing_deal = None
-                    for deal in deals:
-                        # Check for actual trade deals (buy/sell) that have profit/loss
-                        if (deal.type == mt5.DEAL_TYPE_BUY or deal.type == mt5.DEAL_TYPE_SELL) and abs(deal.profit) > 1e-9:
-                            closing_deal = deal
-                    
-                    if closing_deal:
-                        # Reconstruct SimPosition from deal and cached info
-                        entry_price = pos_data.get("entry_price", 0.0)
-                        direction = pos_data.get("direction", "long")
-                        lots = pos_data.get("lots", 0.0)
-                        entry_time = pos_data.get("entry_time", datetime.datetime.now(timezone.utc))
-                        sl = pos_data.get("sl", 0.0)
-                        tp = pos_data.get("tp", 0.0)
-                        entry_auc = pos_data.get("entry_auc", 0.5)
-                        risk_fraction = pos_data.get("risk_fraction", 0.0)
-                        atr_at_entry = pos_data.get("atr", 0.0)
+        if not positions_to_manage:
+            return
 
-                        pnl = float(closing_deal.profit)
-                        exit_price = float(closing_deal.price)
-                        exit_time = datetime.datetime.fromtimestamp(closing_deal.time, tz=timezone.utc)
-
-                        # Get equity at time of closure for reward calculation
-                        account_info = mt5.account_info()
-                        exit_equity = getattr(account_info, "equity", 0.0) if account_info else 0.0
-
-                        closed_sim_pos = SimPosition(
-                            symbol=symbol,
-                            direction=direction,
-                            lots=lots,
-                            entry_price=entry_price,
-                            sl=sl,
-                            tp=tp,
-                            entry_time=entry_time,
-                            atr=atr_at_entry,
-                            entry_auc=entry_auc,
-                            risk_fraction=risk_fraction
-                        )
-                        closed_sim_pos.close(exit_price, exit_time, pnl, exit_equity)
-                        self.recently_closed_trades.append(closed_sim_pos)
-                        logger.info(f"[{symbol}] Detected closed trade {ticket}. PnL: {pnl:.2f}")
-                    else:
-                        logger.warning(f"[{symbol}] Could not find a valid closing deal for ticket {ticket}.")
-                else:
-                    logger.warning(f"[{symbol}] No deal history found for closed position {ticket}.")
-
-        if not mt5_positions:
-            logger.debug(f"[{symbol}] No open positions in MT5.")
-            return self.recently_closed_trades
-
-        symbol_info = mt5.symbol_info(symbol)
-        if not symbol_info:
-            logger.warning(f"[{symbol}] Symbol info unavailable")
-            return self.recently_closed_trades
-        point = float(symbol_info.point)
         tick = mt5.symbol_info_tick(symbol)
         if not tick:
-            logger.warning(f"[{symbol}] Tick info unavailable")
-            return self.recently_closed_trades
+            logger.warning(f"[{symbol}] Could not get tick for trailing stop management.")
+            return
 
-        for pos in mt5_positions:
-            entry = float(pos.price_open)
-            sl = float(getattr(pos, "sl", 0.0))
-            tp = float(getattr(pos, "tp", 0.0))
-            direction = "long" if int(pos.type) == int(mt5.ORDER_TYPE_BUY) else "short"
+        for pos_details in positions_to_manage:
+            ticket = pos_details.get('ticket')
+            direction = pos_details.get('direction')
+            entry_price = pos_details.get('entry_price')
+            current_sl = pos_details.get('sl', 0.0)
+            pos_atr_at_entry = pos_details.get('atr', 0.0)
 
-            # Update open_positions_cache with more details for later reconstruction
-            # Ensure existing details are preserved if not updated here
-            cached_pos_data = self.open_positions_cache.get(pos.ticket, {})
-            self.open_positions_cache[pos.ticket] = {
-                "risk": cached_pos_data.get("risk", 0.0), # Keep existing risk
-                "ticket": int(pos.ticket),
-                "symbol": symbol, # Store symbol
-                "entry_price": entry,
-                "direction": direction,
-                "lots": float(pos.volume),
-                "entry_time": datetime.datetime.fromtimestamp(pos.time, tz=timezone.utc),
-                "sl": sl,
-                "tp": tp,
-                "atr": cached_pos_data.get("atr", 0.0), # Preserve ATR from entry
-                "entry_auc": cached_pos_data.get("entry_auc", 0.5), # Preserve AUC from entry
-                "risk_fraction": cached_pos_data.get("risk_fraction", 0.0), # Preserve risk_fraction from entry
-            }
+            if not all([ticket, direction, entry_price, pos_atr_at_entry]):
+                logger.debug(f"[{symbol}] Skipping position {ticket} due to missing details in cache.")
+                continue
 
-            # profit in pips
-            if direction == "long":
-                profit_pips = (float(tick.bid) - entry) / point
-            else:
-                profit_pips = (entry - float(tick.ask)) / point
+            new_sl = current_sl
+            exit_price = tick.bid if direction == "long" else tick.ask
 
-            one_r = (self.risk_cfg.atr_multiplier_sl * float(atr)) / point
-            new_sl = sl
+            if breakeven_enabled:
+                sl_mult = self.cfg.get_symbol_value(symbol, 'atr_multiplier_sl', 1.5)
+                one_r_price_move = sl_mult * pos_atr_at_entry
+                
+                is_in_profit_for_be = (direction == "long" and exit_price >= entry_price + one_r_price_move) or \
+                                     (direction == "short" and exit_price <= entry_price - one_r_price_move)
+                
+                is_sl_not_at_be = (direction == "long" and current_sl < entry_price) or \
+                                  (direction == "short" and current_sl > entry_price)
 
-            # Breakeven at 1R
-            if profit_pips >= one_r and ((direction == "long" and sl < entry) or (direction == "short" and sl > entry)):
-                new_sl = entry
+                if is_in_profit_for_be and is_sl_not_at_be:
+                    new_sl = entry_price
+                    logger.info(f"[{symbol}] Condition met to move SL to breakeven for position {ticket} at {new_sl:.5f}")
 
-            # ATR trailing
-            trailing = float(atr) * float(self.risk_cfg.trailing_atr_mult)
-            if direction == "long":
-                new_sl = max(new_sl, float(tick.bid) - trailing)
-            else:
-                new_sl = min(new_sl, float(tick.ask) + trailing)
+            if trailing_mult > 0:
+                trailing_atr_dist = current_atr * trailing_mult
+                potential_new_sl = 0.0
+                
+                if direction == "long":
+                    potential_new_sl = exit_price - trailing_atr_dist
+                    if potential_new_sl > new_sl:
+                        new_sl = potential_new_sl
+                else: # Short position
+                    potential_new_sl = exit_price + trailing_atr_dist
+                    if (new_sl == 0.0) or (potential_new_sl < new_sl):
+                        new_sl = potential_new_sl
 
-            if abs(new_sl - sl) > 1e-8:
-                try:
-                    request = {
-                        "action": mt5.TRADE_ACTION_SLTP,
-                        "position": int(pos.ticket),
-                        "sl": float(new_sl),
-                        "tp": float(tp),
-                    }
-                    result = mt5.order_send(request)
-                    if result is None or getattr(result, "retcode", None) != getattr(mt5, "TRADE_RETCODE_DONE", 10009):
-                        logger.error(f"[{symbol}] Failed SL update for ticket {pos.ticket}: {result}")
-                    else:
-                        logger.info(f"[{symbol}] Updated SL for ticket {pos.ticket}: new SL={new_sl:.6f}")
-                except Exception as e:
-                    logger.exception(f"[{symbol}] Exception updating SL for ticket {pos.ticket}: {e}")
-            else:
-                logger.debug(f"[{symbol}] No SL adjustment needed for ticket {pos.ticket}")
-        
-        return self.recently_closed_trades
+            if new_sl > 0 and abs(new_sl - current_sl) > 1e-9:
+                request = {
+                    "action": mt5.TRADE_ACTION_SLTP,
+                    "position": ticket,
+                    "sl": new_sl,
+                    "tp": pos_details.get('tp', 0.0),
+                }
+                
+                logger.info(f"[{symbol}] Sending SL modification for ticket {ticket}: New SL = {new_sl:.5f}")
+                result = mt5.order_send(request)
+                
+                if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                    logger.info(f"[{symbol}] Successfully modified SL for position {ticket}.")
+                    self.open_positions_cache[ticket]['sl'] = new_sl
+                else:
+                    retcode = result.retcode if result else 'N/A'
+                    comment = result.comment if result else 'N/A'
+                    logger.error(f"[{symbol}] Failed to modify SL for position {ticket}. Code: {retcode}, Comment: {comment}")

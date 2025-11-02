@@ -20,8 +20,37 @@ import datetime
 import json
 from typing import Dict, Any
 from src.data_manager import DataManager
+from src.labels import generate_long_short_labels
 from src.bandit_warmstart import find_latest_backtest_state, merge_warmstart
 import csv
+import yaml
+import numpy as np
+from typing import List
+
+def _ensure_min_grid_size(thresholds: List[float], best_thr: float, min_size: int = 5, spread: float = 0.02) -> List[float]:
+    """Ensures a list of thresholds has at least min_size elements, expanding around best_thr if needed."""
+    if len(thresholds) >= min_size:
+        return sorted(list(set(thresholds))) # Ensure unique and sorted
+
+    # If not enough, generate a new grid around best_thr
+    new_thresholds = [best_thr]
+    half_size = (min_size - 1) // 2
+    for i in range(1, half_size + 1):
+        new_thresholds.append(best_thr + i * spread)
+        new_thresholds.append(best_thr - i * spread)
+    
+    # Combine with existing and ensure unique, sorted, and within reasonable bounds
+    combined = sorted(list(set(thresholds + new_thresholds)))
+    
+    # Filter to reasonable range (e.g., 0.0 to 1.0 for probabilities)
+    combined = [round(x, 2) for x in combined if 0.0 <= x <= 1.0]
+
+    # If still not enough after filtering, just take a wider range
+    if len(combined) < min_size:
+        combined = np.linspace(max(0.0, best_thr - spread * min_size), min(1.0, best_thr + spread * min_size), min_size).tolist()
+        combined = [round(x, 2) for x in combined]
+
+    return sorted(list(set(combined)))
 
 # --- Initial Setup ---
 load_dotenv()
@@ -84,74 +113,118 @@ def print_dashboard(cfg, risk, ens, X, sym, bar_counter, is_first_symbol, equity
         ]) if positions_for_symbol else "None"
         logger.info(f"[{sym}] Bar: {bar_counter} | ATR={atr:.5f} | p_up={p_up:.3f} | Open Positions: {open_pos_str}")
 
+from ruamel.yaml import YAML
+
+def _ensure_min_grid_size(thresholds: List[float], best_thr: float, min_size: int = 5, spread: float = 0.02) -> List[float]:
+    """Ensures a list of thresholds has at least min_size elements, expanding around best_thr if needed."""
+    if len(thresholds) >= min_size:
+        return sorted(list(set(thresholds))) # Ensure unique and sorted
+
+    # If not enough, generate a new grid around best_thr
+    new_thresholds = [best_thr]
+    half_size = (min_size - 1) // 2
+    for i in range(1, half_size + 1):
+        new_thresholds.append(best_thr + i * spread)
+        new_thresholds.append(best_thr - i * spread)
+    
+    # Combine with existing and ensure unique, sorted, and within reasonable bounds
+    combined = sorted(list(set(thresholds + new_thresholds)))
+    
+    # Filter to reasonable range (e.g., 0.0 to 1.0 for probabilities)
+    combined = [round(x, 2) for x in combined if 0.0 <= x <= 1.0]
+
+    # If still not enough after filtering, just take a wider range
+    if len(combined) < min_size:
+        combined = np.linspace(max(0.0, best_thr - spread * min_size), min(1.0, best_thr + spread * min_size), min_size).tolist()
+        combined = [round(x, 2) for x in combined]
+
+    return sorted(list(set(combined)))
+
 def run_retraining_in_background(cfg, sym, feature_cfg, dry_run, notifier):
     """
-    A wrapper function to run the entire retraining pipeline in a separate process.
+    A wrapper function to run the entire retraining pipeline for both long and short models in a separate process.
+    This function now saves optimized parameters to the symbol_overrides section of config.yaml.
     """
     try:
-        # Use DataManager's cached loader (avoids double work and ensures consistent caching)
         data_manager = DataManager(cfg)
-        full_data, full_X, full_y = data_manager.load_cached(sym, feature_cfg, count=cfg.retraining_window_bars, min_pct_change=feature_cfg.min_pct_change)
+        full_data, full_X, _ = data_manager.load_cached(sym, feature_cfg, count=cfg.retraining_window_bars, min_pct_change=feature_cfg.min_pct_change)
 
-        if full_X.empty or full_y.empty:
+        if full_X is None or full_X.empty:
             message = f"[{sym}] <b>WARNING:</b> No data for retraining, background process exiting."
             logger.warning(message)
             if notifier: notifier.send_message(message, level="WARNING")
             return
 
-        ens_old = load_ensemble(cfg, sym)
+        y_long, y_short = generate_long_short_labels(full_data, cfg.prediction_horizon, feature_cfg.min_pct_change)
+
+        logger.info(f"[{sym}] Retraining LONG model...")
+        ens_old_long = load_ensemble(cfg, sym, "long")
+        safe_retrain_ensemble(cfg, sym, ens_old_long, full_X, y_long, full_data["close"], dry_run=dry_run, model_type="long")
         
-        safe_retrain_ensemble(cfg, sym, ens_old, full_X, full_y, full_data["close"] if "close" in full_data.columns else None, dry_run=dry_run)
-        logger.info(f"[{sym}] Background retraining process finished.")
+        logger.info(f"[{sym}] Retraining SHORT model...")
+        ens_old_short = load_ensemble(cfg, sym, "short")
+        safe_retrain_ensemble(cfg, sym, ens_old_short, full_X, y_short, full_data["close"], dry_run=dry_run, model_type="short")
+
+        logger.info(f"[{sym}] Background retraining process for LONG and SHORT models finished.")
+
     except Exception as e:
         logger.exception(f"[{sym}] Background retraining process failed: {e}")
 
+def _handle_model_acceptance(sym, cfg, ens_per_symbol_long, ens_per_symbol_short, active_model_auc, live_monitor, notifier):
+    """Loads newly trained models, compares them, and accepts them if they are an improvement."""
+    logger.info(f"[{sym}] Handling model acceptance...")
+    try:
+        new_ens_long = load_ensemble(cfg, sym, "long")
+        new_ens_short = load_ensemble(cfg, sym, "short")
+        
+        old_ens_long = ens_per_symbol_long[sym]
+        old_ens_short = ens_per_symbol_short[sym]
 
-def log_startup_summary(cfg: Cfg):
-    """ Logs a summary of key configuration settings at startup. """
-    logger.info("--- Bot Configuration Summary ---")
-    logger.info(f"Symbols: {cfg.symbols}")
-    logger.info(f"Timeframe: {cfg.timeframe}")
-    logger.info(f"Data Source: {cfg.data_source}")
-    logger.info(f"GPU Enabled: {cfg.use_gpu}")
+        new_auc_long = getattr(new_ens_long, "ensemble_cv_auc_", 0.5)
+        new_auc_short = getattr(new_ens_short, "ensemble_cv_auc_", 0.5)
+        old_auc_long = getattr(old_ens_long, "ensemble_cv_auc_", 0.5)
+        old_auc_short = getattr(old_ens_short, "ensemble_cv_auc_", 0.5)
 
-    # Retraining settings
-    if cfg.fetch.retrain_time_utc:
-        logger.info(f"Retraining Schedule: Daily at {cfg.fetch.retrain_time_utc} UTC")
-    else:
-        logger.info(f"Retraining Schedule: Every {cfg.retrain_every_bars} bars")
-    
-    if cfg.retraining_window_bars:
-        logger.info(f"Retraining Window: Rolling {cfg.retraining_window_bars} bars")
-    else:
-        logger.info("Retraining Window: Expanding")
+        # Use the new helper to get the symbol-specific value, falling back to the global default
+        min_auc_improvement = cfg.get_symbol_value(sym, 'min_auc_improvement', 0.005)
 
-    # Risk and Ensemble settings
-    logger.info(f"Max Portfolio Risk: {cfg.risk.max_portfolio_risk}")
-    logger.info(f"Drawdown Block Limit: {cfg.risk.block_on_drawdown}")
-    
-    ensemble_cfg = cfg.ensemble
-    logger.info(f"Ensemble Method: {ensemble_cfg.get('method', 'soft_vote') if isinstance(ensemble_cfg, dict) else 'N/A'}")
-    logger.info(f"Auto-Threshold Enabled: {ensemble_cfg.get('auto_threshold', False) if isinstance(ensemble_cfg, dict) else 'N/A'}")
-    
-    # Thompson Sampling settings
-    ts_cfg = cfg.thompson_sampling
-    if ts_cfg:
-        logger.info(f"Thompson Sampling Enabled: {ts_cfg.enabled}")
-        if ts_cfg.enabled:
-            logger.info(f"  - Contextual Bandit: {ts_cfg.contextual_enabled}")
-            logger.info(f"  - Adaptive Grids: {ts_cfg.adaptive_grids_enabled}")
-            logger.info(f"  - Bandit Reset: {ts_cfg.bandit_reset_enabled}")
-    else:
-        logger.info("Thompson Sampling Enabled: N/A")
+        long_accepted = new_auc_long >= old_auc_long + min_auc_improvement
+        short_accepted = new_auc_short >= old_auc_short + min_auc_improvement
 
-    logger.info("---------------------------------")
+        if long_accepted:
+            ens_per_symbol_long[sym] = new_ens_long
+            active_model_auc[sym] = new_auc_long
+            live_monitor.update_ensemble_auc(new_auc_long)
+            message = f"[{sym}] New LONG model accepted (AUC: {old_auc_long:.4f} -> {new_auc_long:.4f})."
+            logger.info(message)
+            if notifier: notifier.send_message(message, level="INFO")
+        else:
+            message = f"[{sym}] New LONG model rejected (AUC: {old_auc_long:.4f} -> {new_auc_long:.4f}). Keeping old model."
+            logger.warning(message)
+            if notifier: notifier.send_message(message, level="WARNING")
+
+        if short_accepted:
+            ens_per_symbol_short[sym] = new_ens_short
+            message = f"[{sym}] New SHORT model accepted (AUC: {old_auc_short:.4f} -> {new_auc_short:.4f})."
+            logger.info(message)
+            if notifier: notifier.send_message(message, level="INFO")
+        else:
+            message = f"[{sym}] New SHORT model rejected (AUC: {old_auc_short:.4f} -> {new_auc_short:.4f}). Keeping old model."
+            logger.warning(message)
+            if notifier: notifier.send_message(message, level="WARNING")
+
+    except Exception as e:
+        logger.exception(f"[{sym}] Error during model acceptance: {e}")
+
+
 
 
 def run(dry_run: bool = False):
     """ Production-ready main loop for hybrid adaptive MT5 ML bot. """
     RECONNECTION_RETRY_SECONDS = 60
     cfg = Cfg.from_yaml("config.yaml")
+    log_symbol_specific_configs(cfg)
+
     cfg.dashboard_every_bars = getattr(cfg, "dashboard_every_bars", 10)
 
     if cfg.startup_logging:
@@ -187,16 +260,31 @@ def run(dry_run: bool = False):
     live_monitor = LivePerformanceMonitor(cfg)
     live_monitor.load_state() # Load previous state on startup
 
+    # --- Initial Feature Config Loading ---
+    feature_cfg_per_symbol = {}
+    for sym in cfg.symbols:
+        optuna_params = load_optuna_params(sym, cfg)
+        feature_params = optuna_params.get('features', {}) if optuna_params else {}
+        feature_cfg_per_symbol[sym] = FeatureConfig(**feature_params)
+
+    # --- Optional: Force Retraining on Startup ---
+    if getattr(cfg, 'force_retrain_on_startup', False):
+        logger.info("Force retrain on startup is enabled. Retraining all symbols synchronously before starting.")
+        for sym in cfg.symbols:
+            run_retraining_in_background(cfg, sym, feature_cfg_per_symbol[sym], dry_run, notifier)
+        logger.info("Forced startup retraining complete for all symbols. The bot will now load the new models.")
+    else:
+        logger.info("Force retrain on startup is disabled.")
+
     # --- Load Ensembles and Feature Configs ---
-    ens_per_symbol = {}
+    ens_per_symbol_long = {}
+    ens_per_symbol_short = {}
     active_model_auc = {} # To store AUC of currently active model
     feature_cfg_per_symbol = {}
     # Single pass: load ensembles and feature configs once, and bootstrap history via DataManager
     for sym in cfg.symbols:
-        ens_per_symbol[sym] = load_ensemble(cfg, sym)
-        optuna_params = load_optuna_params(sym, cfg)
-        feature_params = optuna_params.get('features', {}) if optuna_params else {}
-        feature_cfg_per_symbol[sym] = FeatureConfig(**feature_params)
+        ens_per_symbol_long[sym] = load_ensemble(cfg, sym, "long")
+        ens_per_symbol_short[sym] = load_ensemble(cfg, sym, "short")
 
         # Bootstrap historical data with caching (chunked fetch if needed)
         logger.info(f"[{sym}] Bootstrapping local history...")
@@ -230,7 +318,7 @@ def run(dry_run: bool = False):
     loaded_open_positions = risk_controller.load_state() # Load state again to get open_positions_cache
 
     # Execution object (single instance)
-    exe = Execution(ens_per_symbol, risk, mt5c, dry_run=dry_run, notifier=notifier)
+    exe = Execution(ens_per_symbol_long, ens_per_symbol_short, risk, mt5c, dry_run=dry_run, notifier=notifier)
     exe.risk.open_positions_cache.update(loaded_open_positions) # Initialize exe's cache with loaded data
 
     # Reconcile open positions with MT5 to ensure accuracy
@@ -271,18 +359,16 @@ def run(dry_run: bool = False):
                 live_monitor.load_state() # Load previous state on startup
 
                 # --- Load Ensembles and Feature Configs ---
-                ens_per_symbol = {}
+                ens_per_symbol_long = {}
+                ens_per_symbol_short = {}
                 active_model_auc = {} # To store AUC of currently active model
                 feature_cfg_per_symbol = {}
                 # Single pass: load ensembles and feature configs once, and bootstrap history via DataManager
                 for sym in cfg.symbols:
-                    ens_per_symbol[sym] = load_ensemble(cfg, sym)
-                    active_model_auc[sym] = getattr(ens_per_symbol[sym], "ensemble_cv_auc_", getattr(ens_per_symbol[sym], "cv_auc_", 0.5))
-                    logger.info(f"[{sym}] Active model AUC: {active_model_auc[sym]:.4f}")
-
-                    optuna_params = load_optuna_params(sym, cfg)
-                    feature_params = optuna_params.get('features', {}) if optuna_params else {}
-                    feature_cfg_per_symbol[sym] = FeatureConfig(**feature_params)
+                    ens_per_symbol_long[sym] = load_ensemble(cfg, sym, "long")
+                    ens_per_symbol_short[sym] = load_ensemble(cfg, sym, "short")
+                    active_model_auc[sym] = getattr(ens_per_symbol_long[sym], "ensemble_cv_auc_", getattr(ens_per_symbol_long[sym], "cv_auc_", 0.5))
+                    logger.info(f"[{sym}] Active model AUC (Long): {active_model_auc[sym]:.4f}")
 
                     # Bootstrap historical data with caching (chunked fetch if needed)
                     logger.info(f"[{sym}] Bootstrapping local history...")
@@ -313,7 +399,7 @@ def run(dry_run: bool = False):
                 loaded_open_positions = risk_controller.load_state() # Load state again to get open_positions_cache
 
                 # Execution object (single instance)
-                exe = Execution(ens_per_symbol, risk, mt5c, dry_run=dry_run, notifier=notifier)
+                exe = Execution(ens_per_symbol_long, ens_per_symbol_short, risk, mt5c, dry_run=dry_run, notifier=notifier)
                 exe.risk.open_positions_cache.update(loaded_open_positions) # Initialize exe's cache with loaded data
 
                 # Reconcile open positions with MT5 to ensure accuracy
@@ -400,46 +486,22 @@ def run(dry_run: bool = False):
                         try:
                             # --- Check for finished retraining processes for this symbol ---
                             if sym in retraining_processes and not retraining_processes[sym].is_alive():
-                                logger.info(f"[{sym}] Background retraining process finished. Joining process and reloading model.")
+                                logger.info(f"[{sym}] Background retraining process finished. Joining and reloading models.")
                                 p = retraining_processes[sym]
                                 p.join()
-                                
+
                                 if p.exitcode != 0:
-                                    message = f"[{sym}] <b>ERROR:</b> Background retraining process failed with exit code {p.exitcode}. Keeping current model."
+                                    message = f"[{sym}] <b>ERROR:</b> Background retraining process failed with exit code {p.exitcode}. Keeping current models."
                                     logger.error(message)
-                                    notifier.send_message(message, level="ERROR")
-                                    del retraining_processes[sym]
-                                    retraining_status[sym] = False
-                                    continue # Skip model reloading and acceptance if retraining failed
-        
-                                new_ens = load_ensemble(cfg, sym)
-                                new_model_auc = getattr(new_ens, "ensemble_cv_auc_", getattr(new_ens, "cv_auc_", 0.5))
-                                current_active_auc = active_model_auc[sym]
-                                min_auc_improvement = cfg.risk.min_auc_improvement
-                                min_ensemble_auc_threshold = cfg.risk.min_ensemble_auc
-        
-                                if new_model_auc < min_ensemble_auc_threshold:
-                                    message = f"[{sym}] <b>CRITICAL:</b> NEW MODEL REJECTED! Its AUC ({new_model_auc:.4f}) is below absolute minimum threshold ({min_ensemble_auc_threshold:.4f}). Trading for this symbol will be blocked."
-                                    logger.critical(message)
-                                    notifier.send_message(message, level="CRITICAL")
-                                    trading_blocked_by_low_new_model_auc[sym] = True
-                                elif new_model_auc >= current_active_auc + min_auc_improvement:
-                                    ens_per_symbol[sym] = new_ens
-                                    active_model_auc[sym] = new_model_auc
-                                    trading_blocked_by_low_new_model_auc[sym] = False
-                                    message = f"[{sym}] New model (AUC={new_model_auc:.4f}) accepted. Improvement over old (AUC={current_active_auc:.4f})."
-                                    logger.info(message)
-                                    notifier.send_message(message, level="INFO")
+                                    if notifier: notifier.send_message(message, level="ERROR")
                                 else:
-                                    message = f"[{sym}] New model (AUC={new_model_auc:.4f}) not significantly better than current (AUC={current_active_auc:.4f}). Keeping current model."
-                                    logger.warning(message)
-                                    notifier.send_message(message, level="WARNING")
-                                    trading_blocked_by_low_new_model_auc[sym] = False
-        
-                                live_monitor.update_ensemble_auc(active_model_auc[sym])
+                                    # Call the centralized model acceptance function
+                                    _handle_model_acceptance(sym, cfg, ens_per_symbol_long, ens_per_symbol_short, active_model_auc, live_monitor, notifier)
+
                                 del retraining_processes[sym]
                                 retraining_status[sym] = False
-                                logger.info(f"[{sym}] Model handling complete.")    
+                                logger.info(f"[{sym}] Model handling complete.")
+
                             # --- Fetch latest bar data using the centralized DataManager pipeline ---
                             feature_cfg = feature_cfg_per_symbol[sym]
                             data, X, y = data_manager.fetch_live(sym, feature_cfg, feature_cfg.min_pct_change)
@@ -459,7 +521,7 @@ def run(dry_run: bool = False):
                                 print_dashboard(
                                     cfg,
                                     risk,
-                                    ens_per_symbol.get(sym),
+                                    ens_per_symbol_long.get(sym), # Use long model for dashboard prob
                                     X_per_symbol.get(sym),
                                     sym,
                                     bar_counters[sym],
@@ -480,15 +542,28 @@ def run(dry_run: bool = False):
                                     should_retrain = True
                             
                             if should_retrain:
-                                if sym not in retraining_processes:
-                                    logger.info(f"[{sym}] Triggering retraining (time-based: {time_to_retrain_today}).")
-                                    notifier.send_message(f"[{sym}] Retraining started.", level="INFO")
-                                    p = Process(target=run_retraining_in_background, args=(cfg, sym, feature_cfg, dry_run, notifier))
-                                    p.start()
-                                    retraining_processes[sym] = p
-                                    retraining_status[sym] = True
+                                if cfg.fetch.retrain_in_background:
+                                    if sym not in retraining_processes:
+                                        logger.info(f"[{sym}] Triggering background retraining (time-based: {time_to_retrain_today}).")
+                                        if notifier: notifier.send_message(f"[{sym}] Background retraining started.", level="INFO")
+                                        p = Process(target=run_retraining_in_background, args=(cfg, sym, feature_cfg, dry_run, notifier))
+                                        p.start()
+                                        retraining_processes[sym] = p
+                                        retraining_status[sym] = True
+                                    else:
+                                        logger.info(f"[{sym}] Retraining already in progress. Skipping trigger.")
                                 else:
-                                    logger.info(f"[{sym}] Retraining already in progress. Skipping trigger.")
+                                    # Synchronous retraining
+                                    logger.info(f"[{sym}] Starting synchronous retraining. Trading loop will pause.")
+                                    if notifier: notifier.send_message(f"[{sym}] Synchronous retraining started. Bot is paused.", level="INFO")
+                                    
+                                    run_retraining_in_background(cfg, sym, feature_cfg, dry_run, notifier)
+                                    
+                                    logger.info(f"[{sym}] Synchronous retraining finished. Reloading models...")
+                                    _handle_model_acceptance(sym, cfg, ens_per_symbol_long, ens_per_symbol_short, active_model_auc, live_monitor, notifier)
+                                    
+                                    logger.info(f"[{sym}] Models reloaded. Resuming trading loop.")
+                                    if notifier: notifier.send_message(f"[{sym}] Synchronous retraining finished. Resuming operations.", level="INFO")
 
                             # --- Now handle trading decision for this symbol ---
                             try:
@@ -496,8 +571,19 @@ def run(dry_run: bool = False):
                             except Exception:
                                 atr = 0.0
                             
-                            # --- FIX: Activate the existing live trailing stop mechanism ---
                             risk.manage_open_positions(sym, atr)
+
+                            # --- Consecutive Loss Watchdog Check ---
+                            if cfg.watchdog.enabled:
+                                max_losses = getattr(cfg.watchdog, "max_consecutive_losses", 0)
+                                if max_losses > 0:
+                                    consecutive_losses = risk_controller.symbol_states[sym].consecutive_losses
+                                    if consecutive_losses >= max_losses:
+                                        if risk.cooldown_until is None: # Only trigger if not already in cooldown
+                                            logger.warning(f"[{sym}] Watchdog triggered: {consecutive_losses} consecutive losses >= threshold ({max_losses}). Pausing trading.")
+                                            risk._trigger_cooldown(cooldown_hours=getattr(cfg.watchdog, "cooldown_hours", 1))
+                                            if notifier:
+                                                notifier.send_message(f"<b>RISK ALERT:</b> [{sym}] Watchdog triggered due to {consecutive_losses} consecutive losses. Trading paused.", level="WARNING")
 
                             last_features = X.iloc[[-1]] if (X is not None and not X.empty) else pd.DataFrame()
 
@@ -506,26 +592,26 @@ def run(dry_run: bool = False):
                                 logger.info(f"[{sym}] Trade skipped due to drawdown/session rules")
                                 continue
 
+                            # Get ensembles for this symbol
+                            ens_long = ens_per_symbol_long[sym]
+                            ens_short = ens_per_symbol_short[sym]
+
+                            # Get symbol-specific thresholds using the new helper
+                            min_prob_long = cfg.get_symbol_value(sym, 'min_prob_long', 0.55)
+                            min_prob_short = cfg.get_symbol_value(sym, 'min_prob_short', 0.55)
+
                             # Check ensemble confidence before trading
-                            current_model_auc = active_model_auc[sym]
-                            min_required_auc = cfg.risk.min_ensemble_auc
-                            if current_model_auc < min_required_auc:
-                                if sym not in trading_blocked_by_low_new_model_auc:
-                                    logger.info(f"[{sym}] Trading blocked due to low ensemble confidence (AUC={current_model_auc:.4f} < {min_required_auc:.4f}).")
-                                    trading_blocked_by_low_new_model_auc[sym] = True # Use this flag to prevent repeated logging
-                                continue # Skip trading for this symbol
-                            else:
-                                if sym in trading_blocked_by_low_new_model_auc:
-                                    logger.info(f"[{sym}] Trading re-enabled as ensemble confidence (AUC={current_model_auc:.4f}) is now above minimum ({min_required_auc:.4f}).")
-                                    trading_blocked_by_low_new_model_auc[sym] = False
+                            min_required_auc = cfg.get_symbol_value(sym, 'min_ensemble_auc', 0.55)
+                            if ens_long.ensemble_cv_auc_ < min_required_auc and ens_short.ensemble_cv_auc_ < min_required_auc:
+                                logger.info(f"[{sym}] Trading blocked. Both models below min AUC. Long AUC: {ens_long.ensemble_cv_auc_:.4f}, Short AUC: {ens_short.ensemble_cv_auc_:.4f}")
+                                continue
 
                             # Get dynamic risk params from RiskController
-                            auc_score = getattr(ens_per_symbol[sym], "ensemble_cv_auc_", getattr(ens_per_symbol[sym], "cv_auc_", 0.5))
                             context = {
                                 "vol": atr,
                                 "equity": equity,
                                 "peak_equity": risk.equity_peak, 
-                                "ensemble_auc": auc_score,
+                                "ensemble_auc": ens_long.ensemble_cv_auc_, # Use long model's AUC for context
                                 "adx": float(last_features["adx"].iloc[0]) if "adx" in last_features.columns else 0.0,
                                 "macd_diff": float(last_features["macd_diff"].iloc[0]) if "macd_diff" in last_features.columns else 0.0,
                                 "volatility_10": float(last_features["volatility_10"].iloc[0]) if "volatility_10" in last_features.columns else 0.0,
@@ -533,85 +619,71 @@ def run(dry_run: bool = False):
                             }
                             dynamic_risk_params = risk_controller.get_params(sym, context)
 
-                            atr_multiplier_sl = dynamic_risk_params["atr_multiplier_sl"]
-                            atr_multiplier_tp = dynamic_risk_params["atr_multiplier_tp"]
-                            trailing_atr_mult = dynamic_risk_params["trailing_atr_mult"]
+                            # The risk controller returns the correct thresholds, whether from the bandit or static config
                             min_prob_long = dynamic_risk_params["min_prob_long"]
                             min_prob_short = dynamic_risk_params["min_prob_short"]
-                            atr_idx = dynamic_risk_params["atr_idx"]
-                            min_prob_idx = dynamic_risk_params["min_prob_idx"]
-                            rule_scale = dynamic_risk_params.get("rule_scale", 1.0)
-
-                            # Log chosen parameters
-                            log_metrics_to_csv({
-                                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                                "symbol": sym,
-                                "event_type": "param_choice",
-                                "atr_idx": atr_idx,
-                                "min_prob_idx": min_prob_idx,
-                                "atr_mult_sl": atr_multiplier_sl,
-                                "atr_mult_tp": atr_multiplier_tp,
-                                "min_prob_long": min_prob_long,
-                                "min_prob_short": min_prob_short,
-                                "rule_scale": rule_scale,
-                                "equity": equity,
-                                "peak_equity": risk.equity_peak,
-                                "drawdown": drawdown,
-                                "ensemble_auc": auc_score
-                            })
 
                             # Decision / trade
                             if last_features.empty:
-
                                 logger.debug(f"[{sym}] Skipping decision: no features for latest bar")
                                 continue
-                            prob_up = ens_per_symbol[sym].predict_proba(last_features).iloc[0]
 
-                            if ens_per_symbol[sym].best_threshold_ is not None:
-                                threshold = ens_per_symbol[sym].best_threshold_
-                                direction = "long" if prob_up >= threshold else "short"
-                            else:
-                                direction = "long" if prob_up >= min_prob_long else "short" if prob_up < (1 - min_prob_short) else None
+                            prob_long = ens_long.predict_proba(last_features).iloc[0]
+                            prob_short = ens_short.predict_proba(last_features).iloc[0]
+
+                            direction = None
+                            auc_score = 0.5
+                            if prob_long >= min_prob_long and ens_long.ensemble_cv_auc_ >= min_required_auc:
+                                direction = "long"
+                                auc_score = ens_long.ensemble_cv_auc_
+                            elif prob_short >= min_prob_short and ens_short.ensemble_cv_auc_ >= min_required_auc:
+                                direction = "short"
+                                auc_score = ens_short.ensemble_cv_auc_
 
                             if direction:
                                 total_open_risk = sum([pos.get('risk', 0.0) for pos in risk.open_positions_cache.values()])
-                                risk_per_trade = risk._get_dynamic_value(
-                                    risk.risk_cfg.dynamic_risk, auc_score, getattr(risk.risk_cfg, "risk_per_trade", 0.005)
-                                )
-                                max_risk_allowed = max(0.0, float(risk.risk_cfg.max_portfolio_risk) - float(total_open_risk))
-                                effective_risk = min(risk_per_trade, max_risk_allowed)
-                                exploration_mult = dynamic_risk_params.get("exploration_risk_mult", 1.0)
-                                effective_risk *= float(exploration_mult)
-
+                                
                                 symbol_info = mt5.symbol_info(sym)
                                 if not symbol_info:
                                     logger.warning(f"[{sym}] Symbol info unavailable. Skipping position size calculation.")
                                     continue
 
-                                pip_size = getattr(symbol_info, "point", None)
-                                contract_size = getattr(symbol_info, "trade_contract_size", 1.0)
-                                pip_value = pip_size * contract_size if pip_size and contract_size else None
-                                if pip_value is None or pip_value <= 0:
-                                    logger.warning(f"[{sym}] pip_value computed suspiciously: pip_size={pip_size}, contract_size={contract_size}. Skipping position size calculation.")
-                                    continue
+                                pip_size = getattr(symbol_info, "point", 0.0001)
+                                contract_size = getattr(symbol_info, "trade_contract_size", 100000.0)
+                                pip_value = pip_size * contract_size
 
-                                lots = risk.position_size(
-                                    equity, atr, pip_value, pip_size, auc_score, total_open_risk
-                                )
+                                spread_pips = getattr(cfg.trading_costs.defaults, 'spread_pips', 2.0)
+                                spread_value = spread_pips * pip_size
+
+                                lots = risk.position_size(equity, atr, pip_value, pip_size, auc_score, spread_value, total_open_risk, symbol=sym)
 
                                 if lots <= 0:
                                     logger.info(f"[{sym}] Trade skipped due to risk limits or position size zero.")
                                 else:
                                     price = float(mt5.symbol_info_tick(sym).ask) if direction == "long" else float(mt5.symbol_info_tick(sym).bid)
-                                    sl, tp = risk.stop_targets(price, atr, direction, auc_score, sym, sl_mult=atr_multiplier_sl, tp_mult=atr_multiplier_tp)
-                                    result = exe.trade(sym, last_features, atr, auc_score, total_open_risk, sl_mult=atr_multiplier_sl, tp_mult=atr_multiplier_tp, atr_idx=atr_idx, min_prob_idx=min_prob_idx)
+                                    sl, tp = risk.stop_targets(price, atr, direction, auc_score, sym, sl_mult=dynamic_risk_params["atr_multiplier_sl"], tp_mult=dynamic_risk_params["atr_multiplier_tp"])
+                                    
+                                    result = exe.trade(
+                                        symbol=symbol,
+                                        direction=direction,
+                                        lots=lots,
+                                        price=price,
+                                        sl=sl,
+                                        tp=tp,
+                                        X=last_features,
+                                        atr=atr,
+                                        auc_score=auc_score,
+                                        total_open_risk=total_open_risk,
+                                        atr_idx=dynamic_risk_params["atr_idx"],
+                                        min_prob_idx=dynamic_risk_params.get("min_prob_long_idx") if direction == "long" else dynamic_risk_params.get("min_prob_short_idx")
+                                    )
 
                                     if result.ok:
                                         logger.info(f"[{sym}] Trade executed: {result.message}")
                                     else:
                                         logger.info(f"[{sym}] Trade skipped: {result.message}")
                             else:
-                                logger.info(f"[{sym}] No trade signal. Probs: (Up: {prob_up:.3f}, Down: {1-prob_up:.3f}) ")
+                                logger.info(f"[{sym}] No trade signal. Probs: (Long: {prob_long:.3f}, Short: {prob_short:.3f})")
                         except Exception:
                             logger.exception(f"Per-symbol loop failed for {sym}")
 

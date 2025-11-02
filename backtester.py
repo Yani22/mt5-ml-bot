@@ -12,14 +12,9 @@ import numpy as np # Added numpy import
 from src.config import Cfg
 from src.features import FeatureCfg
 from src.risk import RiskManager
-from src.utils import get_training_data, load_ensemble, save_ensemble, setup_logging, safe_retrain_ensemble, load_optuna_params
+from src.utils import get_training_data, load_ensemble, save_ensemble, setup_logging, safe_retrain_ensemble, load_optuna_params, log_symbol_specific_configs
 from src.trade import SimPosition
 from src.risk_controller import RiskController
-
-# NOTE: For backtesting, we assume a standard pip size. This is a simplification.
-# For a more precise backtest, this could be fetched per-symbol.
-PIP_SIZE_ASSUMPTION = 0.0001
-CONTRACT_SIZE = 100000
 
 class HybridBacktester:
     """Adaptive hybrid backtester mirroring main_hybrid_adaptive.py logic."""
@@ -40,6 +35,7 @@ class HybridBacktester:
         self.logged_low_confidence = set()
         self.logged_skips = set()
         self.cfg = cfg
+        log_symbol_specific_configs(self.cfg) # NEW
         self.equity = cfg.initial_equity
         self.initial_equity = cfg.initial_equity # Store initial equity for drawdown pruning
         self.positions: list[SimPosition] = []
@@ -49,18 +45,39 @@ class HybridBacktester:
         self.risk_controller = RiskController(cfg) # Instantiate RiskController
         self.ts_param_history = [] # To store Thompson Sampling parameter evolution
         self.save_state_every_bars = getattr(cfg, "save_ts_state_every_bars", 500)
-        ts_ts = datetime.datetime.now(datetime.UTC).strftime("%Y%m%dT%H%M%SZ")
+        ts_ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         self.backtest_ts_state_file = f"results/ts_risk_controller_state_backtest_{ts_ts}.json"
         self.ts_history_csv = f"results/ts_param_evolution_backtest_{ts_ts}.csv"
         os.makedirs("results", exist_ok=True)
+
+        # --- NEW: Per-symbol configuration ---
+        DEFAULT_PIP_SIZE = 0.0001
+        DEFAULT_CONTRACT_SIZE = 100000.0
+
+        self.contract_sizes = {}
+        self.pip_sizes = {}
+        self.pip_values = {}
+        self.costs_in_currency_per_lot = {}
+
+        for sym in cfg.symbols:
+            symbol_cfg = cfg.symbol_overrides.get(sym, {})
+            
+            contract_size = float(symbol_cfg.get('contract_size', DEFAULT_CONTRACT_SIZE))
+            pip_size = float(symbol_cfg.get('pip_size', DEFAULT_PIP_SIZE))
+            
+            self.contract_sizes[sym] = contract_size
+            self.pip_sizes[sym] = pip_size
+            self.pip_values[sym] = pip_size * contract_size
+
+            cost_pips = getattr(cfg.risk, 'transaction_cost_pips', 0.0)
+            self.costs_in_currency_per_lot[sym] = cost_pips * self.pip_values[sym]
+
+            if contract_size == DEFAULT_CONTRACT_SIZE and not ("USD" in sym or "EUR" in sym):
+                logger.warning(f"[{sym}] Using default CONTRACT_SIZE={DEFAULT_CONTRACT_SIZE}. For non-forex assets, specify 'contract_size' and 'pip_size' under 'symbol_overrides' in config.yaml for accurate backtesting.")
         
         logger.info(f"Initializing backtester with starting equity: {self.equity}")
         self.ens_per_symbol_long = {sym: load_ensemble(cfg, sym, "long") for sym in cfg.symbols}
         self.ens_per_symbol_short = {sym: load_ensemble(cfg, sym, "short") for sym in cfg.symbols}
-        
-        self.cost_in_points = getattr(cfg.risk, 'transaction_cost_pips', 0.0) * PIP_SIZE_ASSUMPTION
-        if self.cost_in_points > 0:
-            logger.info(f"Applying transaction cost: {getattr(cfg.risk, 'transaction_cost_pips', 0.0)} pips per trade.")
 
     def _manage_trailing_stops(self, sym: str, row: pd.Series, atr: float):
         """Simulated version of the live trailing stop logic."""
@@ -99,8 +116,12 @@ class HybridBacktester:
             pos.sl = new_sl
 
     def _update_positions(self, sym, row):
-        """Check open positions for SL/TP, calculate PnL, and update equity."""
-        closed_trades_this_cycle = [] # Collect trades closed in this cycle
+        """Check open positions for SL/TP, calculate PnL, and update equity using sequential reconstruction."""
+        closed_trades_this_cycle = []
+        contract_size = self.contract_sizes[sym]
+        cost_per_lot = self.costs_in_currency_per_lot[sym]
+
+        # This loop identifies trades that close on the current bar
         for pos in [p for p in self.positions if p.symbol==sym and p.status=="open"]:
             price = row["close"]
             exit_reason = None
@@ -117,22 +138,44 @@ class HybridBacktester:
                     exit_reason = "Take Profit"
 
             if exit_reason:
-                gross_pnl = ((price - pos.entry_price) * pos.lots * CONTRACT_SIZE) if pos.direction == "long" else ((pos.entry_price - price) * pos.lots * CONTRACT_SIZE)
-                transaction_cost = self.cost_in_points * pos.lots * CONTRACT_SIZE
+                gross_pnl = ((price - pos.entry_price) * pos.lots * contract_size) if pos.direction == "long" else ((pos.entry_price - price) * pos.lots * contract_size)
+                transaction_cost = cost_per_lot * pos.lots
                 net_pnl = gross_pnl - transaction_cost
                 
-                # Pass current equity to pos.close for reward normalization
-                pos.close(price, row.name, net_pnl, self.equity + net_pnl) # Pass exit_equity
-                self.equity += net_pnl
-                closed_trades_this_cycle.append(pos) # Add to list
-                logger.info(
-                    f"[{sym}] Closed {pos.direction} position at {price:.5f} due to {exit_reason}. "
-                    f"Entry: {pos.entry_price:.5f}, PnL: {net_pnl:.2f}, Equity: {self.equity:.2f}"
-                )
+                # Close the position object but pass a dummy exit_equity for now.
+                pos.close(price, row.name, net_pnl, 0)
+                closed_trades_this_cycle.append(pos)
+
+        if not closed_trades_this_cycle:
+            return
+
+        # --- Start of sequential equity reconstruction logic ---
+        closed_trades_this_cycle.sort(key=lambda t: t.exit_time)
         
-        # Update RiskController for each closed trade
+        total_profit_this_cycle = sum(t.pnl for t in closed_trades_this_cycle)
+        equity_before_cycle = self.equity
+        
+        running_equity = equity_before_cycle
         for trade in closed_trades_this_cycle:
+            # Calculate the accurate equity at the moment this specific trade closed
+            exit_equity_for_this_trade = running_equity + trade.pnl
+            trade.exit_equity = exit_equity_for_this_trade
+
+            # Update the bandit for this trade
             self.risk_controller.update_after_trade(sym, trade)
+
+            # Update the running_equity for the next trade in the sequence
+            running_equity = exit_equity_for_this_trade
+
+        # Now, update the backtester's main equity state
+        self.equity += total_profit_this_cycle
+
+        # Log the closures after all processing is done
+        for trade in closed_trades_this_cycle:
+            logger.info(
+                f"[{sym}] Closed {trade.direction} position at {trade.exit_price:.5f}. "
+                f"Entry: {trade.entry_price:.5f}, PnL: {trade.pnl:.2f}, Final Equity: {self.equity:.2f}"
+            )
     
     def _perform_retraining(self, sym: str, bar_time: pd.Timestamp, i: int, data: pd.DataFrame, X: pd.DataFrame):
         """
@@ -246,20 +289,21 @@ class HybridBacktester:
             trailing_atr_mult = dynamic_risk_params["trailing_atr_mult"]
             min_prob_long = dynamic_risk_params["min_prob_long"]
             min_prob_short = dynamic_risk_params["min_prob_short"]
+            min_ensemble_auc = risk_mgr.cfg.get_symbol_value(sym, 'min_ensemble_auc', 0.55)
             atr_idx = dynamic_risk_params["atr_idx"]
             min_prob_long_idx = dynamic_risk_params.get("min_prob_long_idx", -1)
             min_prob_short_idx = dynamic_risk_params.get("min_prob_short_idx", -1)
 
             direction = None
-            if prob_long >= min_prob_long and ens_long.ensemble_cv_auc_ >= risk_mgr.risk_cfg.min_ensemble_auc:
+            if prob_long >= min_prob_long and ens_long.ensemble_cv_auc_ >= min_ensemble_auc:
                 direction = "long"
-            elif prob_short >= min_prob_short and ens_short.ensemble_cv_auc_ >= risk_mgr.risk_cfg.min_ensemble_auc:
+            elif prob_short >= min_prob_short and ens_short.ensemble_cv_auc_ >= min_ensemble_auc:
                 direction = "short"
             else:
-                if prob_long >= min_prob_long and ens_long.ensemble_cv_auc_ < risk_mgr.risk_cfg.min_ensemble_auc:
-                    logger.info(f"[{sym}] Long trade blocked due to low ensemble confidence (AUC={ens_long.ensemble_cv_auc_:.4f} < {risk_mgr.risk_cfg.min_ensemble_auc:.4f}).")
-                if prob_short >= min_prob_short and ens_short.ensemble_cv_auc_ < risk_mgr.risk_cfg.min_ensemble_auc:
-                    logger.info(f"[{sym}] Short trade blocked due to low ensemble confidence (AUC={ens_short.ensemble_cv_auc_:.4f} < {risk_mgr.risk_cfg.min_ensemble_auc:.4f}).")
+                if prob_long >= min_prob_long and ens_long.ensemble_cv_auc_ < min_ensemble_auc:
+                    logger.info(f"[{sym}] Long trade blocked due to low ensemble confidence (AUC={ens_long.ensemble_cv_auc_:.4f} < {min_ensemble_auc:.4f}).")
+                if prob_short >= min_prob_short and ens_short.ensemble_cv_auc_ < min_ensemble_auc:
+                    logger.info(f"[{sym}] Short trade blocked due to low ensemble confidence (AUC={ens_short.ensemble_cv_auc_:.4f} < {min_ensemble_auc:.4f}).")
 
             if direction:
                 total_open_risk = sum(p.entry_equity * p.risk_fraction for p in self.positions if p.status == "open")
@@ -273,14 +317,14 @@ class HybridBacktester:
                 effective_risk *= float(exploration_mult)
 
                 # Determine pip_value for position sizing
-                pip_value = None
-                if sym in self.cfg.symbol_overrides and "pip_value" in self.cfg.symbol_overrides[sym]:
-                    pip_value = self.cfg.symbol_overrides[sym]["pip_value"]
-                if pip_value is None:
-                    pip_value = PIP_SIZE_ASSUMPTION * CONTRACT_SIZE
+                pip_value = self.pip_values[sym]
+                pip_size = self.pip_sizes[sym]
+
+                spread_pips = getattr(self.cfg.trading_costs.defaults, 'spread_pips', 2.0)
+                spread_value = spread_pips * pip_size
 
                 lots = risk_mgr.position_size(
-                    self.equity, atr, pip_value, PIP_SIZE_ASSUMPTION, ens_long.ensemble_cv_auc_, total_open_risk
+                    self.equity, atr, pip_value, pip_size, ens_long.ensemble_cv_auc_, spread_value, total_open_risk, symbol=sym
                 )
 
                 if lots > 0:
@@ -314,10 +358,6 @@ class HybridBacktester:
                 logger.info(f"[{sym}] No trade signal. Probs: (Long: {prob_long:.3f}, Short: {prob_short:.3f}) ")
 
             self.equity_curve.append((bar_time, self.equity))
-
-
-
-
             
             # Periodic persistence of Thompson state + CSV (avoid overwriting prod state)
             total_bars = sum(self.bar_counters.values())
@@ -336,9 +376,9 @@ class HybridBacktester:
                         if timeframe_minutes is not None:
                             annualization_factor = np.sqrt(252 * (24 * 60 / timeframe_minutes))
                             intermediate_sharpe = current_returns.mean() / current_returns.std() * annualization_factor
-                    trial.report(intermediate_sharpe, i)
-                    if trial.should_prune():
-                        raise optuna.TrialPruned()
+                        trial.report(intermediate_sharpe, i)
+                        if trial.should_prune():
+                            raise optuna.TrialPruned()
 
     def _generate_results(self):
         """Generates and saves the backtesting results."""
@@ -374,7 +414,7 @@ class HybridBacktester:
         except Exception as e:
             logger.exception(f"Failed to generate QuantStats report: {e}")
 
-        logger.info(f"=== Hybrid Adaptive Backtest Complete. Final Equity: {self.equity:.2f} ===")
+        logger.info(f"=== Hybrid Adaptive Backtest Complete. Final Equity: {self.equity:.2f} === ")
         logger.info("Results saved to 'results/' directory.")
 
         # NEW: Generate Thompson Sampling parameter evolution report
@@ -452,11 +492,13 @@ class HybridBacktester:
 
                 # --- Close any positions left open for the current symbol ---
                 logger.info(f"Closing any remaining open positions for {sym}...")
+                contract_size = self.contract_sizes[sym]
+                cost_per_lot = self.costs_in_currency_per_lot[sym]
                 for pos in [p for p in self.positions if p.symbol == sym and p.status == "open"]:
                     last_row = data.iloc[-1]
                     last_price = last_row["close"]
-                    gross_pnl = ((last_price - pos.entry_price) * pos.lots * CONTRACT_SIZE) if pos.direction == "long" else ((pos.entry_price - last_price) * pos.lots * CONTRACT_SIZE)
-                    transaction_cost = self.cost_in_points * pos.lots * CONTRACT_SIZE
+                    gross_pnl = ((last_price - pos.entry_price) * pos.lots * contract_size) if pos.direction == "long" else ((pos.entry_price - last_price) * pos.lots * contract_size)
+                    transaction_cost = cost_per_lot * pos.lots
                     net_pnl = gross_pnl - transaction_cost
 
                     pos.close(last_price, last_row.name, net_pnl, self.equity + net_pnl)
@@ -478,7 +520,7 @@ if __name__ == "__main__":
     cfg = Cfg.from_yaml("config.yaml")
     setup_logging(level=cfg.logging["level"], to_file=cfg.logging["to_file"], rotate=cfg.logging["rotate"], retention=cfg.logging["retention"])
     
-    cfg.thompson_sampling.state_file = f"ts_risk_controller_state_backtest_{datetime.datetime.now(datetime.UTC).strftime('%Y%m%dT%H%M%SZ')}.json"
+    cfg.thompson_sampling.state_file = f"ts_risk_controller_state_backtest_{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
 
     
     bt = HybridBacktester(cfg)
@@ -493,3 +535,4 @@ if __name__ == "__main__":
             bt._persist_bandit_state(force_path=bt.backtest_ts_state_file)
         except Exception:
             logger.exception("Final persist of bandit state failed.")
+
