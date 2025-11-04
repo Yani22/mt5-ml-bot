@@ -1,7 +1,10 @@
 
-import pandas as pd
+import pandas as pd  # type: ignore
 
-trades_df = pd.read_csv("results/trades_GOLDm_hybrid_adaptive.csv")
+# trades_df = pd.read_csv("results/trades_GOLDm_hybrid_adaptive.csv")
+trades_df = pd.read_csv("results/trades_EURUSDm_hybrid_adaptive.csv")
+# trades_df = pd.read_csv("results/trades_GBPUSDm_hybrid_adaptive.csv")
+# trades_df = pd.read_csv("results/trades_USDJPYm_hybrid_adaptive.csv")
 
 # Basic metrics
 num_trades = len(trades_df)

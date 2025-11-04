@@ -3,14 +3,15 @@ from __future__ import annotations
 import os
 import pickle
 import sys
-import copy
-from loguru import logger
-import pandas as pd
+from loguru import logger  # type: ignore
+import pandas as pd  # type: ignore
 from src.features import FeatureCfg, build_static_features, build_dynamic_features, add_contextual_features, build_features
 from src.labels import generate_labels
 from src.ensemble import Ensemble
+from src.config import Cfg
 from src import data_manager
 from src.data import merge_features_labels
+import glob
 
 MODEL_DIR = "models"
 PARAMS_DIR = "optuna_params"
@@ -54,7 +55,7 @@ def load_optuna_params(symbol: str, cfg: Cfg) -> dict | None:
     logger.info(f"[{symbol}] Loaded Optuna best params from {file_path}")
     return loaded_params
 
-def get_training_data(cfg: Cfg, symbol: str, feature_cfg: FeatureConfig, count: int | None = None, source: str = "csv", load_all_data: bool = False, build_dynamic: bool = True, min_pct_change: float = 0.0, mta_df: pd.DataFrame | None = None, inter_market_df: pd.DataFrame | None = None):
+def get_training_data(cfg: Cfg, symbol: str, feature_cfg: FeatureCfg, count: int | None = None, source: str = "csv", load_all_data: bool = False, build_dynamic: bool = True, min_pct_change: float = 0.0, mta_df: pd.DataFrame | None = None, inter_market_df: pd.DataFrame | None = None):
     """
     New centralized data pipeline.
     - If build_dynamic is True, returns (data, X, y) for trainers/backtesters.
@@ -130,10 +131,13 @@ def get_training_data(cfg: Cfg, symbol: str, feature_cfg: FeatureConfig, count: 
     logger.info(f"[{symbol}] Data pipeline complete. Final shape: {data.shape}")
     return data, X, y
 
-def load_ensemble(cfg: Cfg, symbol: str, model_type: str) -> Ensemble:
+def load_ensemble(cfg: Cfg, symbol: str, model_type: str, model_params: dict | None = None) -> Ensemble:
     # New: ensemble is saved in a directory, not a single file
     model_dir_path = os.path.join(MODEL_DIR, f"{symbol.replace('#','')}_ensemble_{model_type}")
-    model_params = load_optuna_params(symbol, cfg)
+    
+    # Load model_params if not provided
+    if model_params is None:
+        model_params = load_optuna_params(symbol, cfg)
 
     if os.path.isdir(model_dir_path):
         logger.info(f"[{symbol}] Loading saved ensemble from directory {model_dir_path}")
@@ -157,7 +161,7 @@ def save_ensemble(ensemble: Ensemble, symbol: str, model_type: str):
     except Exception as e:
         logger.error(f"[{symbol}] Failed to save ensemble: {e}")
 
-def safe_retrain_ensemble(cfg: Cfg, symbol: str, ens_old: Ensemble, X_train: pd.DataFrame, y_train: pd.Series, prices: pd.Series, dry_run: bool = False, model_type: str = "long") -> Ensemble:
+def safe_retrain_ensemble(cfg: Cfg, symbol: str, ens_old: Ensemble, X_train: pd.DataFrame, y_train: pd.Series, prices: pd.Series, dry_run: bool = False, model_type: str = "long", model_params: dict | None = None) -> Ensemble:
     """
     Safely retrains an ensemble model.
 
@@ -169,6 +173,8 @@ def safe_retrain_ensemble(cfg: Cfg, symbol: str, ens_old: Ensemble, X_train: pd.
         y_train: The training labels.
         prices: The close prices for the training period.
         dry_run: If True, the new model will not be saved.
+        model_type: The type of model being retrained ("long" or "short").
+        model_params: Pre-loaded Optuna parameters for the model.
 
     Returns:
         The retrained ensemble if it's better than the old one, otherwise the old ensemble.
@@ -178,7 +184,9 @@ def safe_retrain_ensemble(cfg: Cfg, symbol: str, ens_old: Ensemble, X_train: pd.
     old_auc = getattr(ens_old, "ensemble_cv_auc_", getattr(ens_old, "cv_auc_", None))
 
     # Create a new ensemble to avoid feature mismatch issues
-    model_params = load_optuna_params(symbol, cfg)
+    # Load model_params if not provided
+    if model_params is None:
+        model_params = load_optuna_params(symbol, cfg)
     ens_new = Ensemble(cfg, model_params=model_params)
 
     try:
@@ -238,4 +246,16 @@ def log_symbol_specific_configs(cfg: "Cfg"):
                     is_override = " (Default)"
 
             logger.info(f"  > {key}: {resolved_value}{is_override}")
+
+def log_startup_summary(cfg: "Cfg"):
+    """Logs a summary of key configuration settings at startup."""
+    logger.info("--- Bot Startup Configuration Summary ---")
+    logger.info(f"Symbols: {cfg.symbols}")
+    logger.info(f"Timeframe: {cfg.timeframe}")
+    logger.info(f"History Bars: {cfg.history_bars}")
+    logger.info(f"Prediction Horizon: {cfg.prediction_horizon}")
+    logger.info(f"Thompson Sampling Enabled: {cfg.thompson_sampling.enabled}")
+    logger.info(f"Max Portfolio Risk: {cfg.risk.max_portfolio_risk}")
+    logger.info(f"Dynamic Risk Enabled: {cfg.risk.dynamic_risk['enabled']}")
+    logger.info("--- End of Summary ---")
 

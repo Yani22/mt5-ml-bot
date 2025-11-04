@@ -1,13 +1,12 @@
 # backtester.py
 from __future__ import annotations
-import pandas as pd
-from loguru import logger
+import pandas as pd # type: ignore
+from loguru import logger # type: ignore
 import os
 import datetime
-import copy
-import quantstats as qs
-import optuna
-import numpy as np # Added numpy import
+import quantstats as qs # type: ignore
+import optuna # type: ignore
+import numpy as np  # type: ignore
 
 from src.config import Cfg
 from src.features import FeatureCfg
@@ -36,8 +35,8 @@ class HybridBacktester:
         self.logged_skips = set()
         self.cfg = cfg
         log_symbol_specific_configs(self.cfg) # NEW
-        self.equity = cfg.initial_equity
-        self.initial_equity = cfg.initial_equity # Store initial equity for drawdown pruning
+        self.equity = cfg.backtesting.initial_equity
+        self.initial_equity = cfg.backtesting.initial_equity # Store initial equity for drawdown pruning
         self.positions: list[SimPosition] = []
         self.equity_curve = []
         self.risk_manager = RiskManager(cfg)
@@ -46,8 +45,9 @@ class HybridBacktester:
         self.ts_param_history = [] # To store Thompson Sampling parameter evolution
         self.save_state_every_bars = getattr(cfg, "save_ts_state_every_bars", 500)
         ts_ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        self.backtest_ts_state_file = f"results/ts_risk_controller_state_backtest_{ts_ts}.json"
-        self.ts_history_csv = f"results/ts_param_evolution_backtest_{ts_ts}.csv"
+        symbol_str = self.cfg.symbols[0].replace('#', '') # Use the exact symbol string from config, sanitized
+        self.backtest_ts_state_file = f"results/ts_risk_controller_state_backtest_{symbol_str}_{ts_ts}.json"
+        self.ts_history_csv = f"results/ts_param_evolution_backtest_{symbol_str}_{ts_ts}.csv"
         os.makedirs("results", exist_ok=True)
 
         # --- NEW: Per-symbol configuration ---
@@ -295,10 +295,13 @@ class HybridBacktester:
             min_prob_short_idx = dynamic_risk_params.get("min_prob_short_idx", -1)
 
             direction = None
+            auc_score = 0.5
             if prob_long >= min_prob_long and ens_long.ensemble_cv_auc_ >= min_ensemble_auc:
                 direction = "long"
+                auc_score = ens_long.ensemble_cv_auc_
             elif prob_short >= min_prob_short and ens_short.ensemble_cv_auc_ >= min_ensemble_auc:
                 direction = "short"
+                auc_score = ens_short.ensemble_cv_auc_
             else:
                 if prob_long >= min_prob_long and ens_long.ensemble_cv_auc_ < min_ensemble_auc:
                     logger.info(f"[{sym}] Long trade blocked due to low ensemble confidence (AUC={ens_long.ensemble_cv_auc_:.4f} < {min_ensemble_auc:.4f}).")
@@ -307,14 +310,6 @@ class HybridBacktester:
 
             if direction:
                 total_open_risk = sum(p.entry_equity * p.risk_fraction for p in self.positions if p.status == "open")
-                risk_per_trade = risk_mgr._get_dynamic_value(
-                    risk_mgr.risk_cfg.dynamic_risk, ens_long.ensemble_cv_auc_, getattr(risk_mgr.risk_cfg, "risk_per_trade", 0.005)
-                )
-                max_risk_allowed = max(0.0, float(risk_mgr.risk_cfg.max_portfolio_risk) - float(total_open_risk))
-                effective_risk = min(risk_per_trade, max_risk_allowed)
-                # apply exploration multiplier if present
-                exploration_mult = dynamic_risk_params.get("exploration_risk_mult", 1.0)
-                effective_risk *= float(exploration_mult)
 
                 # Determine pip_value for position sizing
                 pip_value = self.pip_values[sym]
@@ -323,16 +318,16 @@ class HybridBacktester:
                 spread_pips = getattr(self.cfg.trading_costs.defaults, 'spread_pips', 2.0)
                 spread_value = spread_pips * pip_size
 
-                lots = risk_mgr.position_size(
-                    self.equity, atr, pip_value, pip_size, ens_long.ensemble_cv_auc_, spread_value, total_open_risk, symbol=sym
+                lots, effective_risk = risk_mgr.position_size(
+                    self.equity, atr, pip_value, pip_size, auc_score, spread_value, total_open_risk, symbol=sym, exploration_mult=dynamic_risk_params.get("exploration_risk_mult", 1.0)
                 )
 
                 if lots > 0:
                     price = current_row["close"]
                     # Use dynamic SL/TP multipliers
-                    sl, tp = risk_mgr.stop_targets(price, atr, direction, ens_long.ensemble_cv_auc_, sym, sl_mult=atr_multiplier_sl, tp_mult=atr_multiplier_tp)
+                    sl, tp = risk_mgr.stop_targets(price, atr, direction, auc_score, sym, sl_mult=atr_multiplier_sl, tp_mult=atr_multiplier_tp)
                     pos = SimPosition(
-                        sym, direction, lots, price, sl, tp, bar_time, atr, ens_long.ensemble_cv_auc_, effective_risk,
+                        sym, direction, lots, price, sl, tp, bar_time, atr, auc_score, effective_risk,
                         entry_equity=self.equity,
                         atr_idx=atr_idx,
                         min_prob_long_idx=min_prob_long_idx,
@@ -340,18 +335,8 @@ class HybridBacktester:
                     )
                     self.positions.append(pos)
                     logger.info(
-                        f"[{sym}][{bar_time}] Opened {direction} position at {price:.5f}. "f"Lots: {lots:.2f}, SL: {sl:.5f}, TP: {tp:.5f}, AUC: {ens_long.ensemble_cv_auc_:.4f}, Risk: {effective_risk:.4f}"
+                        f"[{sym}][{bar_time}] Opened {direction} position at {price:.5f}. "f"Lots: {lots:.2f}, SL: {sl:.5f}, TP: {tp:.5f}, AUC: {auc_score:.4f}"
                     )
-                    # Log chosen parameters and diagnostics for Thompson Sampling analysis
-                    ts_diagnostics = self.risk_controller.diagnostics()
-                    self.ts_param_history.append({
-                        "bar_time": bar_time,
-                        "symbol": sym,
-                        "atr_idx": atr_idx,
-                        "min_prob_long_idx": min_prob_long_idx,
-                        "min_prob_short_idx": min_prob_short_idx,
-                        "diagnostics": ts_diagnostics # Store full diagnostics for later parsing
-                    })
                 else:
                     logger.info(f"[{sym}] Trade skipped due to risk limits or position size zero.")
             else:
@@ -446,7 +431,7 @@ class HybridBacktester:
 
             # Save human-readable CSV of ts history for offline analysis
             if self.ts_param_history:
-                import pandas as pd
+                import pandas as pd # type: ignore
                 df = pd.DataFrame(self.ts_param_history)
                 df.to_csv(self.ts_history_csv, index=False)
 
@@ -513,13 +498,31 @@ class HybridBacktester:
         return self._generate_results()
 
 if __name__ == "__main__":
-    import numpy as np
+    import numpy as np  # type: ignore
     import random
+    import sys
     np.random.seed(42)
     random.seed(42)
     cfg = Cfg.from_yaml("config.yaml")
     setup_logging(level=cfg.logging["level"], to_file=cfg.logging["to_file"], rotate=cfg.logging["rotate"], retention=cfg.logging["retention"])
     
+    mt5_initialized = False
+    if cfg.data_source == "mt5":
+        if sys.platform == "win32":
+            try:
+                import MetaTrader5 as mt5
+                if not mt5.initialize():
+                    logger.error("MetaTrader5 initialize() failed. Is the terminal running?")
+                    exit()
+                mt5_initialized = True
+                logger.info("MetaTrader5 initialized successfully for backtester.")
+            except ImportError:
+                logger.warning("MetaTrader5 library not found, forcing data_source to 'csv'.")
+                cfg.data_source = "csv"
+        else:
+            logger.warning("MetaTrader5 data source is not supported on this OS. Forcing data_source to 'csv'.")
+            cfg.data_source = "csv"
+
     cfg.thompson_sampling.state_file = f"ts_risk_controller_state_backtest_{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
 
     
@@ -535,4 +538,6 @@ if __name__ == "__main__":
             bt._persist_bandit_state(force_path=bt.backtest_ts_state_file)
         except Exception:
             logger.exception("Final persist of bandit state failed.")
+        if mt5_initialized:
+            mt5.shutdown()
 

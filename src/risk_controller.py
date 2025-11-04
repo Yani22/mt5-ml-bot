@@ -1,7 +1,6 @@
 # src/risk_controller.py
-import numpy as np
-import pandas as pd
-from loguru import logger
+import numpy as np  # type: ignore
+from loguru import logger  # type: ignore
 import datetime
 from collections import deque
 import json
@@ -13,6 +12,10 @@ from src.trade import SimPosition # For reward normalization
 from src.linear_thompson import LinearThompson  # new
 
 def _json_serial(obj):
+    """
+    JSON serializer for objects not serializable by default json code.
+    Handles datetime objects by converting them to ISO format strings.
+    """
     if isinstance(obj, (datetime.datetime, datetime.date)):
         return obj.isoformat()
     raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
@@ -20,8 +23,9 @@ def _json_serial(obj):
 
 class ThompsonBandit:
     """
-    Normal/Gaussian Thompson bandit with empirical-per-arm variance estimation.
-    This remains backwards-compatible with your previous usage.
+    Implements a multi-armed bandit using Thompson Sampling with a Gaussian prior
+    and empirical-per-arm variance estimation. This bandit is used to select
+    optimal discrete parameters (arms) based on observed rewards.
     """
     def __init__(self, num_arms: int, prior_mean: float, prior_var: float, min_var: float = 1e-6):
         self.num_arms = int(num_arms)
@@ -90,6 +94,11 @@ class ThompsonBandit:
         return inst
 
 class SymbolRiskState:
+    """
+    Manages the Thompson Sampling and adaptive grid state for a single trading symbol.
+    This includes the bandits themselves, the current grid values, performance metrics
+    like peak equity and consecutive losses, and counters for grid adaptation.
+    """
     def __init__(self, cfg: Cfg, atr_grid: List[float], min_prob_grid_long: List[float], min_prob_grid_short: List[float]):
         self.cfg = cfg
         ts_cfg = cfg.thompson_sampling
@@ -157,6 +166,8 @@ class SymbolRiskState:
             "consecutive_losses": self.consecutive_losses,
             "recent_returns": list(self.recent_returns),
             "last_atr": self.last_atr,
+            "atr_updates_since_last_adaptation": self.atr_updates_since_last_adaptation,
+            "min_prob_updates_since_last_adaptation": self.min_prob_updates_since_last_adaptation,
             "last_reset_time": self.last_reset_time.isoformat() if self.last_reset_time else None,
         }
         if self.contextual_bandit is not None:
@@ -165,66 +176,48 @@ class SymbolRiskState:
 
     @classmethod
     def from_state(cls, cfg: Cfg, state: dict) -> "SymbolRiskState":
-        # When loading from state, we still need the initial grids from config as a fallback
+        # When loading from state, the grids saved in the state file are the source of truth.
+        # Fall back to config only if the state file is missing the grid values.
         atr_grid = state.get("atr_grid_values", list(cfg.thompson_sampling.atr_grid))
         min_prob_grid_long = state.get("min_prob_grid_long_values", list(cfg.thompson_sampling.min_prob_grid_long))
         min_prob_grid_short = state.get("min_prob_grid_short_values", list(cfg.thompson_sampling.min_prob_grid_short))
 
+        # Initialize the instance with the grids from the state file.
         inst = cls(cfg, atr_grid, min_prob_grid_long, min_prob_grid_short)
 
-        # Check if the number of arms has changed for the atr_bandit
-        if state.get("atr_bandit") and state["atr_bandit"].get("num_arms") == len(inst.atr_grid_values):
+        # Now, load the bandit statistics. The number of arms will now match perfectly.
+        if "atr_bandit" in state:
             inst.atr_bandit = ThompsonBandit.from_state(state["atr_bandit"])
-        else:
-            logger.warning("Number of arms for atr_bandit has changed. Re-initializing bandit.")
-            inst.atr_bandit = ThompsonBandit(
-                num_arms=len(inst.atr_grid_values),
-                prior_mean=cfg.thompson_sampling.prior_mean,
-                prior_var=cfg.thompson_sampling.prior_var,
-                min_var=1e-6
-            )
-
-        # Check if the number of arms has changed for the min_prob_bandit_long
-        if state.get("min_prob_bandit_long") and state["min_prob_bandit_long"].get("num_arms") == len(inst.min_prob_grid_long_values):
+        if "min_prob_bandit_long" in state:
             inst.min_prob_bandit_long = ThompsonBandit.from_state(state["min_prob_bandit_long"])
-        else:
-            logger.warning("Number of arms for min_prob_bandit_long has changed. Re-initializing bandit.")
-            inst.min_prob_bandit_long = ThompsonBandit(
-                num_arms=len(inst.min_prob_grid_long_values),
-                prior_mean=cfg.thompson_sampling.prior_mean,
-                prior_var=cfg.thompson_sampling.prior_var,
-                min_var=1e-6
-            )
-
-        # Check if the number of arms has changed for the min_prob_bandit_short
-        if state.get("min_prob_bandit_short") and state["min_prob_bandit_short"].get("num_arms") == len(inst.min_prob_grid_short_values):
+        if "min_prob_bandit_short" in state:
             inst.min_prob_bandit_short = ThompsonBandit.from_state(state["min_prob_bandit_short"])
-        else:
-            logger.warning("Number of arms for min_prob_bandit_short has changed. Re-initializing bandit.")
-            inst.min_prob_bandit_short = ThompsonBandit(
-                num_arms=len(inst.min_prob_grid_short_values),
-                prior_mean=cfg.thompson_sampling.prior_mean,
-                prior_var=cfg.thompson_sampling.prior_var,
-                min_var=1e-6
-            )
 
         inst.peak_equity = state.get("peak_equity", inst.peak_equity)
         inst.current_equity = state.get("current_equity", inst.current_equity)
         inst.consecutive_losses = state.get("consecutive_losses", inst.consecutive_losses)
         inst.recent_returns = deque(state.get("recent_returns", []), maxlen=cfg.thompson_sampling.rule_rolling_window)
         inst.last_atr = state.get("last_atr", inst.last_atr)
+        inst.atr_updates_since_last_adaptation = state.get("atr_updates_since_last_adaptation", inst.atr_updates_since_last_adaptation)
+        inst.min_prob_updates_since_last_adaptation = state.get("min_prob_updates_since_last_adaptation", inst.min_prob_updates_since_last_adaptation)
         last_reset_time_str = state.get("last_reset_time")
         inst.last_reset_time = datetime.datetime.fromisoformat(last_reset_time_str) if last_reset_time_str else None
+        
         if "contextual_bandit" in state and getattr(cfg.thompson_sampling, "contextual_enabled", False):
-            # Re-initialize contextual bandit with loaded grid size
+            # Re-initialize contextual bandit with the correct number of arms from the loaded grid
             ctx_dim = int(getattr(cfg.thompson_sampling, "context_dim", 9))
+            # Ensure the contextual bandit is created with the correct number of arms
             inst.contextual_bandit = LinearThompson(num_arms=len(inst.atr_grid_values), dim=ctx_dim, lambda_prior=1.0, noise_var=float(cfg.thompson_sampling.obs_var or 1.0))
+            # Now load the state into the correctly sized bandit
             inst.contextual_bandit = LinearThompson.from_state(state["contextual_bandit"])
+            
         return inst
 
 class RiskController:
     """
     Manages Thompson Sampling bandits and rule-based scaling for multiple symbols.
+    It orchestrates the selection of optimal risk parameters, handles dynamic
+    grid adaptation, and triggers bandit resets based on performance metrics.
     """
     def __init__(self, cfg: Cfg, notifier=None):
         self.cfg = cfg
@@ -241,11 +234,20 @@ class RiskController:
         self.state_file = cfg.thompson_sampling.state_file
         self.last_daily_retrain_date: Dict[str, Optional[datetime.date]] = {sym: None for sym in cfg.symbols}
         self.bar_counters: Dict[str, int] = {sym: 0 for sym in cfg.symbols}
-        self.load_state()
 
     def _calculate_rule_scale(self, symbol: str, context: Dict[str, Any]) -> float:
         """
-        Computes a rule_scale (0,1] based on context variables.
+        Computes a rule-based scaling factor (between 0 and 1, inclusive) based on
+        various performance and market context variables such as volatility, drawdown,
+        and consecutive losses. This scale is applied to certain risk parameters
+        to dynamically adjust risk exposure.
+
+        Args:
+            symbol: The trading symbol for which to calculate the rule scale.
+            context: A dictionary containing current market and performance context.
+
+        Returns:
+            A float representing the calculated rule scale, typically between 0.01 and 1.0.
         """
         sym_state = self.symbol_states[symbol]
         ts_cfg = self.cfg.thompson_sampling
@@ -282,8 +284,16 @@ class RiskController:
 
     def get_params(self, symbol: str, context: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Samples discrete choices via Thompson Sampling and applies rule-based scaling.
-        Returns a dict with chosen parameters and their discrete indices.
+        Samples discrete choices via Thompson Sampling (or contextual bandit if enabled)
+        and applies rule-based scaling to determine the final risk parameters.
+
+        Args:
+            symbol: The trading symbol for which to get parameters.
+            context: A dictionary containing current market and performance context.
+
+        Returns:
+            A dictionary with chosen parameters (e.g., atr_multiplier_sl, min_prob_long)
+            and their discrete indices, along with rule_scale and exploration metadata.
         """
         if not self.cfg.thompson_sampling.enabled:
             # If TS is disabled, return default risk parameters from cfg, respecting symbol overrides
@@ -392,7 +402,16 @@ class RiskController:
 
     def update_after_trade(self, symbol: str, trade: SimPosition):
         """
-        Updates bandit statistics and rule state after a trade closes.
+        Updates the Thompson Sampling bandit statistics and the rule-based state
+        for a given symbol after a trade has been closed.
+        This function calculates a normalized reward from the trade and uses it
+        to update the relevant bandits (ATR, min_prob_long, min_prob_short, and contextual if enabled).
+        It also checks for and triggers dynamic grid adaptation if conditions are met.
+
+        Args:
+            symbol: The trading symbol associated with the closed trade.
+            trade: The SimPosition object representing the closed trade, containing
+                   details like PnL, chosen parameters, and entry/exit equity.
         """
         if not self.cfg.thompson_sampling.enabled:
             return
@@ -518,13 +537,9 @@ class RiskController:
                         ctx_dim = int(getattr(ts_cfg, "context_dim", 5))
                         old_contextual_bandit = sym_state.contextual_bandit
                         sym_state.contextual_bandit = LinearThompson(num_arms=len(new_atr_grid), dim=ctx_dim, lambda_prior=1.0, noise_var=float(ts_cfg.obs_var or 1.0))
-                        # Transfer state for contextual bandit (more complex, simple re-init for now)
-                        # For LinearThompson, transferring A and b matrices would be ideal, but requires careful mapping.
-                        # For simplicity, we'll re-initialize and let it learn on the new grid.
-                        logger.warning(f"[{symbol}] Contextual bandit re-initialized due to ATR grid adaptation. Previous learning for contextual bandit is reset.")
-                sym_state.atr_updates_since_last_adaptation = 0
-
-            # Check MinProb grid adaptation (Long)
+                        self._transfer_contextual_bandit_state(old_contextual_bandit, old_atr_grid, sym_state.contextual_bandit, new_atr_grid)
+                        logger.debug(f"[{symbol}] Transferred state for contextual bandit.")
+                sym_state.atr_updates_since_last_adaptation = 0            # Check MinProb grid adaptation (Long)
             if sym_state.min_prob_updates_since_last_adaptation >= ts_cfg.adaptation_interval_updates:
                 best_min_prob_long_arm_idx = int(np.argmax(sym_state.min_prob_bandit_long.sum_rewards / np.maximum(1.0, sym_state.min_prob_bandit_long.counts)))
                 new_min_prob_long_grid = self._refine_grid(
@@ -654,12 +669,20 @@ class RiskController:
         return all_diagnostics
 
     def _reset_bandit_state(self, symbol: str, current_time: datetime.datetime):
+        """
+        Resets the bandit states and dynamic grids for a given symbol to their initial configurations.
+        This is typically triggered due to significant performance degradation or market shifts.
+        It clears all learned bandit statistics and resets the grids to the values defined in the config.
+
+        Args:
+            symbol: The trading symbol for which to reset the bandit state.
+            current_time: The current UTC time, used to set the last_reset_time for cooldown.
+        """
         sym_state = self.symbol_states[symbol]
         ts_cfg = self.cfg.thompson_sampling
 
         logger.warning(f"[{symbol}] Triggering bandit reset due to performance degradation or market shift.")
         if self.notifier: self.notifier.send_message(f"<b>RISK ALERT:</b> [{symbol}] Bandit reset triggered!", level="WARNING")
-
         # Reset ThompsonBandits to initial state
         sym_state.atr_bandit = ThompsonBandit(
             num_arms=len(ts_cfg.atr_grid),
@@ -705,6 +728,16 @@ class RiskController:
         logger.info(f"[{symbol}] Bandit reset complete. Cooldown until {current_time + datetime.timedelta(hours=ts_cfg.reset_cooldown_hours)}")
 
     def _check_and_trigger_reset(self, symbol: str, context: Dict[str, Any], ensemble_auc: float):
+        """
+        Checks various conditions (drawdown, consecutive losses, low ensemble AUC) to determine
+        if a bandit reset is necessary for a given symbol. If a reset is triggered and not
+        in a cooldown period, it calls `_reset_bandit_state`.
+
+        Args:
+            symbol: The trading symbol to check for reset conditions.
+            context: A dictionary containing current market and performance context.
+            ensemble_auc: The current AUC score of the ensemble model for the symbol.
+        """
         ts_cfg = self.cfg.thompson_sampling
         if not ts_cfg.bandit_reset_enabled:
             return
@@ -750,7 +783,14 @@ class RiskController:
     def _transfer_bandit_state(old_bandit: ThompsonBandit, old_grid: List[float], new_bandit: ThompsonBandit, new_grid: List[float]):
         """
         Transfers learned statistics from an old bandit to a new bandit with a refined grid.
-        Maps old arm values to the closest new arm values.
+        This is crucial when the grid changes (e.g., during adaptation) to preserve learning.
+        It maps the statistics of old arm values to the closest corresponding new arm values.
+
+        Args:
+            old_bandit: The ThompsonBandit instance with the old grid.
+            old_grid: The list of values for the old grid.
+            new_bandit: The newly initialized ThompsonBandit instance with the new grid.
+            new_grid: The list of values for the new grid.
         """
         if not old_grid or not new_grid:
             return
@@ -770,13 +810,53 @@ class RiskController:
         logger.debug(f"Transferred bandit state from {len(old_grid)} to {len(new_grid)} arms.")
 
     @staticmethod
+    def _transfer_contextual_bandit_state(old_bandit: LinearThompson, old_grid: List[float], new_bandit: LinearThompson, new_grid: List[float]):
+        """
+        Transfers learned statistics (A and b matrices) from an old LinearThompson bandit
+        to a new LinearThompson bandit with a refined grid.
+        Maps old arm values to the closest new arm values and aggregates their statistics.
+        """
+        if not old_grid or not new_grid:
+            return
+
+        # For each old arm, find the closest new arm and transfer its statistics
+        for old_idx, old_val in enumerate(old_grid):
+            # Find the index of the closest value in the new grid
+            new_idx = int(np.argmin(np.abs(np.array(new_grid) - old_val)))
+
+            # Transfer A and b matrices. If multiple old arms map to the same new arm,
+            # their statistics will be summed up.
+            new_bandit.A[new_idx] += old_bandit.A[old_idx]
+            new_bandit.b[new_idx] += old_bandit.b[old_idx]
+        
+        logger.debug(f"Transferred contextual bandit state from {len(old_grid)} to {len(new_grid)} arms.")
+
+    @staticmethod
     def _refine_grid(current_grid: List[float], best_arm_index: int, refinement_factor: float, min_grid_size: int, max_grid_size: int) -> List[float]:
+        """
+        Refines a given grid by narrowing the range around the best-performing arm.
+        The new grid will be centered around the best_val and its range will be
+        `refinement_factor` times the original range around the best_val.
+
+        Args:
+            current_grid: The current list of grid values.
+            best_arm_index: The index of the best-performing arm in the current_grid.
+            refinement_factor: A float between 0 and 1, indicating how much to narrow the grid.
+            min_grid_size: The minimum allowed size for the refined grid.
+            max_grid_size: The maximum allowed size for the refined grid.
+
+        Returns:
+            A new, refined list of grid values.
+        """
         if not (0 < refinement_factor < 1):
             logger.warning(f"Invalid refinement_factor: {refinement_factor}. Must be between 0 and 1. Using 0.5.")
             refinement_factor = 0.5
 
-        if not current_grid or len(current_grid) < min_grid_size:
-            return current_grid # Cannot refine or already too small
+        # Handle cases where refinement is not possible or meaningful
+        if not current_grid or len(current_grid) <= 1 or len(current_grid) < min_grid_size:
+            # If the grid is empty, has only one element, or is already smaller than min_grid_size,
+            # return it as is, as refinement is not applicable or would violate constraints.
+            return current_grid
 
         best_val = current_grid[best_arm_index]
 

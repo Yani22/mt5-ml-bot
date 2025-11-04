@@ -4,8 +4,9 @@ import json
 import os
 import glob
 from typing import Any, Dict
-from loguru import logger
-import numpy as np
+from loguru import logger  # type: ignore
+import numpy as np  # type: ignore
+import datetime # Import datetime module
 
 
 def _load_json(path: str) -> Dict[str, Any]:
@@ -30,10 +31,12 @@ def _save_json(obj: Dict[str, Any], path: str) -> None:
         logger.exception(f"Failed to save JSON to {path}")
 
 
-def find_latest_backtest_state(results_dir: str = "results", pattern: str = "ts_risk_controller_state_backtest_*.json") -> str | None:
-    """Find newest matching backtest state file in results_dir."""
-    search = os.path.join(results_dir, pattern)
-    matches = glob.glob(search)
+def find_latest_backtest_state(symbol: str, results_dir: str = "results") -> str | None:
+    """Find newest matching backtest state file for a specific symbol."""
+    symbol_str = symbol.replace('#', '')
+    pattern = f"ts_risk_controller_state_backtest_{symbol_str}_*.json"
+    search_path = os.path.join(results_dir, pattern)
+    matches = glob.glob(search_path)
     if not matches:
         return None
     matches.sort(key=lambda p: os.path.getmtime(p), reverse=True)
@@ -139,14 +142,36 @@ def merge_warmstart(backtest_state_path: str | None, live_state_path: str, warms
                     merged_band[meta] = b_band[meta]
             merged[bandit_key] = merged_band
 
-        # Merge other top-level fields (peak_equity, current_equity, consecutive_losses, recent_returns, last_atr)
-        for fld in ["peak_equity", "current_equity", "consecutive_losses", "last_atr"]:
-            if fld in lstate:
-                merged[fld] = lstate[fld]
-            elif fld in bstate:
-                merged[fld] = bstate[fld]
-        # recent_returns: pick live's if present, else backtest's
-        merged["recent_returns"] = lstate.get("recent_returns", bstate.get("recent_returns", []))
+        # Merge grid values (atr_grid_values, min_prob_grid_long_values, min_prob_grid_short_values)
+        for grid_key in ["atr_grid_values", "min_prob_grid_long_values", "min_prob_grid_short_values"]:
+            if grid_key in bstate:
+                merged[grid_key] = bstate[grid_key]
+            elif grid_key in lstate:
+                merged[grid_key] = lstate[grid_key]
+            # If neither has it, SymbolRiskState.from_state will fall back to cfg defaults
+
+        # Merge additional SymbolRiskState fields
+        # peak_equity: take the max of live and backtest
+        merged["peak_equity"] = max(lstate.get("peak_equity", 0.0), bstate.get("peak_equity", 0.0))
+
+        # adaptation counters: sum them up
+        merged["atr_updates_since_last_adaptation"] = lstate.get("atr_updates_since_last_adaptation", 0) + bstate.get("atr_updates_since_last_adaptation", 0)
+        merged["min_prob_updates_since_last_adaptation"] = lstate.get("min_prob_updates_since_last_adaptation", 0) + bstate.get("min_prob_updates_since_last_adaptation", 0)
+
+        # last_reset_time: prefer the earlier of the two, or the one that exists
+        l_reset_time_str = lstate.get("last_reset_time")
+        b_reset_time_str = bstate.get("last_reset_time")
+        l_reset_time = datetime.datetime.fromisoformat(l_reset_time_str) if l_reset_time_str else None
+        b_reset_time = datetime.datetime.fromisoformat(b_reset_time_str) if b_reset_time_str else None
+
+        if l_reset_time and b_reset_time:
+            merged["last_reset_time"] = min(l_reset_time, b_reset_time).isoformat()
+        elif l_reset_time:
+            merged["last_reset_time"] = l_reset_time.isoformat()
+        elif b_reset_time:
+            merged["last_reset_time"] = b_reset_time.isoformat()
+        else:
+            merged["last_reset_time"] = None # Ensure it's explicitly set to None if neither exists
 
         merged_sym_states[symbol] = merged
 

@@ -1,8 +1,6 @@
 # src/live_performance_monitor.py
 from __future__ import annotations
-import pandas as pd
-import numpy as np
-from loguru import logger
+from loguru import logger  # type: ignore
 import datetime
 from collections import deque
 from typing import List, Optional, Tuple

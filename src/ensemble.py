@@ -2,15 +2,15 @@
 from __future__ import annotations
 import os
 import pickle
-import pandas as pd
-import numpy as np
-from typing import Dict, Optional, List
+import pandas as pd  # type: ignore
+import numpy as np  # type: ignore
+from typing import Dict, Optional, List, Tuple
 from .strategy_ml import MLStrategy
-from sklearn.isotonic import IsotonicRegression
-from loguru import logger
-from sklearn.metrics import roc_auc_score, f1_score, precision_score, recall_score
-from sklearn.model_selection import TimeSeriesSplit
-from collections import defaultdict
+from .config import Cfg
+from sklearn.isotonic import IsotonicRegression  # type: ignore
+from loguru import logger  # type: ignore
+from sklearn.metrics import roc_auc_score, f1_score, precision_score, recall_score  # type: ignore
+from sklearn.model_selection import TimeSeriesSplit  # type: ignore
 from dataclasses import asdict, field
 from .config import TradingCostsDefaultsCfg
 
@@ -443,7 +443,7 @@ class Ensemble:
                     logger.info(f"[{name}] CV AUC: {self.member_cv_aucs_[name]:.4f}")
 
                 if self.method == "stacking":
-                    from sklearn.linear_model import LogisticRegression
+                    from sklearn.linear_model import LogisticRegression # type: ignore
 
                     try:
                         self._stacker = LogisticRegression(C=self.meta.get("C", 1.0), max_iter=200, random_state=42)

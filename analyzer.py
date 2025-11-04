@@ -1,5 +1,5 @@
 # analyzer.py
-import pandas as pd
+import pandas as pd  # type: ignore
 import sys
 import os
 

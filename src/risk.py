@@ -1,8 +1,8 @@
 # src/risk.py
 from __future__ import annotations
-import pandas as pd
-import numpy as np
-from loguru import logger
+import pandas as pd # type: ignore
+import numpy as np # type: ignore
+from loguru import logger # type: ignore
 from .config import Cfg
 import datetime
 from datetime import timezone, timedelta
@@ -43,13 +43,17 @@ class RiskManager:
         return float(val)
 
     # ---------- Position sizing ----------
-    def position_size(self, equity: float, atr: float, pip_value: float, pip_size: float, auc_score: float, spread_value: float, total_open_risk: float = 0.0, symbol: str | None = None) -> float:
+    def position_size(self, equity: float, atr: float, pip_value: float, pip_size: float, auc_score: float, spread_value: float, total_open_risk: float = 0.0, symbol: str | None = None, exploration_mult: float = 1.0) -> tuple[float, float]:
         # Get symbol-specific or default risk per trade
         risk_per_trade_base = self.cfg.get_symbol_value(symbol, 'risk_per_trade', 0.005)
         risk_per_trade = self._get_dynamic_value(self.cfg.get_symbol_value(symbol, 'dynamic_risk'), auc_score, risk_per_trade_base)
         
         max_risk_allowed = max(0.0, float(self.risk_cfg.max_portfolio_risk) - float(total_open_risk))
         effective_risk = min(risk_per_trade, max_risk_allowed)
+        
+        # Apply exploration multiplier
+        effective_risk *= exploration_mult
+
         risk_amt = float(equity) * float(effective_risk)
 
         atr_mult_sl = self.cfg.get_symbol_value(symbol, 'atr_multiplier_sl', 1.0)
@@ -58,28 +62,52 @@ class RiskManager:
 
         if sl_distance <= 0 or (pip_value is None) or pip_value <= 0:
             logger.warning("Invalid SL distance or pip_value when computing position size")
-            return 0.0
+            return 0.0, 0.0
 
         if pip_size <= 0:
             logger.warning(f"Invalid pip_size for position sizing: {pip_size}")
-            return 0.0
+            return 0.0, 0.0
         
         sl_in_pips = sl_distance / pip_size
         risk_per_lot = sl_in_pips * pip_value
 
         if risk_per_lot <= 0:
             logger.warning(f"Calculated risk per lot is not positive: {risk_per_lot}")
-            return 0.0
+            return 0.0, 0.0
 
         units = risk_amt / risk_per_lot
 
-        if units < 0.01:
-            return 0.0
+        # --- Context-aware volume limit enforcement ---
+        if self.cfg.data_source == "mt5":
+            import MetaTrader5 as mt5
+            symbol_info = mt5.symbol_info(symbol)
+            if not symbol_info:
+                logger.warning(f"[{symbol}] Could not get symbol info for live run. Cannot verify volume limits.")
+                return 0.0, 0.0
 
-        lots = float(np.clip(units, 0.01, 100.0))
+            volume_min = symbol_info.volume_min
+            volume_step = symbol_info.volume_step
+            volume_max = symbol_info.volume_max
+
+            if units < volume_min:
+                logger.info(f"Live run: Calculated lot size {units:.4f} is below broker's minimum of {volume_min}. Skipping trade.")
+                return 0.0, 0.0
+
+            # Adjust lots to the nearest valid step and clip to bounds
+            lots = round(units / volume_step) * volume_step
+            lots = float(np.clip(lots, volume_min, volume_max))
+
+        else:  # For backtesting or other data sources
+            # Get the simulated minimum volume from the config, default to 0.01 if not present
+            sim_min_vol = getattr(self.cfg.backtesting, "simulation_volume_min", 0.01)
+
+            if units < sim_min_vol:
+                logger.info(f"Backtest: Calculated lot size {units:.4f} is below simulation minimum of {sim_min_vol}. Skipping trade.")
+                return 0.0, 0.0
+            lots = float(np.clip(units, sim_min_vol, 100.0))
+
         logger.info(f"Position sizing: equity={equity:.2f}, ATR={atr:.6f}, lots={lots:.4f}, effective_risk={effective_risk:.6f}")
-
-        return round(lots, 2)
+        return round(lots, 2), effective_risk
 
     # ---------- SL / TP ----------
     def stop_targets(self, price: float, atr: float, direction: str, auc_score: float, symbol: str, sl_mult: float | None = None, tp_mult: float | float | None = None):
@@ -317,7 +345,7 @@ class RiskManager:
                     "tp": pos_details.get('tp', 0.0),
                 }
                 
-                logger.info(f"[{symbol}] Sending SL modification for ticket {ticket}: New SL = {new_sl:.5f}")
+                logger.info(f"[{symbol}] Moving SL to breakeven for {direction} position at {entry_price:.5f}")
                 result = mt5.order_send(request)
                 
                 if result and result.retcode == mt5.TRADE_RETCODE_DONE:

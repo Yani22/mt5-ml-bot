@@ -1,6 +1,6 @@
 # src/notifier.py
 import requests
-from loguru import logger
+from loguru import logger  # type: ignore
 from src.config import Cfg
 
 class TelegramNotifier:

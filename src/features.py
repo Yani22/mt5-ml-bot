@@ -1,9 +1,9 @@
 # src/features.py
-import pandas as pd
-import numpy as np
-import ta
-from loguru import logger
-from src.config import FeatureCfg # Import FeatureConfig from src.config
+import pandas as pd  # type: ignore
+import numpy as np  # type: ignore
+import ta  # type: ignore
+from loguru import logger  # type: ignore
+from src.config import FeatureCfg, MtaCfg, InterMarketCfg, PriceActionCfg # Import FeatureConfig from src.config
 
 def add_contextual_features(df: pd.DataFrame, mta_df: pd.DataFrame = None, inter_market_df: pd.DataFrame = None, mta_cfg: "MtaCfg" = None, im_cfg: "InterMarketCfg" = None) -> pd.DataFrame:
     """

@@ -7,11 +7,8 @@ Saves ensembles via utils.save_ensemble() and optionally writes training artifac
 
 from __future__ import annotations
 import os
-import copy
-import pickle
-from loguru import logger
-from datetime import datetime, timezone
-from typing import Optional, List # Added List
+from loguru import logger  # type: ignore
+from typing import List # Added List
 
 from src.config import Cfg
 from src.features import FeatureCfg
@@ -19,9 +16,9 @@ from src.utils import load_ensemble, save_ensemble, safe_retrain_ensemble, load_
 from src.data_manager import DataManager
 from src.ensemble import Ensemble
 from src.labels import generate_long_short_labels
-from backtester import HybridBacktester # New import
-import yaml # New import
-import pandas as pd # New import, as backtester uses it
+import pandas as pd  # type: ignore
+import numpy as np  # type: ignore
+import random
 
 # Safe retraining parameters
 MIN_SAMPLES_TO_RETRAIN = 1000  # don't retrain if less than this many samples
@@ -46,8 +43,6 @@ def train_and_save_model(cfg: Cfg, symbol: str, model_type: str, X: pd.DataFrame
         new_auc = getattr(ens_new, "ensemble_cv_auc_", getattr(ens_new, "cv_auc_", None))
         old_auc = getattr(ens_old, "ensemble_cv_auc_", getattr(ens_old, "cv_auc_", None))
         return {"ok": True, "old_auc": old_auc, "new_auc": new_auc}
-
-from ruamel.yaml import YAML
 
 def retrain_symbol(cfg: Cfg, symbol: str, dry_run: bool = True) -> dict:
     """
@@ -75,9 +70,6 @@ def retrain_symbol(cfg: Cfg, symbol: str, dry_run: bool = True) -> dict:
     results["short"] = train_and_save_model(cfg, symbol, "short", X, y_short, data["close"], dry_run=dry_run)
 
     return results
-
-import numpy as np # Moved to top
-import random # Moved to top
 
 def retrain_all(cfg: Cfg, symbols: list[str], dry_run: bool = True) -> dict:
     results = {}
@@ -122,7 +114,7 @@ if __name__ == "__main__":
     np.random.seed(42)
     random.seed(42)
     import os
-    from dotenv import load_dotenv
+    from dotenv import load_dotenv  # type: ignore
     try:
         import MetaTrader5 as mt5 # type: ignore
     except ImportError:

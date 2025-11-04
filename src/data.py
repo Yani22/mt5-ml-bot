@@ -1,11 +1,11 @@
 # src/data.py
 from __future__ import annotations
-import pandas as pd
+import pandas as pd  # type: ignore
 try:
     import MetaTrader5 as mt5  # type: ignore
 except (ModuleNotFoundError, ImportError):
     mt5 = None
-from loguru import logger
+from loguru import logger  # type: ignore
 
 # Map human timeframe string to MT5 timeframe constants (best-effort)
 if mt5:

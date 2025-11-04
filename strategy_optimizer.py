@@ -1,12 +1,10 @@
 # strategy_optimizer.py
-import optuna
-import pandas as pd
-import numpy as np
-from loguru import logger
+import optuna  # type: ignore
+import numpy as np  # type: ignore
+from loguru import logger  # type: ignore
 import os
-import json
 import copy # Import copy module for deepcopy
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_auc_score  # type: ignore
 from backtester import HybridBacktester
 from src.config import Cfg, RiskCfg # Import Cfg and RiskCfg
 from src.utils import setup_logging
@@ -35,7 +33,8 @@ def run_backtest_for_trial(trial: optuna.Trial, params):
     logger.info("Temporarily disabling safety features (drawdown blocks, watchdog) for this optimization trial.")
     trial_cfg_obj.risk.block_on_drawdown = 1.0  # Set to 100% to effectively disable
     if hasattr(trial_cfg_obj, 'watchdog'):
-        trial_cfg_obj.watchdog.max_consecutive_losses = 0  # Set to 0 to disable
+        trial_cfg_obj.watchdog.enabled = False # Explicitly disable watchdog
+        trial_cfg_obj.watchdog.max_consecutive_losses = 0  # Redundant if disabled, but for clarity
         trial_cfg_obj.watchdog.cooldown_hours = 0.0
 
     # Update the risk parameters of the trial_cfg_obj directly
@@ -75,8 +74,11 @@ def run_backtest_for_trial(trial: optuna.Trial, params):
     # Avoid division by zero; if std is 0, Sharpe is 0.
     # Annualize Sharpe Ratio based on timeframe
     timeframe_minutes = trial_cfg_obj.timeframe_minutes()
-    if timeframe_minutes is None or returns.std() == 0:
-        annualization_factor = 0.0 # Set to 0 if std is 0 to avoid division by zero
+    if timeframe_minutes is None:
+        if returns.std() != 0:
+            logger.error("timeframe_minutes is None, cannot annualize Sharpe Ratio. Check config.yaml timeframe setting.")
+            raise ValueError("Invalid timeframe configuration for Sharpe Ratio annualization.")
+        annualization_factor = 0.0 # If std is 0, Sharpe is 0 anyway
     else:
         # Assuming 252 trading days in a year, and 24*60 minutes in a day
         annualization_factor = np.sqrt(252 * (24 * 60 / timeframe_minutes))
@@ -93,7 +95,17 @@ def objective(trial: optuna.Trial):
     # No longer suggesting risk parameters, as they are handled by RiskController
     # Optuna can still be used to optimize other parameters if needed, or just run a single backtest.
     params = {} # Empty params, as RiskController handles risk parameters
-    
+
+    # --- Feature Tuning (e.g., roc_lags) ---
+    if trial_cfg_obj.features.roc_lags_options:
+        # Optuna suggests one of the predefined roc_lags combinations
+        selected_roc_lags = trial.suggest_categorical(
+            "features.roc_lags",
+            trial_cfg_obj.features.roc_lags_options
+        )
+        trial_cfg_obj.features.roc_lags = selected_roc_lags
+        logger.info(f"Trial {trial.number}: Suggested features.roc_lags = {selected_roc_lags}")
+
     # It's important to handle potential exceptions during backtesting
     try:
         return run_backtest_for_trial(trial, params)
@@ -107,7 +119,7 @@ def main():
     Main function to run the Optuna study.
     """
     setup_logging()
-    logger.info(f"Starting Optuna study '{STUDY_NAME}' with {N_TRIALS} trials.")
+    logger.info(f"Starting Optuna study '{STUDY_NAME}' with {base_cfg_obj.optuna_n_trials} trials.")
     logger.info(f"Storage: {STORAGE_PATH}")
     
     study = optuna.create_study(

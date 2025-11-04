@@ -6,13 +6,12 @@ from multiprocessing import Process
 from dotenv import load_dotenv
 from loguru import logger
 import pandas as pd
-from src.config import Cfg
-from src.features import FeatureConfig
+from src.config import Cfg, FeatureCfg
 import MetaTrader5 as mt5  # type: ignore
 from src.mt5_client import MT5Client
 from src.risk import RiskManager
 from src.execution import Execution
-from src.utils import setup_logging, get_training_data, load_ensemble, save_ensemble, safe_retrain_ensemble, load_optuna_params
+from src.utils import setup_logging, get_training_data, load_ensemble, save_ensemble, safe_retrain_ensemble, load_optuna_params, log_symbol_specific_configs, log_startup_summary
 from src.live_performance_monitor import LivePerformanceMonitor
 from src.notifier import TelegramNotifier
 from src.risk_controller import RiskController
@@ -30,7 +29,7 @@ from typing import List
 def _ensure_min_grid_size(thresholds: List[float], best_thr: float, min_size: int = 5, spread: float = 0.02) -> List[float]:
     """Ensures a list of thresholds has at least min_size elements, expanding around best_thr if needed."""
     if len(thresholds) >= min_size:
-        return sorted(list(set(thresholds))) # Ensure unique and sorted
+        return sorted(list(set(thresholds)))  # Ensure unique and sorted
 
     # If not enough, generate a new grid around best_thr
     new_thresholds = [best_thr]
@@ -38,10 +37,10 @@ def _ensure_min_grid_size(thresholds: List[float], best_thr: float, min_size: in
     for i in range(1, half_size + 1):
         new_thresholds.append(best_thr + i * spread)
         new_thresholds.append(best_thr - i * spread)
-    
+
     # Combine with existing and ensure unique, sorted, and within reasonable bounds
     combined = sorted(list(set(thresholds + new_thresholds)))
-    
+
     # Filter to reasonable range (e.g., 0.0 to 1.0 for probabilities)
     combined = [round(x, 2) for x in combined if 0.0 <= x <= 1.0]
 
@@ -57,9 +56,9 @@ load_dotenv()
 setup_logging()
 
 # --- Metrics Logging Setup ---
-METRICS_CSV_FILE = "risk_metrics.csv"
+METRICS_CSV_FILE = "results/risk_metrics.csv"
 METRICS_HEADERS = [
-    "timestamp", "symbol", "event_type", "atr_idx", "min_prob_idx",
+    "timestamp", "symbol", "event_type", "atr_idx", "min_prob_long_idx", "min_prob_short_idx",
     "atr_mult_sl", "atr_mult_tp", "min_prob_long", "min_prob_short",
     "rule_scale", "reward", "equity", "peak_equity", "drawdown", "ensemble_auc"
 ]
@@ -73,7 +72,6 @@ def _initialize_metrics_csv():
 
 # Call initialization at startup
 _initialize_metrics_csv()
-
 
 def log_metrics_to_csv(data: Dict[str, Any]):
     with open(METRICS_CSV_FILE, 'a', newline='') as f:
@@ -111,36 +109,8 @@ def print_dashboard(cfg, risk, ens, X, sym, bar_counter, is_first_symbol, equity
             f"Ticket({p.get('ticket')}, {p.get('direction')}, {p.get('lots')} lots)"
             for p in positions_for_symbol
         ]) if positions_for_symbol else "None"
-        logger.info(f"[{sym}] Bar: {bar_counter} | ATR={atr:.5f} | p_up={p_up:.3f} | Open Positions: {open_pos_str}")
 
-from ruamel.yaml import YAML
-
-def _ensure_min_grid_size(thresholds: List[float], best_thr: float, min_size: int = 5, spread: float = 0.02) -> List[float]:
-    """Ensures a list of thresholds has at least min_size elements, expanding around best_thr if needed."""
-    if len(thresholds) >= min_size:
-        return sorted(list(set(thresholds))) # Ensure unique and sorted
-
-    # If not enough, generate a new grid around best_thr
-    new_thresholds = [best_thr]
-    half_size = (min_size - 1) // 2
-    for i in range(1, half_size + 1):
-        new_thresholds.append(best_thr + i * spread)
-        new_thresholds.append(best_thr - i * spread)
-    
-    # Combine with existing and ensure unique, sorted, and within reasonable bounds
-    combined = sorted(list(set(thresholds + new_thresholds)))
-    
-    # Filter to reasonable range (e.g., 0.0 to 1.0 for probabilities)
-    combined = [round(x, 2) for x in combined if 0.0 <= x <= 1.0]
-
-    # If still not enough after filtering, just take a wider range
-    if len(combined) < min_size:
-        combined = np.linspace(max(0.0, best_thr - spread * min_size), min(1.0, best_thr + spread * min_size), min_size).tolist()
-        combined = [round(x, 2) for x in combined]
-
-    return sorted(list(set(combined)))
-
-def run_retraining_in_background(cfg, sym, feature_cfg, dry_run, notifier):
+def run_retraining_in_background(cfg, sym, feature_cfg, dry_run, notifier, optuna_params_per_symbol):
     """
     A wrapper function to run the entire retraining pipeline for both long and short models in a separate process.
     This function now saves optimized parameters to the symbol_overrides section of config.yaml.
@@ -158,25 +128,25 @@ def run_retraining_in_background(cfg, sym, feature_cfg, dry_run, notifier):
         y_long, y_short = generate_long_short_labels(full_data, cfg.prediction_horizon, feature_cfg.min_pct_change)
 
         logger.info(f"[{sym}] Retraining LONG model...")
-        ens_old_long = load_ensemble(cfg, sym, "long")
-        safe_retrain_ensemble(cfg, sym, ens_old_long, full_X, y_long, full_data["close"], dry_run=dry_run, model_type="long")
-        
+        ens_old_long = load_ensemble(cfg, sym, "long", model_params=optuna_params_per_symbol[sym])
+        safe_retrain_ensemble(cfg, sym, ens_old_long, full_X, y_long, full_data["close"], dry_run=dry_run, model_type="long", model_params=optuna_params_per_symbol[sym])
+
         logger.info(f"[{sym}] Retraining SHORT model...")
-        ens_old_short = load_ensemble(cfg, sym, "short")
-        safe_retrain_ensemble(cfg, sym, ens_old_short, full_X, y_short, full_data["close"], dry_run=dry_run, model_type="short")
+        ens_old_short = load_ensemble(cfg, sym, "short", model_params=optuna_params_per_symbol[sym])
+        safe_retrain_ensemble(cfg, sym, ens_old_short, full_X, y_short, full_data["close"], dry_run=dry_run, model_type="short", model_params=optuna_params_per_symbol[sym])
 
         logger.info(f"[{sym}] Background retraining process for LONG and SHORT models finished.")
 
     except Exception as e:
         logger.exception(f"[{sym}] Background retraining process failed: {e}")
 
-def _handle_model_acceptance(sym, cfg, ens_per_symbol_long, ens_per_symbol_short, active_model_auc, live_monitor, notifier):
+def _handle_model_acceptance(sym, cfg, ens_per_symbol_long, ens_per_symbol_short, active_model_auc, live_monitor, notifier, optuna_params_per_symbol):
     """Loads newly trained models, compares them, and accepts them if they are an improvement."""
     logger.info(f"[{sym}] Handling model acceptance...")
     try:
         new_ens_long = load_ensemble(cfg, sym, "long")
         new_ens_short = load_ensemble(cfg, sym, "short")
-        
+
         old_ens_long = ens_per_symbol_long[sym]
         old_ens_short = ens_per_symbol_short[sym]
 
@@ -216,9 +186,6 @@ def _handle_model_acceptance(sym, cfg, ens_per_symbol_long, ens_per_symbol_short
     except Exception as e:
         logger.exception(f"[{sym}] Error during model acceptance: {e}")
 
-
-
-
 def run(dry_run: bool = False):
     """ Production-ready main loop for hybrid adaptive MT5 ML bot. """
     RECONNECTION_RETRY_SECONDS = 60
@@ -240,95 +207,20 @@ def run(dry_run: bool = False):
     # Initialize DataManager
     data_manager = DataManager(cfg)
 
-    # --- MT5 Connection ---
-    mt5c = MT5Client( 
-        os.getenv("MT5_LOGIN"),
-        os.getenv("MT5_PASSWORD"),
-        os.getenv("MT5_SERVER"),
-        os.getenv("MT5_PATH"),
-    )
-    if not mt5c.connect():
-        logger.error("MT5 connection failed. Exiting.")
-        notifier.send_message("<b>CRITICAL:</b> MT5 connection failed. Bot exiting.", level="CRITICAL")
-        return
-
-    # Get initial equity from MT5 account info
-    account_info = mt5.account_info()
-    initial_equity = getattr(account_info, "equity", 100.0) if account_info else 100.0
-    cfg.initial_equity = initial_equity # Set initial equity in Cfg for the monitor
-
-    live_monitor = LivePerformanceMonitor(cfg)
-    live_monitor.load_state() # Load previous state on startup
-
     # --- Initial Feature Config Loading ---
+    optuna_params_per_symbol = {}
     feature_cfg_per_symbol = {}
     for sym in cfg.symbols:
         optuna_params = load_optuna_params(sym, cfg)
+        optuna_params_per_symbol[sym] = optuna_params
         feature_params = optuna_params.get('features', {}) if optuna_params else {}
-        feature_cfg_per_symbol[sym] = FeatureConfig(**feature_params)
-
-    # --- Optional: Force Retraining on Startup ---
-    if getattr(cfg, 'force_retrain_on_startup', False):
-        logger.info("Force retrain on startup is enabled. Retraining all symbols synchronously before starting.")
-        for sym in cfg.symbols:
-            run_retraining_in_background(cfg, sym, feature_cfg_per_symbol[sym], dry_run, notifier)
-        logger.info("Forced startup retraining complete for all symbols. The bot will now load the new models.")
-    else:
-        logger.info("Force retrain on startup is disabled.")
-
-    # --- Load Ensembles and Feature Configs ---
-    ens_per_symbol_long = {}
-    ens_per_symbol_short = {}
-    active_model_auc = {} # To store AUC of currently active model
-    feature_cfg_per_symbol = {}
-    # Single pass: load ensembles and feature configs once, and bootstrap history via DataManager
-    for sym in cfg.symbols:
-        ens_per_symbol_long[sym] = load_ensemble(cfg, sym, "long")
-        ens_per_symbol_short[sym] = load_ensemble(cfg, sym, "short")
-
-        # Bootstrap historical data with caching (chunked fetch if needed)
-        logger.info(f"[{sym}] Bootstrapping local history...")
-        # support both nested fetch config and legacy cfg.initial_fetch_bars
-        initial_bars = getattr(cfg.fetch, "initial_fetch_bars", getattr(cfg, "history_bars", 30000))
-
-        data_manager.bootstrap_history(sym, initial_bars=initial_bars)
-
-    bar_counters = {sym: 0 for sym in cfg.symbols}
-    last_bar_time = {sym: None for sym in cfg.symbols}
-    X_per_symbol = {}
-    # Warm-start bandit: merge latest backtest priors into live state file BEFORE instantiating RiskController
-    try:
-        latest_backtest = find_latest_backtest_state(results_dir="results")
-        if latest_backtest:
-            warm_weight = getattr(getattr(cfg, "thompson_sampling", {}), "warmstart_weight", 1.0)
-            logger.info(f"Found backtest bandit state: {latest_backtest}; merging into live state (weight={warm_weight})")
-            
-            # Ensure results directory exists for the state file
-            os.makedirs("results", exist_ok=True)
-            live_state_path = os.path.join("results", getattr(getattr(cfg, "thompson_sampling", {}), "state_file", "ts_risk_controller_state.json"))
-            merge_warmstart(latest_backtest, live_state_path, warmstart_weight=warm_weight)
-        else:
-            logger.info("No backtest bandit state file found to warm-start.")
-    except Exception:
-        logger.exception("Warmstart merge failed; continuing without warmstart.")
-
-    # Instantiate risk controller AFTER warmstart merge so it loads the merged state
-    risk = RiskManager(cfg, notifier=notifier) # Pass notifier
-    risk_controller = RiskController(cfg, notifier=notifier) # Instantiate RiskController
-    loaded_open_positions = risk_controller.load_state() # Load state again to get open_positions_cache
-
-    # Execution object (single instance)
-    exe = Execution(ens_per_symbol_long, ens_per_symbol_short, risk, mt5c, dry_run=dry_run, notifier=notifier)
-    exe.risk.open_positions_cache.update(loaded_open_positions) # Initialize exe's cache with loaded data
-
-    # Reconcile open positions with MT5 to ensure accuracy
-    exe.reconcile_open_positions_with_mt5()
+        feature_cfg_per_symbol[sym] = FeatureCfg(**feature_params)
 
     retraining_processes = {}
-    retraining_status = {sym: False for sym in cfg.symbols} # Track if retraining is active
-    trading_blocked_by_low_new_model_auc = {sym: False for sym in cfg.symbols} # Track if trading is blocked due to low new model AUC
-    last_diagnostics_log_time = 0.0 # For throttling diagnostics logging
-    last_retrain_date = None # Track last retraining date
+    retraining_status = {sym: False for sym in cfg.symbols}  # Track if retraining is active
+    trading_blocked_by_low_new_model_auc = {sym: False for sym in cfg.symbols}  # Track if trading is blocked due to low new model AUC
+    last_diagnostics_log_time = 0.0  # For throttling diagnostics logging
+    last_retrain_date = {sym: None for sym in cfg.symbols}  # Track last retraining date per symbol
 
     try:
         # Outer loop for MT5 reconnection attempts
@@ -345,28 +237,28 @@ def run(dry_run: bool = False):
                     logger.error("MT5 initial connection failed. Retrying in 60 seconds...")
                     notifier.send_message("<b>CRITICAL:</b> MT5 initial connection failed. Retrying...", level="CRITICAL")
                     time.sleep(RECONNECTION_RETRY_SECONDS)
-                    continue # Try connecting again
-                
+                    continue  # Try connecting again
+
                 logger.info("MT5 connection established.")
                 notifier.send_message("MT5 connection established.", level="INFO")
 
                 # Get initial equity from MT5 account info
                 account_info = mt5.account_info()
                 initial_equity = getattr(account_info, "equity", 100.0) if account_info else 100.0
-                cfg.initial_equity = initial_equity # Set initial equity in Cfg for the monitor
+                cfg.initial_equity = initial_equity  # Set initial equity in Cfg for the monitor
 
                 live_monitor = LivePerformanceMonitor(cfg)
-                live_monitor.load_state() # Load previous state on startup
+                live_monitor.load_state()  # Load previous state on startup
 
                 # --- Load Ensembles and Feature Configs ---
                 ens_per_symbol_long = {}
                 ens_per_symbol_short = {}
-                active_model_auc = {} # To store AUC of currently active model
-                feature_cfg_per_symbol = {}
+                active_model_auc = {}  # To store AUC of currently active model
+
                 # Single pass: load ensembles and feature configs once, and bootstrap history via DataManager
                 for sym in cfg.symbols:
-                    ens_per_symbol_long[sym] = load_ensemble(cfg, sym, "long")
-                    ens_per_symbol_short[sym] = load_ensemble(cfg, sym, "short")
+                    ens_per_symbol_long[sym] = load_ensemble(cfg, sym, "long", model_params=optuna_params_per_symbol[sym])
+                    ens_per_symbol_short[sym] = load_ensemble(cfg, sym, "short", model_params=optuna_params_per_symbol[sym])
                     active_model_auc[sym] = getattr(ens_per_symbol_long[sym], "ensemble_cv_auc_", getattr(ens_per_symbol_long[sym], "cv_auc_", 0.5))
                     logger.info(f"[{sym}] Active model AUC (Long): {active_model_auc[sym]:.4f}")
 
@@ -380,49 +272,46 @@ def run(dry_run: bool = False):
                 bar_counters = {sym: 0 for sym in cfg.symbols}
                 last_bar_time = {sym: None for sym in cfg.symbols}
                 X_per_symbol = {}
+
                 # Warm-start bandit: merge latest backtest priors into live state file BEFORE instantiating RiskController
                 try:
-                    latest_backtest = find_latest_backtest_state(results_dir="results")
-                    if latest_backtest:
-                        warm_weight = getattr(getattr(cfg, "thompson_sampling", {}), "warmstart_weight", 1.0)
-                        logger.info(f"Found backtest bandit state: {latest_backtest}; merging into live state (weight={warm_weight})")
-                        live_state_path = getattr(getattr(cfg, "thompson_sampling", {}), "state_file", "ts_risk_controller_state.json")
-                        merge_warmstart(latest_backtest, live_state_path, warmstart_weight=warm_weight)
-                    else:
-                        logger.info("No backtest bandit state file found to warm-start.")
+                    for sym in cfg.symbols:
+
+                        latest_backtest = find_latest_backtest_state(symbol=sym, results_dir="results")
+                        if latest_backtest:
+                            warm_weight = getattr(getattr(cfg, "thompson_sampling", {}), "warmstart_weight", 1.0)
+                            logger.info(f"Found backtest bandit state for {sym}: {latest_backtest}; merging into live state (weight={warm_weight})")
+
+                            # Ensure results directory exists for the state file
+                            os.makedirs("results", exist_ok=True)
+                            live_state_path = getattr(getattr(cfg, "thompson_sampling", {}), "state_file", "ts_risk_controller_state.json")
+                            merge_warmstart(latest_backtest, live_state_path, warmstart_weight=warm_weight)
+                        else:
+                            logger.info(f"No backtest bandit state file found to warm-start for {sym}.")
                 except Exception:
-                    logger.exception("Warmstart merge failed; continuing without warmstart.")
+                    logger.exception(f"Warmstart merge failed; continuing without warmstart.")
 
                 # Instantiate risk controller AFTER warmstart merge so it loads the merged state
-                risk = RiskManager(cfg, notifier=notifier) # Pass notifier
-                risk_controller = RiskController(cfg, notifier=notifier) # Instantiate RiskController
-                loaded_open_positions = risk_controller.load_state() # Load state again to get open_positions_cache
+                risk = RiskManager(cfg, notifier=notifier)  # Pass notifier
+                risk_controller = RiskController(cfg, notifier=notifier)  # Instantiate RiskController
+                loaded_open_positions = risk_controller.load_state()  # Load state again to get open_positions_cache
 
                 # Execution object (single instance)
-                exe = Execution(ens_per_symbol_long, ens_per_symbol_short, risk, mt5c, dry_run=dry_run, notifier=notifier)
-                exe.risk.open_positions_cache.update(loaded_open_positions) # Initialize exe's cache with loaded data
+                exe = Execution(ens_per_symbol_long, ens_per_symbol_short, risk, mt5c, data_manager, dry_run=dry_run, notifier=notifier)
+                exe.risk.open_positions_cache.update(loaded_open_positions)  # Initialize exe's cache with loaded data
 
                 # Reconcile open positions with MT5 to ensure accuracy
                 exe.reconcile_open_positions_with_mt5()
 
-                retraining_processes = {}
-                retraining_status = {sym: False for sym in cfg.symbols} # Track if retraining is active
-                trading_blocked_by_low_new_model_auc = {sym: False for sym in cfg.symbols} # Track if trading is blocked due to low new model AUC
-                last_diagnostics_log_time = 0.0 # For throttling diagnostics logging
-                last_retrain_date = None # Track last retraining date
+                retraining_status = {sym: False for sym in cfg.symbols}  # Track if retraining is active
+                trading_blocked_by_low_new_model_auc = {sym: False for sym in cfg.symbols}  # Track if trading is blocked due to low new model AUC
+                last_diagnostics_log_time = 0.0  # For throttling diagnostics logging
+                last_retrain_date = {sym: None for sym in cfg.symbols}  # Track last retraining date per symbol
 
                 # Inner loop for trading operations
                 while True:
-                    current_loop_time = time.time() # Capture current time for throttling
-
-                    # --- Scheduled Retraining Check ---
-                    time_to_retrain_today = False
+                    current_loop_time = time.time()  # Capture current time for throttling
                     now_utc = datetime.datetime.now(datetime.timezone.utc)
-                    if cfg.fetch.retrain_time_utc and (last_retrain_date is None or last_retrain_date < now_utc.date()):
-                        retrain_hour, retrain_minute = map(int, cfg.fetch.retrain_time_utc.split(':'))
-                        if now_utc.hour > retrain_hour or (now_utc.hour == retrain_hour and now_utc.minute >= retrain_minute):
-                            time_to_retrain_today = True
-                            last_retrain_date = now_utc.date()
 
                     # refresh account info once per loop
                     account_info = mt5.account_info()
@@ -436,7 +325,8 @@ def run(dry_run: bool = False):
                         drawdown = 0.0
 
                     # --- Process closed trades first so bandit gets rewards before opening new trades ---
-                    closed_trades_this_cycle = exe.check_closed_trades()
+                    latest_prices = {sym: mt5.symbol_info_tick(sym).ask for sym in cfg.symbols}
+                    closed_trades_this_cycle = exe.check_closed_trades(latest_prices)
 
                     # --- FIX: Reconstruct sequential equity to provide accurate reward normalization ---
                     # The `equity` from account_info is after all trades in the cycle have closed.
@@ -445,13 +335,13 @@ def run(dry_run: bool = False):
                         # Assuming trades are sorted by close time from check_closed_trades()
                         total_profit_this_cycle = sum(t.pnl for t in closed_trades_this_cycle)
                         equity_before_cycle = equity - total_profit_this_cycle
-                        
+
                         running_equity = equity_before_cycle
                         for trade in closed_trades_this_cycle:
                             try:
                                 # Calculate the exact equity at the moment this trade closed
                                 exit_equity = running_equity + trade.pnl
-                                
+
                                 # Set exit_equity on the trade object so RiskController can compute accurate reward
                                 # This assumes the trade object is mutable and the controller knows to use this attribute.
                                 trade.exit_equity = exit_equity
@@ -467,9 +357,10 @@ def run(dry_run: bool = False):
                                     "symbol": trade.symbol,
                                     "event_type": "trade_reward",
                                     "atr_idx": trade.atr_idx,
-                                    "min_prob_idx": trade.min_prob_idx,
+                                    "min_prob_long_idx": trade.min_prob_long_idx,
+                                    "min_prob_short_idx": trade.min_prob_short_idx,
                                     "reward": normalized_reward,
-                                    "equity": exit_equity, # Log the accurate equity
+                                    "equity": exit_equity,  # Log the accurate equity
                                     "peak_equity": risk.equity_peak,
                                     "drawdown": drawdown,
                                     "ensemble_auc": trade_auc
@@ -496,7 +387,7 @@ def run(dry_run: bool = False):
                                     if notifier: notifier.send_message(message, level="ERROR")
                                 else:
                                     # Call the centralized model acceptance function
-                                    _handle_model_acceptance(sym, cfg, ens_per_symbol_long, ens_per_symbol_short, active_model_auc, live_monitor, notifier)
+                                    _handle_model_acceptance(sym, cfg, ens_per_symbol_long, ens_per_symbol_short, active_model_auc, live_monitor, notifier, optuna_params_per_symbol)
 
                                 del retraining_processes[sym]
                                 retraining_status[sym] = False
@@ -521,7 +412,7 @@ def run(dry_run: bool = False):
                                 print_dashboard(
                                     cfg,
                                     risk,
-                                    ens_per_symbol_long.get(sym), # Use long model for dashboard prob
+                                    ens_per_symbol_long.get(sym),  # Use long model for dashboard prob
                                     X_per_symbol.get(sym),
                                     sym,
                                     bar_counters[sym],
@@ -535,18 +426,30 @@ def run(dry_run: bool = False):
 
                             # --- Conditional Retraining Logic ---
                             should_retrain = False
+                            time_to_retrain_today = False
+                            
+                            # Get symbol-specific or global retrain time
+                            retrain_time_str = cfg.get_symbol_value(sym, 'retrain_time_utc', cfg.fetch.retrain_time_utc)
+
+                            if retrain_time_str:
+                                if last_retrain_date[sym] is None or last_retrain_date[sym] < now_utc.date():
+                                    retrain_hour, retrain_minute = map(int, retrain_time_str.split(':'))
+                                    if now_utc.hour > retrain_hour or (now_utc.hour == retrain_hour and now_utc.minute >= retrain_minute):
+                                        time_to_retrain_today = True
+                                        last_retrain_date[sym] = now_utc.date()
+
                             if time_to_retrain_today:
                                 should_retrain = True
-                            elif not cfg.fetch.retrain_time_utc:  # Fallback to bar count if time-based is disabled
+                            elif not retrain_time_str:  # Fallback to bar count if time-based is disabled for this symbol
                                 if bar_counters[sym] > 0 and bar_counters[sym] % cfg.retrain_every_bars == 0:
                                     should_retrain = True
-                            
+
                             if should_retrain:
                                 if cfg.fetch.retrain_in_background:
                                     if sym not in retraining_processes:
                                         logger.info(f"[{sym}] Triggering background retraining (time-based: {time_to_retrain_today}).")
                                         if notifier: notifier.send_message(f"[{sym}] Background retraining started.", level="INFO")
-                                        p = Process(target=run_retraining_in_background, args=(cfg, sym, feature_cfg, dry_run, notifier))
+                                        p = Process(target=run_retraining_in_background, args=(cfg, sym, feature_cfg, dry_run, notifier, optuna_params_per_symbol))
                                         p.start()
                                         retraining_processes[sym] = p
                                         retraining_status[sym] = True
@@ -556,12 +459,12 @@ def run(dry_run: bool = False):
                                     # Synchronous retraining
                                     logger.info(f"[{sym}] Starting synchronous retraining. Trading loop will pause.")
                                     if notifier: notifier.send_message(f"[{sym}] Synchronous retraining started. Bot is paused.", level="INFO")
-                                    
-                                    run_retraining_in_background(cfg, sym, feature_cfg, dry_run, notifier)
-                                    
+
+                                    run_retraining_in_background(cfg, sym, feature_cfg, dry_run, notifier, optuna_params_per_symbol)
+
                                     logger.info(f"[{sym}] Synchronous retraining finished. Reloading models...")
-                                    _handle_model_acceptance(sym, cfg, ens_per_symbol_long, ens_per_symbol_short, active_model_auc, live_monitor, notifier)
-                                    
+                                    _handle_model_acceptance(sym, cfg, ens_per_symbol_long, ens_per_symbol_short, active_model_auc, live_monitor, notifier, optuna_params_per_symbol)
+
                                     logger.info(f"[{sym}] Models reloaded. Resuming trading loop.")
                                     if notifier: notifier.send_message(f"[{sym}] Synchronous retraining finished. Resuming operations.", level="INFO")
 
@@ -570,7 +473,7 @@ def run(dry_run: bool = False):
                                 atr = float(X["atr_14"].iloc[-1]) if (X is not None and not X.empty) else 0.0
                             except Exception:
                                 atr = 0.0
-                            
+
                             risk.manage_open_positions(sym, atr)
 
                             # --- Consecutive Loss Watchdog Check ---
@@ -579,7 +482,7 @@ def run(dry_run: bool = False):
                                 if max_losses > 0:
                                     consecutive_losses = risk_controller.symbol_states[sym].consecutive_losses
                                     if consecutive_losses >= max_losses:
-                                        if risk.cooldown_until is None: # Only trigger if not already in cooldown
+                                        if risk.cooldown_until is None:  # Only trigger if not already in cooldown
                                             logger.warning(f"[{sym}] Watchdog triggered: {consecutive_losses} consecutive losses >= threshold ({max_losses}). Pausing trading.")
                                             risk._trigger_cooldown(cooldown_hours=getattr(cfg.watchdog, "cooldown_hours", 1))
                                             if notifier:
@@ -610,8 +513,8 @@ def run(dry_run: bool = False):
                             context = {
                                 "vol": atr,
                                 "equity": equity,
-                                "peak_equity": risk.equity_peak, 
-                                "ensemble_auc": ens_long.ensemble_cv_auc_, # Use long model's AUC for context
+                                "peak_equity": risk.equity_peak,
+                                "ensemble_auc": ens_long.ensemble_cv_auc_,  # Use long model's AUC for context
                                 "adx": float(last_features["adx"].iloc[0]) if "adx" in last_features.columns else 0.0,
                                 "macd_diff": float(last_features["macd_diff"].iloc[0]) if "macd_diff" in last_features.columns else 0.0,
                                 "volatility_10": float(last_features["volatility_10"].iloc[0]) if "volatility_10" in last_features.columns else 0.0,
@@ -642,7 +545,7 @@ def run(dry_run: bool = False):
 
                             if direction:
                                 total_open_risk = sum([pos.get('risk', 0.0) for pos in risk.open_positions_cache.values()])
-                                
+
                                 symbol_info = mt5.symbol_info(sym)
                                 if not symbol_info:
                                     logger.warning(f"[{sym}] Symbol info unavailable. Skipping position size calculation.")
@@ -655,27 +558,31 @@ def run(dry_run: bool = False):
                                 spread_pips = getattr(cfg.trading_costs.defaults, 'spread_pips', 2.0)
                                 spread_value = spread_pips * pip_size
 
-                                lots = risk.position_size(equity, atr, pip_value, pip_size, auc_score, spread_value, total_open_risk, symbol=sym)
+                                lots, effective_risk = risk.position_size(equity, atr, pip_value, pip_size, auc_score, spread_value, total_open_risk, symbol=sym)
 
                                 if lots <= 0:
                                     logger.info(f"[{sym}] Trade skipped due to risk limits or position size zero.")
                                 else:
                                     price = float(mt5.symbol_info_tick(sym).ask) if direction == "long" else float(mt5.symbol_info_tick(sym).bid)
                                     sl, tp = risk.stop_targets(price, atr, direction, auc_score, sym, sl_mult=dynamic_risk_params["atr_multiplier_sl"], tp_mult=dynamic_risk_params["atr_multiplier_tp"])
-                                    
+
                                     result = exe.trade(
-                                        symbol=symbol,
+                                        symbol=sym,
                                         direction=direction,
                                         lots=lots,
                                         price=price,
                                         sl=sl,
                                         tp=tp,
+                                        equity=equity,
+                                        pip_size=pip_size,
+                                        pip_value=pip_value,
                                         X=last_features,
                                         atr=atr,
                                         auc_score=auc_score,
                                         total_open_risk=total_open_risk,
                                         atr_idx=dynamic_risk_params["atr_idx"],
-                                        min_prob_idx=dynamic_risk_params.get("min_prob_long_idx") if direction == "long" else dynamic_risk_params.get("min_prob_short_idx")
+                                        min_prob_long_idx=dynamic_risk_params.get("min_prob_long_idx") if direction == "long" else -1,
+                                        min_prob_short_idx=dynamic_risk_params.get("min_prob_short_idx") if direction == "short" else -1
                                     )
 
                                     if result.ok:
@@ -698,13 +605,19 @@ def run(dry_run: bool = False):
                         last_diagnostics_log_time = current_loop_time
 
                     time.sleep(cfg.timeframe_seconds() or 60)
-
+                    #TODO: why not to make a countdown for 5 minutes and wakes up 3-5 seconds before 5 minutes to make sure it sees 
+                    # the new bar at the same exact time the new bar appears instead of sleeping every timeframe it would make huge 
+                    # delays probably detecting a new bar at exactly 5 seconds before another new bar appears
+                    
             except Exception as e:
                 logger.exception(f"MT5 connection lost or critical error in trading loop: {e}. Attempting to reconnect...")
                 notifier.send_message(f"<b>CRITICAL:</b> MT5 connection lost or critical error: {e}. Attempting to reconnect...", level="CRITICAL")
-                mt5c.shutdown() # Ensure old connection is closed
-                time.sleep(RECONNECTION_RETRY_SECONDS) # Wait before retrying connection
-    
+                try:
+                    mt5c.shutdown()  # Ensure old connection is closed
+                except Exception:
+                    logger.exception("Failed to shutdown mt5 client after error.")
+                time.sleep(RECONNECTION_RETRY_SECONDS)  # Wait before retrying connection
+
     except KeyboardInterrupt:
         logger.info("=== Stopping MT5 ML Bot ===")
         notifier.send_message("MT5 ML Bot stopped by user (KeyboardInterrupt).", level="WARNING")
@@ -715,7 +628,10 @@ def run(dry_run: bool = False):
                 p.terminate()
                 p.join()
     finally:
-        live_monitor.save_state() # Save state on shutdown
+        try:
+            live_monitor.save_state()  # Save state on shutdown
+        except Exception:
+            logger.exception("Failed to save live monitor state on shutdown.")
         # Save open positions state
         try:
             if 'exe' in locals() and exe is not None:
@@ -730,10 +646,13 @@ def run(dry_run: bool = False):
             risk_controller.save_state(open_positions_cache=open_pos_cache_to_save)
         except Exception:
             logger.exception("Failed to save risk_controller state on shutdown.")
-        mt5c.shutdown()
+        try:
+            mt5c.shutdown()
+        except Exception:
+            logger.exception("Failed to shutdown mt5 client cleanly.")
         logger.info("MT5 shutdown complete.")
         notifier.send_message("MT5 ML Bot shutdown complete.", level="INFO")
 
 if __name__ == "__main__":
     # Default to dry-run to be safe; change to False when you are ready.
-    run(dry_run=False)
+    run(dry_run=True)

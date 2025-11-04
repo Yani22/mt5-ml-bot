@@ -2,24 +2,24 @@
 from __future__ import annotations
 import os
 import pickle
-import pandas as pd
-import numpy as np
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.linear_model import SGDClassifier
-from sklearn.model_selection import TimeSeriesSplit
-from sklearn.metrics import roc_auc_score
-from sklearn.calibration import CalibratedClassifierCV
-from sklearn.preprocessing import StandardScaler
-from sklearn.pipeline import Pipeline
-from loguru import logger
+import pandas as pd  # type: ignore
+import numpy as np  # type: ignore
+from sklearn.ensemble import RandomForestClassifier  # type: ignore
+from sklearn.linear_model import SGDClassifier  # type: ignore
+from sklearn.model_selection import TimeSeriesSplit  # type: ignore
+from sklearn.metrics import roc_auc_score  # type: ignore
+from sklearn.calibration import CalibratedClassifierCV  # type: ignore
+from sklearn.preprocessing import StandardScaler  # type: ignore
+from sklearn.pipeline import Pipeline  # type: ignore
+from loguru import logger  # type: ignore
 
 try:
-    from xgboost import XGBClassifier
+    from xgboost import XGBClassifier  # type: ignore
 except Exception:
     XGBClassifier = None
 
 try:
-    from lightgbm import LGBMClassifier
+    from lightgbm import LGBMClassifier  # type: ignore
 except Exception:
     LGBMClassifier = None
 
@@ -203,7 +203,7 @@ class MLStrategy:
             # fallback: try last split if present
             try:
                 if last_tr_idx is not None and last_va_idx is not None:
-                    self._pipe.fit(Xc.iloc[last_tr_idx], yc.iloc[tr_idx])
+                    self._pipe.fit(Xc.iloc[last_tr_idx], yc.iloc[last_tr_idx])
                 else:
                     self._pipe.fit(Xc, yc)
             except Exception as ex:

@@ -2,12 +2,12 @@
 from __future__ import annotations
 import os
 import pickle
-import pandas as pd
-import optuna
-from loguru import logger
+import pandas as pd  # type: ignore
+import optuna  # type: ignore
+from loguru import logger  # type: ignore
 import yaml
 from functools import partial
-from joblib import Parallel, delayed
+from joblib import Parallel, delayed  # type: ignore
 import traceback # Added for detailed error logging
 
 from src.config import Cfg, RiskCfg
@@ -15,8 +15,8 @@ from src.features import FeatureCfg, build_dynamic_features
 from src.data_colab import fetch_bars, merge_features_labels
 from src.utils import get_training_data
 from src.ensemble import Ensemble
-from sklearn.model_selection import TimeSeriesSplit
-from sklearn.metrics import roc_auc_score
+from sklearn.model_selection import TimeSeriesSplit  # type: ignore
+from sklearn.metrics import roc_auc_score  # type: ignore
 
 # --- Detect Colab and set path ---
 # Assumes drive is already mounted if running in Colab.

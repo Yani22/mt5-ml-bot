@@ -1,12 +1,12 @@
 # fetcher.py
 import MetaTrader5 as mt5 # type: ignore
-import pandas as pd
+import pandas as pd  # type: ignore
 import os
 # import yaml # Removed
-from loguru import logger
-from dotenv import load_dotenv # Added
-from src.config import Cfg # Added
-from src.utils import setup_logging # Added
+from loguru import logger  # type: ignore
+from dotenv import load_dotenv  # type: ignore
+from src.config import Cfg
+from src.utils import setup_logging
 
 # Configure Loguru for file logging # Removed
 # LOG_FILE = "logs/fetch_historical_data.log" # Removed

@@ -1,51 +1,52 @@
 import MetaTrader5 as mt5
-import sys
 import os
+from dotenv import load_dotenv
+from loguru import logger
 
-def get_info(symbol: str):
-    """Connects to MT5 and prints contract size and pip size for a given symbol."""
-    
-    # Ensure MT5 is initialized
-    if not mt5.initialize():
-        print("initialize() failed, error code =", mt5.last_error())
-        print("Please ensure your MT5 terminal is running.")
+# Import the project's own MT5Client
+from src.mt5_client import MT5Client
+
+# Load .env at the global scope, just like main.py
+load_dotenv()
+
+def get_symbol_info():
+    """
+    Connects to MT5 using the project's MT5Client and fetches symbol information.
+    """
+    # Instantiate the client exactly as in main.py
+    mt5c = MT5Client(
+        login=os.getenv("MT5_LOGIN"),
+        password=os.getenv("MT5_PASSWORD"),
+        server=os.getenv("MT5_SERVER"),
+        path=os.getenv("MT5_PATH"),
+    )
+
+    # Attempt to connect
+    if not mt5c.connect():
+        logger.error("Failed to connect to MT5 using the project's client. Please check credentials and MT5 terminal.")
         return
 
-    print(f"MT5 Initialized. Version: {mt5.version()}")
-
-    symbol_info = mt5.symbol_info(symbol)
-    if symbol_info is None:
-        print(f"Failed to find symbol '{symbol}'. It may not be enabled in your Market Watch.")
-        print("Error code:", mt5.last_error())
-        mt5.shutdown()
+    symbol = "GBPUSDm#"
+    
+    # Get symbol info
+    info = mt5.symbol_info(symbol)
+    if info is None:
+        logger.error(f"Symbol {symbol} not found. Please check the symbol name.")
+        mt5c.shutdown()
         return
 
-    # For most non-forex instruments like GOLD, pip_size is the same as point size.
-    pip_size = symbol_info.point
+    print(f"\n--- Properties for symbol: {symbol} ---")
+    print(f"Description: {info.description}")
+    print(f"Contract Size: {info.trade_contract_size}")
+    print(f"Margin Currency: {info.currency_margin}")
+    print(f"Profit Currency: {info.currency_profit}")
+    print(f"Minimum Volume (lots): {info.volume_min}")
+    print(f"Maximum Volume (lots): {info.volume_max}")
+    print(f"Volume Step (lot increment): {info.volume_step}")
+    print(f"------------------------------------")
 
-    print("\n" + "="*40)
-    print(f"Symbol Information for: {symbol}")
-    print("="*40)
-    print(f"  -> Contract Size: {symbol_info.trade_contract_size}")
-    print(f"  -> Pip Size:      {pip_size}")
-    print("="*40)
-    
-    print("\nRECOMMENDED YAML CONFIGURATION:")
-    print("---------------------------------")
-    print("symbol_overrides:")
-    print(f'  "{symbol}":')
-    print(f"    contract_size: {symbol_info.trade_contract_size}")
-    print(f"    pip_size: {pip_size}")
-    print("---------------------------------")
-    print("\nCopy the snippet above into your config.yaml file.")
-    
-    mt5.shutdown()
+    # Shut down the connection
+    mt5c.shutdown()
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python get_symbol_info.py <SYMBOL>")
-        print("Example: python get_symbol_info.py \"GOLDm#\"")
-    else:
-        get_info(sys.argv[1])
-
-# run $python get_symbol_info.py "GOLDm#"
+    get_symbol_info()

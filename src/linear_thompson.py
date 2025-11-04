@@ -1,6 +1,6 @@
 # src/linear_thompson.py
 from __future__ import annotations
-import numpy as np
+import numpy as np  # type: ignore
 from typing import List
 
 class LinearThompson:

@@ -21,6 +21,11 @@ class InterMarketCfg:
     roc_lags: List[int] = field(default_factory=lambda: [5, 21])
 
 @dataclass
+class BacktestingCfg:
+    initial_equity: float = 10000.0
+    simulation_volume_min: float = 0.01
+
+@dataclass
 class PriceActionCfg:
     enabled: bool = True
     home_base_ma_period: int = 200
@@ -39,6 +44,7 @@ class FeatureCfg:
     ema_slow: int = 26
     window_vol: int = 20
     roc_lags: List[int] = field(default_factory=lambda: [1, 3, 5, 10])
+    roc_lags_options: List[List[int]] = field(default_factory=list)
     adx_period: int = 14
     rsi_ob_level: int = 70
     rsi_os_level: int = 30
@@ -190,6 +196,7 @@ class Cfg:
     startup_logging: bool = True
     magic_number: int = 424242
     symbol_overrides: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    backtesting: BacktestingCfg = field(default_factory=BacktestingCfg)
 
     def timeframe_seconds(self) -> Optional[int]:
         """ Convert timeframe string like 'M5', 'H1', 'D1' to seconds.
@@ -239,6 +246,10 @@ class Cfg:
         if hasattr(self.thompson_sampling, key):
             return getattr(self.thompson_sampling, key)
 
+        # Fallback to global settings in 'fetch'
+        if hasattr(self.fetch, key):
+            return getattr(self.fetch, key)
+
         # Return the default if not found anywhere
         return default
 
@@ -251,10 +262,18 @@ class Cfg:
         raw_features = raw.get("features", {}) or {}
         cleaned_features: Dict[str, Any] = {}
         for k, v in raw_features.items():
-            if isinstance(v, list) and k != "roc_lags":
+            if isinstance(v, list) and k != "roc_lags": # roc_lags is handled separately if it's a list of lists
                 cleaned_features[k] = v[0]
             else:
                 cleaned_features[k] = v
+        
+        # Handle roc_lags_options specifically
+        roc_lags_options_from_yaml = raw.get("roc_lags_options", [])
+        if roc_lags_options_from_yaml:
+            cleaned_features["roc_lags_options"] = roc_lags_options_from_yaml
+            # If roc_lags_options is present, ensure roc_lags itself is initialized, perhaps with the first option
+            if "roc_lags" not in cleaned_features and roc_lags_options_from_yaml:
+                cleaned_features["roc_lags"] = roc_lags_options_from_yaml[0]
 
         try:
             features_obj = FeatureCfg(**cleaned_features)
@@ -330,6 +349,14 @@ class Cfg:
             logger.warning(f"Invalid trading_costs config in YAML: {e}; using defaults.")
             tc_obj = TradingCostsCfg()
 
+        # parse backtesting block if present
+        try:
+            bt_raw = raw.get("backtesting", {}) or {}
+            bt_obj = BacktestingCfg(**bt_raw) if bt_raw else BacktestingCfg()
+        except Exception as e:
+            logger.warning(f"Invalid backtesting config in YAML: {e}; using defaults.")
+            bt_obj = BacktestingCfg()
+
         return Cfg(
             symbols=raw.get("symbols", ["EURUSD"]),
             timeframe=raw.get("timeframe", "M5"),
@@ -342,7 +369,7 @@ class Cfg:
             optuna_n_trials=int(raw.get("optuna_n_trials", 100)),
             optuna_pruning_interval=int(raw.get("optuna_pruning_interval", 100)), # New
             n_jobs=int(raw.get("n_jobs", -1)), # New
-            initial_equity=float(raw.get("initial_equity", 100.0)),
+            initial_equity=float(bt_obj.initial_equity if "backtesting" in raw else raw.get("initial_equity", 100.0)),
             features=features_obj,
             context_features=context_features_obj,
             models=raw.get("models", []),
@@ -360,4 +387,5 @@ class Cfg:
             startup_logging=bool(raw.get("startup_logging", True)),
             magic_number=int(raw.get("magic_number", 424242)),
             symbol_overrides=raw.get("symbol_overrides", {}),
+            backtesting=bt_obj,
         )

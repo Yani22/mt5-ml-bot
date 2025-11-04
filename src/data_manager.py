@@ -2,12 +2,9 @@
 from __future__ import annotations
 import os
 import tempfile
-import shutil
-import pandas as pd
-import numpy as np
-from loguru import logger
+import pandas as pd  # type: ignore
+from loguru import logger  # type: ignore
 from typing import Optional, Tuple
-import datetime
 
 from src.config import Cfg
 from src.features import FeatureCfg, build_features
@@ -102,12 +99,14 @@ class DataManager:
         if count is None:
             count = 36000
         try:
-            logger.debug(f"[{symbol}] Requesting {count} bars of {timeframe} from MT5 (tf={tf})...")
+            logger.info(f"[{symbol}] Fetching {count} bars from MT5 for timeframe {timeframe}...") # New log
             rates = mt5.copy_rates_from_pos(symbol, tf, 0, int(count))
-            logger.debug(f"[{symbol}] MT5 copy_rates_from_pos returned: {rates[:5] if rates is not None else None}...") # Log first 5 rates for brevity
             if rates is None or len(rates) == 0:
                 logger.warning(f"[{symbol}] MT5 returned no bars.")
                 return pd.DataFrame()
+            
+            logger.info(f"[{symbol}] Fetched {len(rates)} bars from MT5.") # New log
+
             df = pd.DataFrame(rates)
             if "time" not in df.columns:
                 logger.warning(f"[{symbol}] fetched data missing 'time' column — returning empty DataFrame")
@@ -135,24 +134,27 @@ class DataManager:
             logger.debug(f"[{symbol}] Local history OK ({len(current)} rows).")
 
     def fetch_live(self, symbol: str, feature_cfg: "FeatureCfg", min_pct_change: float) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-        # 1. Fetch latest N bars for the primary symbol
-        lookback_bars = self.cfg.history_bars
+        # 1. Load the bulk of the history from the local cache first.
+        data = self.load_local_history(symbol, self.cfg.timeframe, count=self.cfg.history_bars)
 
-        if self.cfg.data_source == "csv":
-            data = self.load_local_history(symbol, self.cfg.timeframe, count=lookback_bars)
-        elif self.cfg.data_source == "mt5":
-            data = self._fetch_bars_from_mt5_chunked(symbol, self.cfg.timeframe, lookback_bars)
-        else:
-            raise ValueError(f"Unknown data source: {self.cfg.data_source}")
+        # 2. Fetch only a small number of recent bars to get the absolute latest data.
+        # This is more efficient than fetching the entire history every time.
+        recent_data = self._fetch_bars_from_mt5_chunked(symbol, self.cfg.timeframe, 200) # Fetch last 200 bars
+
+        # 3. Combine and de-duplicate.
+        if not recent_data.empty:
+            data = pd.concat([data, recent_data])
+            data = data[~data.index.duplicated(keep='last')].sort_index()
 
         if data.empty:
             return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-        # 2. Fetch latest N bars for context features, if enabled
+        # 4. Fetch context features, if enabled
         mta_df = None
         if self.cfg.context_features.mta.enabled:
             logger.debug(f"[{symbol}] Fetching live MTA data...")
-            mta_df = self._fetch_bars_from_mt5_chunked(symbol, self.cfg.context_features.mta.timeframe, lookback_bars)
+            # Fetching the full history for MTA is okay as it's a different timeframe and less frequent.
+            mta_df = self._fetch_bars_from_mt5_chunked(symbol, self.cfg.context_features.mta.timeframe, self.cfg.history_bars)
             if mta_df.empty:
                 logger.warning(f"[{symbol}] No live MTA data loaded for timeframe {self.cfg.context_features.mta.timeframe}. Disabling MTA for this tick.")
                 mta_df = None
@@ -161,7 +163,7 @@ class DataManager:
         if self.cfg.context_features.inter_market.enabled:
             im_sym = self.cfg.context_features.inter_market.symbol
             logger.debug(f"[{symbol}] Fetching live Inter-Market data for {im_sym}...")
-            inter_market_df = self._fetch_bars_from_mt5_chunked(im_sym, self.cfg.timeframe, lookback_bars)
+            inter_market_df = self._fetch_bars_from_mt5_chunked(im_sym, self.cfg.timeframe, self.cfg.history_bars)
             if inter_market_df.empty:
                 logger.warning(f"[{symbol}] No live Inter-Market data loaded for symbol {im_sym}. Disabling for this tick.")
                 inter_market_df = None
@@ -177,7 +179,7 @@ class DataManager:
 
         return data, X, y
 
-    def load_cached(self, symbol: str, feature_cfg: FeatureConfig, count: Optional[int] = None, min_pct_change: float = 0.0) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    def load_cached(self, symbol: str, feature_cfg: FeatureCfg, count: Optional[int] = None, min_pct_change: float = 0.0) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         data = self.load_local_history(symbol, self.cfg.timeframe, count=count)
         if data.empty:
             return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
@@ -230,3 +232,13 @@ class DataManager:
         logger.debug(f"[{symbol}] _build_features_and_labels returning X with shape: {X.shape}")
 
         return X, y
+
+    def get_latest_bar_close(self, symbol: str) -> Optional[float]:
+        """
+        Retrieves the close price of the most recent bar for a given symbol from local history.
+        Used for dry-run trade closure simulation.
+        """
+        df = self.load_local_history(symbol, self.cfg.timeframe, count=1)
+        if not df.empty:
+            return df["close"].iloc[-1]
+        return None

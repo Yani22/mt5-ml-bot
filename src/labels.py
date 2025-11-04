@@ -1,4 +1,4 @@
-import pandas as pd
+import pandas as pd  # type: ignore
 
 def generate_labels(df: pd.DataFrame, horizon: int, min_pct_change: float = 0.0) -> pd.Series:
     """
