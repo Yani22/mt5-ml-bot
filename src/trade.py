@@ -3,7 +3,7 @@ from __future__ import annotations
 
 class SimPosition:
     """Simulated position for backtesting."""
-    def __init__(self, symbol, direction, lots, entry_price, sl, tp, entry_time, atr, entry_auc, risk_fraction, entry_equity: Optional[float] = None, atr_idx: int = -1, min_prob_long_idx: int = -1, min_prob_short_idx: int = -1, adx: float = 0.0, macd_diff: float = 0.0, volatility_10: float = 0.0, dist_from_ema_200: float = 0.0):
+    def __init__(self, symbol, direction, lots, entry_price, sl, tp, entry_time, atr, entry_auc, risk_fraction, entry_equity: Optional[float] = None, atr_idx: int = -1, min_prob_long_idx: int = -1, min_prob_short_idx: int = -1, adx: float = 0.0, macd_diff: float = 0.0, volatility_10: float = 0.0, dist_from_ema_200: float = 0.0, dynamic_risk_base_idx: int = -1):
         self.symbol = symbol
         self.direction = direction
         self.lots = lots
@@ -27,6 +27,7 @@ class SimPosition:
         self.macd_diff = macd_diff
         self.volatility_10 = volatility_10
         self.dist_from_ema_200 = dist_from_ema_200
+        self.dynamic_risk_base_idx = dynamic_risk_base_idx
 
     def close(self, price, time, pnl, exit_equity: float):
         self.exit_price = price

@@ -8,7 +8,7 @@ import datetime
 from datetime import timezone, timedelta
 from typing import List, Optional # Import Optional
 from .trade import SimPosition # Import SimPosition
-from .notifier import TelegramNotifier # NEW import
+from src.alert_manager import AlertManager # NEW import
 
 class RiskManager:
     """
@@ -18,7 +18,7 @@ class RiskManager:
     Callers: pass `cfg` (the Cfg object) to constructor so both risk and watchdog settings are available.
     """
 
-    def __init__(self, cfg: Cfg, notifier: Optional[TelegramNotifier] = None):
+    def __init__(self, cfg: Cfg, alert_manager: Optional[AlertManager] = None):
         self.cfg = cfg
         self.risk_cfg = cfg.risk
         self.watchdog_cfg = cfg.watchdog
@@ -26,7 +26,7 @@ class RiskManager:
         self.open_positions_cache: dict[str, dict] = {}
         self.cooldown_until: datetime.datetime | None = None
         self.recently_closed_trades: List[SimPosition] = [] # New: To store closed trades for monitoring
-        self.notifier = notifier # NEW
+        self.alert_manager = alert_manager # NEW
 
     # ---------- Dynamic value helpers ----------
     def _get_dynamic_value(self, dynamic_cfg: dict | None, auc_score: float, default_val: float) -> float:
@@ -190,7 +190,7 @@ class RiskManager:
         self.cooldown_until = current_time + timedelta(hours=hours)
         message = f"<b>RISK ALERT:</b> Watchdog triggered cooldown until {self.cooldown_until.isoformat()}"
         logger.warning(message)
-        if self.notifier: self.notifier.send_message(message, level="WARNING")
+        if self.alert_manager: self.alert_manager.send_alert(message, level="WARNING", category="WATCHDOG")
 
     def cooldown_active(self, now: datetime.datetime | None = None) -> bool:
         if self.cooldown_until is None:
@@ -230,7 +230,7 @@ class RiskManager:
                 if lost >= max_losses:
                     message = f"<b>RISK ALERT:</b> Watchdog: consecutive losses {lost} >= threshold {max_losses}. Triggering cooldown."
                     logger.warning(message)
-                    if self.notifier: self.notifier.send_message(message, level="WARNING")
+                    if self.alert_manager: self.alert_manager.send_alert(message, level="WARNING", category="WATCHDOG")
                     self._trigger_cooldown()
                     return False
 
@@ -266,7 +266,7 @@ class RiskManager:
         if drawdown >= getattr(self.risk_cfg, "block_on_drawdown", 0.10):
             message = f"<b>RISK ALERT:</b> Trading blocked: drawdown {drawdown:.3f} >= {self.risk_cfg.block_on_drawdown}"
             logger.info(message)
-            if self.notifier: self.notifier.send_message(message, level="INFO")
+            if self.alert_manager: self.alert_manager.send_alert(message, level="INFO", category="RISK_CONTROL")
             return False
 
         # allowed by default
