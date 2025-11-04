@@ -13,8 +13,7 @@ import pandas as pd # type: ignore
 from typing import List, Optional, Dict, Any # Import Dict
 # from backtester import SimPosition # Import SimPosition - REMOVED as not used
 import datetime
-from src.alert_manager import AlertManager # NEW
-from .slippage_model import calculate_dynamic_slippage # NEW
+from .notifier import TelegramNotifier
 
 @dataclass
 class OrderResult:
@@ -46,15 +45,6 @@ class ClosedTrade:
     macd_diff: float = 0.0
     volatility_10: float = 0.0
     dist_from_ema_200: float = 0.0
-    combined_arm_idx: int = -1 # NEW: For contextual bandit
-    dynamic_risk_base: float = 0.0 # NEW
-    dynamic_risk_max: float = 0.0 # NEW
-    dynamic_risk_auc_floor: float = 0.0 # NEW
-    dynamic_risk_auc_ceiling: float = 0.0 # NEW
-    dynamic_tp_base_mult: float = 0.0 # NEW
-    dynamic_tp_max_mult: float = 0.0 # NEW
-    dynamic_tp_auc_floor: float = 0.0 # NEW
-    dynamic_tp_auc_ceiling: float = 0.0 # NEW
 
     def __repr__(self):
         return f"<ClosedTrade ticket={self.ticket}, pnl={self.pnl:.2f}>"
@@ -62,14 +52,14 @@ class ClosedTrade:
 class Execution:
     """ Handles trade decision & order sending with retries + dry-run. """
 
-    def __init__(self, ens_per_symbol_long: Dict[str, Ensemble], ens_per_symbol_short: Dict[str, Ensemble], risk_manager: RiskManager, mt5_client, data_manager, dry_run: bool = False, alert_manager: Optional[AlertManager] = None):
+    def __init__(self, ens_per_symbol_long: Dict[str, Ensemble], ens_per_symbol_short: Dict[str, Ensemble], risk_manager: RiskManager, mt5_client, data_manager, dry_run: bool = False, notifier: Optional[TelegramNotifier] = None):
         self.ens_per_symbol_long = ens_per_symbol_long
         self.ens_per_symbol_short = ens_per_symbol_short
         self.risk = risk_manager
         self.mt5_client = mt5_client # Store MT5 client
         self.data_manager = data_manager # Store DataManager instance
         self.dry_run = dry_run
-        self.alert_manager = alert_manager
+        self.notifier = notifier
         self._open_tickets = {}   # ticket -> dict of trade details from risk.open_positions_cache
         self._seen_closed = set() # to avoid reporting the same trade twice
         self._last_deal_time = 0  # Timestamp of the last deal processed
@@ -185,7 +175,7 @@ class Execution:
 
         except Exception as e:
             logger.exception(f"Failed to reconcile open positions with MT5: {e}")
-            if self.alert_manager: self.alert_manager.send_alert(f"Failed to reconcile open positions with MT5: {e}", level="ERROR", category="MT5_RECONCILIATION")
+            if self.notifier: self.notifier.send_message(f"<b>ERROR:</b> Failed to reconcile open positions with MT5: {e}", level="ERROR")
 
     def _send_order_with_retry(self, request: dict, retries: int = -1, delay: float = 1.0):
         num_retries = self.risk.cfg.trading_costs.defaults.retry_order_send if retries == -1 else retries
@@ -228,15 +218,6 @@ class Execution:
                 atr_idx = trade_details.get("atr_idx")
                 min_prob_long_idx = trade_details.get("min_prob_long_idx")
                 min_prob_short_idx = trade_details.get("min_prob_short_idx")
-                combined_arm_idx = trade_details.get("combined_arm_idx", -1)
-                dynamic_risk_base = trade_details.get("dynamic_risk_base", 0.0)
-                dynamic_risk_max = trade_details.get("dynamic_risk_max", 0.0)
-                dynamic_risk_auc_floor = trade_details.get("dynamic_risk_auc_floor", 0.0)
-                dynamic_risk_auc_ceiling = trade_details.get("dynamic_risk_auc_ceiling", 0.0)
-                dynamic_tp_base_mult = trade_details.get("dynamic_tp_base_mult", 0.0)
-                dynamic_tp_max_mult = trade_details.get("dynamic_tp_max_mult", 0.0)
-                dynamic_tp_auc_floor = trade_details.get("dynamic_tp_auc_floor", 0.0)
-                dynamic_tp_auc_ceiling = trade_details.get("dynamic_tp_auc_ceiling", 0.0)
                 entry_auc = trade_details.get("entry_auc")
                 entry_equity = trade_details.get("entry_equity")
 
@@ -280,23 +261,8 @@ class Execution:
                     # Apply transaction costs (spread and commission)
                     spread_pips = getattr(self.risk.cfg.trading_costs.defaults, 'spread_pips', 0.0)
                     commission_per_lot = getattr(self.risk.cfg.trading_costs.defaults, 'commission_per_trade', 0.0)
-
-                    # Calculate dynamic slippage if enabled
-                    slippage_pips_calculated = 0.0
-                    if self.risk.cfg.trading_costs.defaults.dynamic_slippage_enabled:
-                        # For dry-run, we use the atr from the trade details and the configured spread
-                        slippage_pips_calculated = calculate_dynamic_slippage(
-                            self.risk.cfg,
-                            symbol,
-                            atr, # ATR at the time of entry
-                            spread_pips, # Configured spread as an approximation
-                            lots
-                        )
-                    else:
-                        slippage_pips_calculated = getattr(self.risk.cfg.trading_costs.defaults, 'slippage_pips', 0.0)
-
-                    # Total transaction cost includes spread, commission, and dynamic slippage
-                    transaction_cost = (spread_pips * pip_value * lots) + (commission_per_lot * lots) + (slippage_pips_calculated * pip_value * lots)
+                    
+                    transaction_cost = (spread_pips * pip_value * lots) + (commission_per_lot * lots)
                     pnl = gross_pnl - transaction_cost
 
                     # Get current equity for the ClosedTrade object (simulated)
@@ -327,20 +293,10 @@ class Execution:
                         adx=trade_details.get("adx", 0.0),
                         macd_diff=trade_details.get("macd_diff", 0.0),
                         volatility_10=trade_details.get("volatility_10", 0.0),
-                        dist_from_ema_200=trade_details.get("dist_from_ema_200", 0.0),
-                        combined_arm_idx=combined_arm_idx,
-                        dynamic_risk_base=dynamic_risk_base,
-                        dynamic_risk_max=dynamic_risk_max,
-                        dynamic_risk_auc_floor=dynamic_risk_auc_floor,
-                        dynamic_risk_auc_ceiling=dynamic_risk_auc_ceiling,
-                        dynamic_tp_base_mult=dynamic_tp_base_mult,
-                        dynamic_tp_max_mult=dynamic_tp_max_mult,
-                        dynamic_tp_auc_floor=dynamic_tp_auc_floor,
-                        dynamic_tp_auc_ceiling=dynamic_tp_auc_ceiling
+                        dist_from_ema_200=trade_details.get("dist_from_ema_200", 0.0)
                     )
                     closed_trades_list.append(closed_trade)
                     logger.info(f"[DRY-RUN] Simulated closed trade: {closed_trade} ({closure_reason})")
-                    if self.alert_manager: self.alert_manager.send_alert(f"[DRY-RUN] Closed {direction} position at {exit_price:.5f}. Entry: {entry_price:.5f}, PnL: {pnl:.2f}, Final Equity: {simulated_exit_equity:.2f}", level="INFO", category="DRY_RUN_TRADE_CLOSED")
 
                     # Remove the now-closed position from our internal cache
                     self.risk.open_positions_cache.pop(pid, None)
@@ -414,20 +370,10 @@ class Execution:
                     adx=trade_details.get("adx", 0.0),
                     macd_diff=trade_details.get("macd_diff", 0.0),
                     volatility_10=trade_details.get("volatility_10", 0.0),
-                    dist_from_ema_200=trade_details.get("dist_from_ema_200", 0.0),
-                    combined_arm_idx=trade_details.get("combined_arm_idx", -1),
-                    dynamic_risk_base=trade_details.get("dynamic_risk_base", 0.0),
-                    dynamic_risk_max=trade_details.get("dynamic_risk_max", 0.0),
-                    dynamic_risk_auc_floor=trade_details.get("dynamic_risk_auc_floor", 0.0),
-                    dynamic_risk_auc_ceiling=trade_details.get("dynamic_risk_auc_ceiling", 0.0),
-                    dynamic_tp_base_mult=trade_details.get("dynamic_tp_base_mult", 0.0),
-                    dynamic_tp_max_mult=trade_details.get("dynamic_tp_max_mult", 0.0),
-                    dynamic_tp_auc_floor=trade_details.get("dynamic_tp_auc_floor", 0.0),
-                    dynamic_tp_auc_ceiling=trade_details.get("dynamic_tp_auc_ceiling", 0.0)
+                    dist_from_ema_200=trade_details.get("dist_from_ema_200", 0.0)
                 )
                 closed_trades_list.append(closed_trade)
                 logger.info(f"Detected closed trade via reconciliation: {closed_trade}")
-                if self.alert_manager: self.alert_manager.send_alert(f"Closed {closed_trade.direction} position at {closed_trade.exit_price:.5f}. Entry: {closed_trade.entry_price:.5f}, PnL: {closed_trade.pnl:.2f}, Final Equity: {closed_trade.exit_equity:.2f}", level="INFO", category="TRADE_CLOSED")
 
                 # Remove the now-closed position from our internal cache
                 self.risk.open_positions_cache.pop(pid, None)
@@ -439,16 +385,11 @@ class Execution:
         closed_trades_list.sort(key=lambda trade: trade.exit_time)
         return closed_trades_list
 
-    def trade(self, symbol: str, direction: str, lots: float, price: float, sl: float, tp: float, equity: float, pip_size: float, pip_value: float, X: pd.DataFrame | None = None, atr: float | None = None, auc_score: float | None = 0.5, total_open_risk: float = 0.0, atr_idx: int = -1, min_prob_long_idx: int = -1, min_prob_short_idx: int = -1, trade_params: Dict[str, Any] | None = None) -> Tuple[OrderResult, Optional[Dict[str, Any]]]:
+    def trade(self, symbol: str, direction: str, lots: float, price: float, sl: float, tp: float, equity: float, pip_size: float, pip_value: float, X: pd.DataFrame | None = None, atr: float | None = None, auc_score: float | None = 0.5, total_open_risk: float = 0.0, atr_idx: int = -1, min_prob_long_idx: int = -1, min_prob_short_idx: int = -1) -> OrderResult:
 
-        intended_entry_price = price # Capture the intended price
 
         type_map = {"long": mt5.ORDER_TYPE_BUY, "short": mt5.ORDER_TYPE_SELL}
         tick = mt5.symbol_info_tick(symbol)
-        
-        # Capture spread at entry
-        spread_at_entry_pips = (abs(float(tick.ask) - float(tick.bid)) / pip_size) if hasattr(tick, "ask") and hasattr(tick, "bid") else 0.0
-
         deviation_ticks = (float(tick.ask) - float(tick.bid)) if hasattr(tick, "ask") and hasattr(tick, "bid") else 0.0
         deviation = max(10, int(2 * (deviation_ticks) / (pip_size or 1e-6)))
 
@@ -457,7 +398,7 @@ class Execution:
             "symbol": symbol,
             "volume": float(lots),
             "type": type_map[direction],
-            "price": intended_entry_price,
+            "price": price,
             "sl": float(sl),
             "tp": float(tp),
             "deviation": deviation,
@@ -469,112 +410,59 @@ class Execution:
 
         if self.dry_run:
             simulated_ticket = int(time.time() * 1000000) # Unique enough for simulation
-            logger.info(f"[DRY-RUN][{symbol}][{datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S%z')}] Opened {direction} position at {intended_entry_price:.5f}. Lots: {lots:.2f}, SL: {sl:.5f}, TP: {tp:.5f}, AUC: {auc_score:.4f}")
-            if self.alert_manager: 
-                self.alert_manager.send_alert(f"[DRY-RUN] Opened {direction} position at {intended_entry_price:.5f}. Lots: {lots:.2f}, SL: {sl:.5f}, TP: {tp:.5f}, AUC: {auc_score:.4f}", level="INFO", category="DRY_RUN_TRADE")
+            logger.info(f"[DRY-RUN][{symbol}][{datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S%z')}] Opened {direction} position at {price:.5f}. Lots: {lots:.2f}, SL: {sl:.5f}, TP: {tp:.5f}, AUC: {auc_score:.4f}")
+            if self.notifier: self.notifier.send_message(f"[DRY-RUN] Prepared {direction} for {symbol}: lots={lots}, SL={sl}, TP={tp}", level="INFO")
 
             # Store comprehensive details for later SimPosition reconstruction in dry-run
             self.risk.open_positions_cache[simulated_ticket] = {
                 "risk": float(equity * self.risk._get_dynamic_value(self.risk.risk_cfg.dynamic_risk, auc_score, getattr(self.risk.risk_cfg, "risk_per_trade", 0.005))), # Store the dollar amount at risk
                 "ticket": simulated_ticket,
                 "symbol": symbol,
-                "entry_price": intended_entry_price,
+                "entry_price": price,
                 "direction": direction,
                 "lots": float(lots),
                 "entry_time": datetime.datetime.now(datetime.timezone.utc),
                 "atr": atr,
                 "entry_auc": auc_score,
                 "risk_fraction": self.risk._get_dynamic_value(self.risk.risk_cfg.dynamic_risk, auc_score, getattr(self.risk.risk_cfg, "risk_per_trade", 0.005)),
+                "entry_equity": equity,
+                "sl": sl,
+                "tp": tp,
+                "pip_size": pip_size,
+                "pip_value": pip_value,
+                "atr_idx": atr_idx,
                 "min_prob_long_idx": min_prob_long_idx,
                 "min_prob_short_idx": min_prob_short_idx,
-                "combined_arm_idx": trade_params.get("combined_arm_idx", -1) if trade_params else -1,
-                "dynamic_risk_base": trade_params.get("dynamic_risk_base", 0.0) if trade_params else 0.0,
-                "dynamic_risk_max": trade_params.get("dynamic_risk_max", 0.0) if trade_params else 0.0,
-                "dynamic_risk_auc_floor": trade_params.get("dynamic_risk_auc_floor", 0.0) if trade_params else 0.0,
-                "dynamic_risk_auc_ceiling": trade_params.get("dynamic_risk_auc_ceiling", 0.0) if trade_params else 0.0,
-                "dynamic_tp_base_mult": trade_params.get("dynamic_tp_base_mult", 0.0) if trade_params else 0.0,
-                "dynamic_tp_max_mult": trade_params.get("dynamic_tp_max_mult", 0.0) if trade_params else 0.0,
-                "dynamic_tp_auc_floor": trade_params.get("dynamic_tp_auc_floor", 0.0) if trade_params else 0.0,
-                "dynamic_tp_auc_ceiling": trade_params.get("dynamic_tp_auc_ceiling", 0.0) if trade_params else 0.0,
                 "adx": float(X["adx"].iloc[-1]) if X is not None and "adx" in X.columns else 0.0,
                 "macd_diff": float(X["macd_diff"].iloc[-1]) if X is not None and "macd_diff" in X.columns else 0.0,
                 "volatility_10": float(X["volatility_10"].iloc[-1]) if X is not None and "volatility_10" in X.columns else 0.0,
                 "dist_from_ema_200": float(X["dist_from_ema_200"].iloc[-1]) if X is not None and "dist_from_ema_200" in X.columns else 0.0,
             }
-            # Return dummy TCA data for dry run
-            tca_data = {
-                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                "symbol": symbol,
-                "direction": direction,
-                "lots": lots,
-                "intended_entry_price": intended_entry_price,
-                "actual_entry_price": intended_entry_price, # Same in dry run
-                "slippage_pips": 0.0,
-                "slippage_currency": 0.0,
-                "spread_at_entry_pips": spread_at_entry_pips,
-                "commission_per_trade": getattr(self.risk.cfg.trading_costs.defaults, 'commission_per_trade', 0.0),
-                "total_transaction_cost_currency": (spread_at_entry_pips * pip_value * lots) + (getattr(self.risk.cfg.trading_costs.defaults, 'commission_per_trade', 0.0) * lots),
-                "order_type": "DEAL",
-                "fill_type": "IOC",
-                "deviation_pips": deviation,
-                "retries_taken": 0,
-                "entry_auc": auc_score,
-                "entry_equity": equity,
-                "position_id": simulated_ticket,
-            }
-            return OrderResult(True, simulated_ticket, "Dry-run prepared"), tca_data
+            return OrderResult(True, simulated_ticket, "Dry-run prepared")
 
-        # --- LIVE TRADING --- 
-        num_retries_attempted = 0
-        res = None
-        for attempt in range(1, self.risk.cfg.trading_costs.defaults.retry_order_send + 1):
-            res = mt5.order_send(request)
-            num_retries_attempted = attempt
-            if res is not None and getattr(res, "retcode", None) == getattr(mt5, "TRADE_RETCODE_DONE", 10009):
-                break
-            logger.warning(f"Order send failed attempt {attempt}/{self.risk.cfg.trading_costs.defaults.retry_order_send}: {res}")
-            time.sleep(1) # Small delay before retry
-
+        logger.debug(f"[{symbol}] Sending order request: {request}")
+        res = self._send_order_with_retry(request)
         if res is None or getattr(res, "retcode", None) != getattr(mt5, "TRADE_RETCODE_DONE", 10009):
-            error_msg = f"Order failed for {symbol} after {num_retries_attempted} retries: {res}"
+            error_msg = f"<b>CRITICAL:</b> Order failed for {symbol} after retries: {res}"
             logger.error(error_msg)
-            if self.alert_manager: self.alert_manager.send_alert(error_msg, level="CRITICAL", category="ORDER_FAILURE")
-            return OrderResult(False, getattr(res, "order", None) if res else None, f"Order failed: {res}"), None
+            if self.notifier: self.notifier.send_message(error_msg, level="CRITICAL")
+            return OrderResult(False, getattr(res, "order", None) if res else None, f"Order failed: {res}")
 
-        deal_ticket = getattr(res, ("deal" if res.deal else "order"), None) # Use deal ticket if available, else order ticket
+        deal_ticket = getattr(res, "deal", None)
         if not deal_ticket:
-            logger.error(f"Order for {symbol} succeeded but no deal ticket returned. Cannot track position for TCA.")
-            return OrderResult(False, None, "Order sent but no deal ticket."), None
+            logger.error(f"Order for {symbol} succeeded but no deal ticket returned. Cannot track position.")
+            return OrderResult(False, None, "Order sent but no deal ticket.")
 
         # Fetch the deal to get the position_id, which is the reliable key
-        deals = mt5.history_deals_get(ticket=deal_ticket) # This deal corresponds to the order execution
-        position_id = deals[0].position_id if deals else None
-
-        if not position_id:
-            logger.error(f"Could not fetch deal info for deal {deal_ticket}. Cannot track position for TCA.")
-            return OrderResult(False, None, "Failed to fetch deal info."), None
-
-        # Now fetch the actual position to get the filled price
-        positions = mt5.positions_get(ticket=position_id)
-        if not positions:
-            logger.error(f"Could not fetch position info for ID {position_id}. Cannot track position for TCA.")
-            return OrderResult(False, position_id, "Failed to fetch position info."), None
+        deals = mt5.history_deals_get(ticket=deal_ticket)
+        if not deals:
+            logger.error(f"Could not fetch deal info for deal {deal_ticket}. Cannot track position.")
+            return OrderResult(False, None, "Failed to fetch deal info.")
         
-        position_obj = positions[0]
-        actual_entry_price = position_obj.price_open
+        position_id = deals[0].position_id
 
-        # Calculate Slippage
-        if direction == "long":
-            slippage_pips = (actual_entry_price - intended_entry_price) / pip_size
-        else: # short
-            slippage_pips = (intended_entry_price - actual_entry_price) / pip_size
-        slippage_currency = slippage_pips * pip_value * lots
-
-        commission_per_lot = getattr(self.risk.cfg.trading_costs.defaults, 'commission_per_trade', 0.0)
-        total_transaction_cost_currency = slippage_currency + (spread_at_entry_pips * pip_value * lots) + (commission_per_lot * lots)
-
-        logger.info(f"[{symbol}][{datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S%z')}] Opened {direction} position at {actual_entry_price:.5f} (intended {intended_entry_price:.5f}). Lots: {lots:.2f}, SL: {sl:.5f}, TP: {tp:.5f}, AUC: {auc_score:.4f} Slippage: {slippage_pips:.2f} pips")
-        if self.alert_manager: self.alert_manager.send_alert(f"Opened {direction} position at {actual_entry_price:.5f}. Lots: {lots:.2f}, SL: {sl:.5f}, TP: {tp:.5f}, AUC: {auc_score:.4f}", level="INFO", category="TRADE_EXECUTION")
+        logger.info(f"[{symbol}][{datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S%z')}] Opened {direction} position at {price:.5f}. Lots: {lots:.2f}, SL: {sl:.5f}, TP: {tp:.5f}, AUC: {auc_score:.4f}")
+        if self.notifier: self.notifier.send_message(f"<b>TRADE EXECUTED:</b> {direction} {lots} lots of {symbol} at {price:.5f}. SL:{sl:.5f} TP:{tp:.5f}", level="INFO")
 
         # compute effective risk and store in cache keyed by the reliable position_id
         try:
@@ -588,7 +476,7 @@ class Execution:
                 "risk": float(risk_amt), # Store the dollar amount at risk
                 "ticket": position_id, # Store position_id for consistency
                 "symbol": symbol, # Store symbol
-                "entry_price": actual_entry_price, # Store actual entry price
+                "entry_price": price,
                 "direction": direction,
                 "lots": float(lots),
                 "entry_time": datetime.datetime.now(datetime.timezone.utc), # Use current UTC time
@@ -598,51 +486,19 @@ class Execution:
                 "entry_equity": equity, # Store equity at the time of entry
                 "sl": sl, # SL at entry
                 "tp": tp, # TP at entry
-                "pip_size": pip_size,
-                "pip_value": pip_value,
                 "atr_idx": atr_idx,
                 "min_prob_long_idx": min_prob_long_idx,
                 "min_prob_short_idx": min_prob_short_idx,
-                "combined_arm_idx": trade_params.get("combined_arm_idx", -1) if trade_params else -1,
-                "dynamic_risk_base": trade_params.get("dynamic_risk_base", 0.0) if trade_params else 0.0,
-                "dynamic_risk_max": trade_params.get("dynamic_risk_max", 0.0) if trade_params else 0.0,
-                "dynamic_risk_auc_floor": trade_params.get("dynamic_risk_auc_floor", 0.0) if trade_params else 0.0,
-                "dynamic_risk_auc_ceiling": trade_params.get("dynamic_risk_auc_ceiling", 0.0) if trade_params else 0.0,
-                "dynamic_tp_base_mult": trade_params.get("dynamic_tp_base_mult", 0.0) if trade_params else 0.0,
-                "dynamic_tp_max_mult": trade_params.get("dynamic_tp_max_mult", 0.0) if trade_params else 0.0,
-                "dynamic_tp_auc_floor": trade_params.get("dynamic_tp_auc_floor", 0.0) if trade_params else 0.0,
-                "dynamic_tp_auc_ceiling": trade_params.get("dynamic_tp_auc_ceiling", 0.0) if trade_params else 0.0,
-                "adx": float(X["adx"].iloc[-1]) if X is not None and "adx" in X.columns else 0.0,
-                "macd_diff": float(X["macd_diff"].iloc[-1]) if X is not None and "macd_diff" in X.columns else 0.0,
-                "volatility_10": float(X["volatility_10"].iloc[-1]) if X is not None and "volatility_10" in X.columns else 0.0,
-                "dist_from_ema_200": float(X["dist_from_ema_200"].iloc[-1]) if X is not None and "dist_from_ema_200" in X.columns else 0.0,
+                "adx": float(X["adx"].iloc[-1]) if "adx" in X.columns else 0.0,
+                "macd_diff": float(X["macd_diff"].iloc[-1]) if "macd_diff" in X.columns else 0.0,
+                "volatility_10": float(X["volatility_10"].iloc[-1]) if "volatility_10" in X.columns else 0.0,
+                "dist_from_ema_200": float(X["dist_from_ema_200"].iloc[-1]) if "dist_from_ema_200" in X.columns else 0.0,
                 # Add inter_market_feature and mta_feature to open_positions_cache
                 "inter_market_feature": float(X["inter_market_feature"].iloc[-1]) if "inter_market_feature" in X.columns else 0.0,
                 "mta_feature": float(X["mta_feature"].iloc[-1]) if "mta_feature" in X.columns else 0.0,
             }
         except Exception as e:
             logger.warning(f"Could not record open position in cache: {e}")
-            if self.alert_manager: self.alert_manager.send_alert(f"Could not record open position in cache for {symbol}: {e}", level="WARNING", category="POSITION_CACHE")
+            if self.notifier: self.notifier.send_message(f"<b>WARNING:</b> Could not record open position in cache for {symbol}: {e}", level="WARNING")
 
-        tca_data = {
-            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            "symbol": symbol,
-            "direction": direction,
-            "lots": lots,
-            "intended_entry_price": intended_entry_price,
-            "actual_entry_price": actual_entry_price,
-            "slippage_pips": slippage_pips,
-            "slippage_currency": slippage_currency,
-            "spread_at_entry_pips": spread_at_entry_pips,
-            "commission_per_trade": commission_per_lot,
-            "total_transaction_cost_currency": total_transaction_cost_currency,
-            "order_type": "DEAL", # Always DEAL for market orders
-            "fill_type": "IOC", # Always IOC for this bot
-            "deviation_pips": deviation,
-            "retries_taken": num_retries_attempted,
-            "entry_auc": auc_score,
-            "entry_equity": equity,
-            "position_id": position_id,
-        }
-
-        return OrderResult(True, position_id, "OK"), tca_data
+        return OrderResult(True, position_id, "OK")

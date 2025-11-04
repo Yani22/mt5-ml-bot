@@ -74,12 +74,8 @@ class LivePerformanceMonitor:
                 "last_check_time": self.last_check_time.isoformat() if self.last_check_time else None,
                 "last_ensemble_auc": self.last_ensemble_auc,
             }
-            
-            # Use atomic write
-            tmp_state_path = state_path + ".tmp"
-            with open(tmp_state_path, 'w') as f:
+            with open(state_path, 'w') as f:
                 json.dump(state, f, indent=4)
-            os.replace(tmp_state_path, state_path)
             logger.info(f"LivePerformanceMonitor state saved to {state_path}")
         except Exception as e:
             logger.error(f"Failed to save LivePerformanceMonitor state: {e}")
@@ -109,7 +105,6 @@ class LivePerformanceMonitor:
                     atr=trade_data.get("atr"),
                     entry_auc=trade_data.get("entry_auc"),
                     risk_fraction=trade_data.get("risk_fraction"),
-                    dynamic_risk_base_idx=trade_data.get("dynamic_risk_base_idx", -1),
                 )
                 # Manually set exit details as close() method is not called during load
                 trade.exit_price = trade_data.get("exit_price")

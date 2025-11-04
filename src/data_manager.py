@@ -4,20 +4,11 @@ import os
 import tempfile
 import pandas as pd  # type: ignore
 from loguru import logger  # type: ignore
-from typing import Optional, Tuple, Dict
-from enum import Enum
-import datetime
+from typing import Optional, Tuple
 
 from src.config import Cfg
 from src.features import FeatureCfg, build_features
 from src.labels import generate_labels
-
-class DataStatus(Enum):
-    OK = "OK"
-    STALE = "STALE"
-    GAP = "GAP"
-    EMPTY = "EMPTY"
-    ERROR = "ERROR"
 
 def ensure_dir(path: str):
     if path is None:
@@ -29,8 +20,6 @@ class DataManager:
         self.cfg = cfg
         self.raw_data_dir = cfg.fetch.raw_data_dir
         ensure_dir(self.raw_data_dir)
-        self.last_processed_bar_time: Dict[str, pd.Timestamp | None] = {sym: None for sym in cfg.symbols}
-        self.consecutive_valid_fetches: Dict[str, int] = {sym: 0 for sym in cfg.symbols}
 
     def _local_csv_path(self, symbol: str, timeframe: str) -> str:
         fname = f"{symbol.replace('#','')}_{timeframe}.csv"
@@ -52,43 +41,6 @@ class DataManager:
                     os.remove(tmp)
                 except Exception:
                     pass
-
-    def _validate_fetched_data(self, symbol: str, fetched_data: pd.DataFrame, timeframe_seconds: int, notifier) -> Tuple[DataStatus, str]:
-        if fetched_data.empty:
-            return DataStatus.EMPTY, f"[{symbol}] Fetched data is empty."
-
-        latest_bar_time = fetched_data.index[-1]
-        last_processed_time = self.last_processed_bar_time.get(symbol)
-
-        # If this is the very first bar for the symbol, just accept it
-        if last_processed_time is None:
-            self.last_processed_bar_time[symbol] = latest_bar_time
-            self.consecutive_valid_fetches[symbol] += 1
-            return DataStatus.OK, f"[{symbol}] First bar processed: {latest_bar_time}"
-
-        # 1. Stale Data Check
-        if latest_bar_time <= last_processed_time:
-            msg = f"[{symbol}] Stale data detected. Latest bar time: {latest_bar_time}, Last processed: {last_processed_time}"
-            logger.warning(msg)
-            if notifier: notifier.send_message(f"<b>WARNING:</b> {msg}", level="WARNING")
-            self.consecutive_valid_fetches[symbol] = 0 # Reset consecutive valid fetches
-            return DataStatus.STALE, msg
-
-        # 2. Gap Detection
-        expected_next_bar_time = last_processed_time + pd.Timedelta(seconds=timeframe_seconds)
-        if latest_bar_time > expected_next_bar_time:
-            # Allow for slight clock drift, but if it's more than 1.5x the timeframe, it's a gap
-            if (latest_bar_time - expected_next_bar_time).total_seconds() > (timeframe_seconds * 1.5):
-                msg = f"[{symbol}] Data gap detected. Expected next bar around: {expected_next_bar_time}, Received: {latest_bar_time}"
-                logger.warning(msg)
-                if notifier: notifier.send_message(f"<b>WARNING:</b> {msg}", level="WARNING")
-                self.consecutive_valid_fetches[symbol] = 0 # Reset consecutive valid fetches
-                return DataStatus.GAP, msg
-
-        # If all checks pass, update last_processed_bar_time and increment consecutive valid fetches
-        self.last_processed_bar_time[symbol] = latest_bar_time
-        self.consecutive_valid_fetches[symbol] += 1
-        return DataStatus.OK, f"[{symbol}] Data OK. Latest bar: {latest_bar_time}."
 
     def load_local_history(self, symbol: str, timeframe: str, count: Optional[int] = None) -> pd.DataFrame:
         path = self._local_csv_path(symbol, timeframe)
@@ -181,7 +133,7 @@ class DataManager:
         else:
             logger.debug(f"[{symbol}] Local history OK ({len(current)} rows).")
 
-    def fetch_live(self, symbol: str, feature_cfg: "FeatureCfg", min_pct_change: float, notifier) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, DataStatus, str]:
+    def fetch_live(self, symbol: str, feature_cfg: "FeatureCfg", min_pct_change: float) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         # 1. Load the bulk of the history from the local cache first.
         data = self.load_local_history(symbol, self.cfg.timeframe, count=self.cfg.history_bars)
 
@@ -189,26 +141,15 @@ class DataManager:
         # This is more efficient than fetching the entire history every time.
         recent_data = self._fetch_bars_from_mt5_chunked(symbol, self.cfg.timeframe, 200) # Fetch last 200 bars
 
-        # 3. Validate the fetched recent data
-        timeframe_seconds = self.cfg.timeframe_seconds()
-        if timeframe_seconds is None:
-            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), DataStatus.ERROR, f"[{symbol}] Invalid timeframe configuration."
-
-        validation_status, validation_msg = self._validate_fetched_data(symbol, recent_data, timeframe_seconds, notifier)
-
-        if validation_status != DataStatus.OK:
-            # If data is not OK, return empty dataframes and the status/message
-            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), validation_status, validation_msg
-
-        # 4. Combine and de-duplicate.
+        # 3. Combine and de-duplicate.
         if not recent_data.empty:
             data = pd.concat([data, recent_data])
             data = data[~data.index.duplicated(keep='last')].sort_index()
 
         if data.empty:
-            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), DataStatus.EMPTY, f"[{symbol}] Combined data is empty after fetch."
+            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-        # 5. Fetch context features, if enabled
+        # 4. Fetch context features, if enabled
         mta_df = None
         if self.cfg.context_features.mta.enabled:
             logger.debug(f"[{symbol}] Fetching live MTA data...")
@@ -227,16 +168,16 @@ class DataManager:
                 logger.warning(f"[{symbol}] No live Inter-Market data loaded for symbol {im_sym}. Disabling for this tick.")
                 inter_market_df = None
 
-        # 6. Build features and labels with all data
+        # 3. Build features and labels with all data
         X, y = self._build_features_and_labels(data, feature_cfg, symbol, min_pct_change, mta_df=mta_df, inter_market_df=inter_market_df)
 
-        # 7. Align all dataframes by index
+        # 4. Align all dataframes by index
         common_idx = X.index.intersection(y.index)
         X = X.loc[common_idx]
         y = y.loc[common_idx]
         data = data.loc[common_idx]
 
-        return data, X, y, DataStatus.OK, validation_msg
+        return data, X, y
 
     def load_cached(self, symbol: str, feature_cfg: FeatureCfg, count: Optional[int] = None, min_pct_change: float = 0.0) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         data = self.load_local_history(symbol, self.cfg.timeframe, count=count)

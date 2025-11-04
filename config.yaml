@@ -11,7 +11,7 @@ optuna_n_trials: 1  # 150
 # --- Backtesting Settings ---
 backtesting:
   initial_equity: 9.26
-  simulation_volume_min: 0.1
+  simulation_volume_min: 0.1 # NEW: Force backtester to use this minimum lot size
 
 optuna_pruning_interval: 100 # New: Interval for Optuna pruning checks
 n_jobs: -1 # Number of parallel jobs for tuning. -1 means all available CPU cores.
@@ -31,8 +31,6 @@ fetch:
   raw_data_dir: "data/historical_data" # where to store cached data
   retrain_in_background: false      # whether retrain runs async
   retrain_time_utc: "23:55"           #null set to "23:55" if you want scheduled daily retrain, null = disabled
-  max_consecutive_data_issues: 5 # Max consecutive data issues before pausing trading
-  min_valid_fetches_to_recover: 3 # Min consecutive valid fetches to resume trading
 force_retrain_on_startup: false    # Set to true to force retraining of all models on bot startup (e.g., after feature changes).
 
 # --- Ensemble Training Control ---
@@ -53,7 +51,6 @@ retraining_window_bars: 45000         # Number of recent bars for rolling window
 features:
   rsi_period: [14, 14]
   ema_slow: [200, 200]
-  min_pct_change: 0.0001 # Minimum percentage change for label generation
 
 # --- Context Features (static, not tuned by optuna) ---
 context_features:
@@ -64,7 +61,7 @@ context_features:
     rsi_period: 14
   inter_market:
     enabled: false
-    symbol: "DXY" # Make sure this symbol is available in your data source
+    symbol: "USDX-DEC25" # Make sure this symbol is available in your data source
     roc_lags: [5, 21, 63]
   price_action:
     enabled: true
@@ -95,17 +92,13 @@ ensemble:
 trading_costs:
   source: static
   defaults:
-    spread_pips: 0.8
-    slippage_pips: 0.5
+    spread_pips: 1.5
+    slippage_pips: 0.1
     commission_per_trade: 0.0
     lot_size: 0.1
     pip_value: 0.0001
-    adaptive_slippage: true
-    retry_order_send: 3
-    dynamic_slippage_enabled: true # Enable dynamic slippage model in backtesting
-    slippage_atr_multiplier: 0.1 # Multiplier for ATR in dynamic slippage calculation
-    slippage_spread_multiplier: 0.5 # Multiplier for spread in dynamic slippage calculation
-    slippage_lot_multiplier: 0.01 # Multiplier for order lots (log-scaled) in dynamic slippage calculation
+    adaptive_slippage: true        # dynamically calculate slippage based on recent spread
+    retry_order_send: 3            # number of retries for failed order sends
 
 # --- Thompson Sampling Configuration ---
 thompson_sampling:
@@ -143,17 +136,6 @@ thompson_sampling:
   reset_on_low_ensemble_auc: 0.52    # Reset if ensemble AUC drops below this
   reset_cooldown_hours: 24.0         # Cooldown period after a reset (in hours)
 
-  # Dynamic Risk/TP Grids for Contextual Bandit
-  dynamic_risk_base_grid: [0.005, 0.0075, 0.01]
-  dynamic_risk_max_grid: [0.01, 0.015, 0.02]
-  dynamic_risk_auc_floor_grid: [0.53, 0.55, 0.57]
-  dynamic_risk_auc_ceiling_grid: [0.60, 0.65, 0.70]
-
-  dynamic_tp_base_mult_grid: [1.5, 2.0, 2.5]
-  dynamic_tp_max_mult_grid: [3.0, 3.5, 4.0]
-  dynamic_tp_auc_floor_grid: [0.53, 0.55, 0.57]
-  dynamic_tp_auc_ceiling_grid: [0.60, 0.65, 0.70]
-
 # --- Risk management ---
 risk:
   risk_per_trade: 0.02
@@ -181,10 +163,12 @@ risk:
   min_prob_short: 0.55 #0.65-max #0.51-0.55|low #0.56-0.65|high
   block_on_drawdown: 1.0      # 0.20         # 0.1 pause if drawdown from equity peak exceeds 10%     #disable 1.0
   min_auc_improvement: 0.005     # 0.005 default # minimum improvement in AUC to accept a new model
-  max_drawdown_for_pruning: 0.70 # Max drawdown allowed before Optuna trial pruning  #disable 1.0
+  max_drawdown_for_pruning: 1.0 # New: Max drawdown allowed before Optuna trial pruning  #disable 1.0
   session_filter:
-    start: "00:00"  # "07:00"
-    end: "23:59"    # "22:00"
+    start: "00:00"
+    end: "23:59"
+    # start: "07:00"
+    # end: "22:00"
 
 # --- Logging ---
 logging:
@@ -198,7 +182,6 @@ watchdog:
   enabled: false
   max_consecutive_losses: 5      # 5 Stop trading if more than N losses in a row
   cooldown_hours: 1              # 1 Pause trading for X hours if triggered
-  daily_loss_limit: null  # limit can be set as an absolute dollar value (e.g., -$500) or a fraction of equity (e.g., -0.02)
 
 # --- Monitoring ---
 monitoring:
@@ -206,15 +189,6 @@ monitoring:
   monitor_state_file: "results/monitor_state.json" # File to save LivePerformanceMonitor state
   telegram_bot_token: "" # Your Telegram Bot Token
   telegram_chat_id: "" # Your Telegram Chat ID (can be negative for groups)
-  state_save_interval_minutes: 5.0 # How often to save bot state (monitor, risk, open positions)
-
-# --- Alerts Configuration ---
-alerts:
-  enabled: true
-  min_notification_level: "WARNING" # INFO, WARNING, ERROR, CRITICAL - Minimum level for Telegram notifications
-  alert_throttle_minutes: 5.0 # How often to send the same alert type (e.g., MT5 connection issues)
-  mt5_reconnect_alert_threshold: 3 # Number of failed MT5 reconnects before critical alert
-  order_failure_alert_threshold: 3 # Number of consecutive order failures before critical alert
 
 # --- Misc / Transparency ---
 startup_logging: true             # log key settings at bot launch for transparency
@@ -257,15 +231,3 @@ symbol_overrides:
     min_prob_grid_long: [0.53, 0.55, 0.57, 0.60, 0.63]
     min_prob_grid_short: [0.53, 0.55, 0.57, 0.60, 0.63]
 
-# --- TCA Configuration ---
-# "The TCA Configuration section allows you to enable and fine-tune Transaction Cost Analysis. This feature helps you understand the real costs of your trades, including hidden expenses like slippage,
-# which can significantly impact your strategy's profitability. By setting enabled: true, the bot will collect detailed execution data and generate reports. You can define how often these reports run
-# (analysis_interval_hours), how much historical data they cover (lookback_days), and set warning or critical thresholds for average slippage and total transaction costs. If these thresholds are
-# breached, the bot can send alerts, helping you quickly identify and address any issues with your trade execution quality."
-tca:
-  enabled: true
-  analysis_interval_hours: 24.0
-  lookback_days: 7
-  slippage_threshold_pips_warning: -0.5
-  slippage_threshold_pips_critical: -1.0
-  total_cost_currency_warning: 100.0

@@ -26,15 +26,6 @@ class BacktestingCfg:
     simulation_volume_min: float = 0.01
 
 @dataclass
-class TcaCfg:
-    enabled: bool = True
-    analysis_interval_hours: float = 24.0 # How often to run TCA analysis
-    lookback_days: int = 7 # How many days of data to analyze
-    slippage_threshold_pips_warning: float = -0.5 # Avg slippage (pips) below this triggers a warning
-    slippage_threshold_pips_critical: float = -1.0 # Avg slippage (pips) below this triggers a critical alert
-    total_cost_currency_warning: float = 100.0 # Total transaction cost (currency) above this triggers a warning
-
-@dataclass
 class PriceActionCfg:
     enabled: bool = True
     home_base_ma_period: int = 200
@@ -74,6 +65,7 @@ class RiskCfg:
     min_prob_long: float = 0.55
     min_prob_short: float = 0.55
     block_on_drawdown: float = 0.10
+    transaction_cost_pips: float = 1.5
     session_filter: Optional[Dict[str, str]] = None
     min_ensemble_auc: float = 0.55
     min_auc_improvement: float = 0.005
@@ -111,7 +103,6 @@ class MonitoringCfg:
     monitor_state_file: str = "monitor_state.json"
     telegram_bot_token: Optional[str] = None
     telegram_chat_id: Optional[str] = None
-    state_save_interval_minutes: float = 5.0 # How often to save bot state (monitor, risk, open positions)
 
 @dataclass
 class TradingCostsDefaultsCfg:
@@ -122,10 +113,6 @@ class TradingCostsDefaultsCfg:
     pip_value: float = 0.0001
     adaptive_slippage: bool = True
     retry_order_send: int = 3
-    dynamic_slippage_enabled: bool = False # Enable dynamic slippage model in backtesting
-    slippage_atr_multiplier: float = 0.1 # Multiplier for ATR in dynamic slippage calculation
-    slippage_spread_multiplier: float = 0.5 # Multiplier for spread in dynamic slippage calculation
-    slippage_lot_multiplier: float = 0.01 # Multiplier for order lots (log-scaled) in dynamic slippage calculation
 
 @dataclass
 class TradingCostsCfg:
@@ -139,8 +126,6 @@ class FetchCfg:
     raw_data_dir: str = "data/historical_data"
     retrain_in_background: bool = True
     retrain_time_utc: Optional[str] = None  # "HH:MM" format or None
-    max_consecutive_data_issues: int = 5 # Max consecutive data issues before pausing trading
-    min_valid_fetches_to_recover: int = 3 # Min consecutive valid fetches to resume trading
 
 @dataclass
 class ThompsonSamplingCfg:
@@ -180,25 +165,6 @@ class ThompsonSamplingCfg:
     reset_on_low_ensemble_auc: float = 0.52
     reset_cooldown_hours: float = 24.0
 
-    # Dynamic Risk/TP Grids for Contextual Bandit
-    dynamic_risk_base_grid: List[float] = field(default_factory=lambda: [0.005, 0.0075, 0.01])
-    dynamic_risk_max_grid: List[float] = field(default_factory=lambda: [0.01, 0.015, 0.02])
-    dynamic_risk_auc_floor_grid: List[float] = field(default_factory=lambda: [0.53, 0.55, 0.57])
-    dynamic_risk_auc_ceiling_grid: List[float] = field(default_factory=lambda: [0.60, 0.65, 0.70])
-
-    dynamic_tp_base_mult_grid: List[float] = field(default_factory=lambda: [1.5, 2.0, 2.5])
-    dynamic_tp_max_mult_grid: List[float] = field(default_factory=lambda: [3.0, 3.5, 4.0])
-    dynamic_tp_auc_floor_grid: List[float] = field(default_factory=lambda: [0.53, 0.55, 0.57])
-    dynamic_tp_auc_ceiling_grid: List[float] = field(default_factory=lambda: [0.60, 0.65, 0.70])
-
-@dataclass
-class AlertsCfg:
-    enabled: bool = True
-    min_notification_level: str = "WARNING" # INFO, WARNING, ERROR, CRITICAL
-    alert_throttle_minutes: float = 5.0 # How often to send the same alert type
-    mt5_reconnect_alert_threshold: int = 3 # Number of failed MT5 reconnects before critical alert
-    order_failure_alert_threshold: int = 3 # Number of consecutive order failures before critical alert
-
 @dataclass
 class Cfg:
     symbols: List[str] = field(default_factory=lambda: ["EURUSD#"])
@@ -221,7 +187,6 @@ class Cfg:
     logging: Dict[str, Any] = field(default_factory=dict)
     watchdog: WatchdogCfg = field(default_factory=WatchdogCfg)
     monitoring: MonitoringCfg = field(default_factory=MonitoringCfg)
-    alerts: AlertsCfg = field(default_factory=AlertsCfg) # NEW: Alerts configuration
     thompson_sampling: ThompsonSamplingCfg = field(default_factory=ThompsonSamplingCfg)
     trading_costs: TradingCostsCfg = field(default_factory=TradingCostsCfg)
     fetch: FetchCfg = field(default_factory=FetchCfg)
@@ -232,7 +197,6 @@ class Cfg:
     magic_number: int = 424242
     symbol_overrides: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     backtesting: BacktestingCfg = field(default_factory=BacktestingCfg)
-    tca: TcaCfg = field(default_factory=TcaCfg)
 
     def timeframe_seconds(self) -> Optional[int]:
         """ Convert timeframe string like 'M5', 'H1', 'D1' to seconds.
@@ -349,13 +313,7 @@ class Cfg:
         # parse monitoring block if present
         try:
             mon_raw = raw.get("monitoring", {}) or {}
-            mon_obj = MonitoringCfg(
-                lookback_days=mon_raw.get("lookback_days", 30),
-                monitor_state_file=mon_raw.get("monitor_state_file", "monitor_state.json"),
-                telegram_bot_token=mon_raw.get("telegram_bot_token"),
-                telegram_chat_id=mon_raw.get("telegram_chat_id"),
-                state_save_interval_minutes=mon_raw.get("state_save_interval_minutes", 5.0),
-            )
+            mon_obj = MonitoringCfg(**mon_raw) if mon_raw else MonitoringCfg()
         except Exception as e:
             logger.warning(f"Invalid monitoring config in YAML: {e}; using defaults.")
             mon_obj = MonitoringCfg()
@@ -365,15 +323,7 @@ class Cfg:
             fetch_raw = raw.get("fetch", {}) or {}
             if not fetch_raw.get("retrain_time_utc"):
                 logger.warning("Could not find a valid `retrain_time_utc` in config.yaml; falling back to `retrain_every_bars`.")
-            fetch_obj = FetchCfg(
-                initial_fetch_bars=fetch_raw.get("initial_fetch_bars", 30000),
-                save_raw_data_locally=fetch_raw.get("save_raw_data_locally", True),
-                raw_data_dir=fetch_raw.get("raw_data_dir", "data/historical_data"),
-                retrain_in_background=fetch_raw.get("retrain_in_background", True),
-                retrain_time_utc=fetch_raw.get("retrain_time_utc"),
-                max_consecutive_data_issues=fetch_raw.get("max_consecutive_data_issues", 5),
-                min_valid_fetches_to_recover=fetch_raw.get("min_valid_fetches_to_recover", 3),
-            )
+            fetch_obj = FetchCfg(**fetch_raw) if fetch_raw else FetchCfg()
         except Exception as e:
             logger.warning(f"Invalid fetch config in YAML: {e}; using defaults.")
             fetch_obj = FetchCfg()
@@ -381,45 +331,7 @@ class Cfg:
         # parse thompson_sampling block if present
         try:
             ts_raw = raw.get("thompson_sampling", {}) or {}
-            ts_obj = ThompsonSamplingCfg(
-                enabled=ts_raw.get("enabled", True),
-                atr_grid=ts_raw.get("atr_grid", [0.6, 0.8, 1.0, 1.25, 1.5]),
-                min_prob_grid_long=ts_raw.get("min_prob_grid_long", [0.51, 0.55, 0.60]),
-                min_prob_grid_short=ts_raw.get("min_prob_grid_short", [0.51, 0.55, 0.60]),
-                prior_mean=ts_raw.get("prior_mean", 0.0),
-                prior_var=ts_raw.get("prior_var", 1.0),
-                obs_var=ts_raw.get("obs_var", 1.0),
-                decay=ts_raw.get("decay", 0.995),
-                reward_normalization_factor=ts_raw.get("reward_normalization_factor", 1000.0),
-                rule_rolling_window=ts_raw.get("rule_rolling_window", 100),
-                vol_threshold=ts_raw.get("vol_threshold", 0.0005),
-                dd_cut_multiplier=ts_raw.get("dd_cut_multiplier", 2.0),
-                consec_loss_cut=ts_raw.get("consec_loss_cut", 0.2),
-                state_file=ts_raw.get("state_file", "ts_risk_controller_state.json"),
-                contextual_enabled=ts_raw.get("contextual_enabled", False),
-                context_dim=ts_raw.get("context_dim", 9),
-                min_visits_for_exploration=ts_raw.get("min_visits_for_exploration", 5),
-                exploration_risk_mult=ts_raw.get("exploration_risk_mult", 0.5),
-                warmstart_weight=ts_raw.get("warmstart_weight", 1.0),
-                adaptive_grids_enabled=ts_raw.get("adaptive_grids_enabled", False),
-                adaptation_interval_updates=ts_raw.get("adaptation_interval_updates", 500),
-                adaptation_refinement_factor=ts_raw.get("adaptation_refinement_factor", 0.3),
-                min_grid_size=ts_raw.get("min_grid_size", 5),
-                max_grid_size=ts_raw.get("max_grid_size", 20),
-                bandit_reset_enabled=ts_raw.get("bandit_reset_enabled", False),
-                reset_on_drawdown_percent=ts_raw.get("reset_on_drawdown_percent", 0.20),
-                reset_on_consecutive_losses=ts_raw.get("reset_on_consecutive_losses", 10),
-                reset_on_low_ensemble_auc=ts_raw.get("reset_on_low_ensemble_auc", 0.52),
-                reset_cooldown_hours=ts_raw.get("reset_cooldown_hours", 24.0),
-                dynamic_risk_base_grid=ts_raw.get("dynamic_risk_base_grid", [0.005, 0.0075, 0.01]),
-                dynamic_risk_max_grid=ts_raw.get("dynamic_risk_max_grid", [0.01, 0.015, 0.02]),
-                dynamic_risk_auc_floor_grid=ts_raw.get("dynamic_risk_auc_floor_grid", [0.53, 0.55, 0.57]),
-                dynamic_risk_auc_ceiling_grid=ts_raw.get("dynamic_risk_auc_ceiling_grid", [0.60, 0.65, 0.70]),
-                dynamic_tp_base_mult_grid=ts_raw.get("dynamic_tp_base_mult_grid", [1.5, 2.0, 2.5]),
-                dynamic_tp_max_mult_grid=ts_raw.get("dynamic_tp_max_mult_grid", [3.0, 3.5, 4.0]),
-                dynamic_tp_auc_floor_grid=ts_raw.get("dynamic_tp_auc_floor_grid", [0.53, 0.55, 0.57]),
-                dynamic_tp_auc_ceiling_grid=ts_raw.get("dynamic_tp_auc_ceiling_grid", [0.60, 0.65, 0.70]),
-            ) if ts_raw else ThompsonSamplingCfg()
+            ts_obj = ThompsonSamplingCfg(**ts_raw) if ts_raw else ThompsonSamplingCfg()
         except Exception as e:
             logger.warning(f"Invalid thompson_sampling config in YAML: {e}; using defaults.")
             ts_obj = ThompsonSamplingCfg()
@@ -428,19 +340,7 @@ class Cfg:
         try:
             tc_raw = raw.get("trading_costs", {}) or {}
             defaults_raw = tc_raw.get("defaults", {}) or {}
-            defaults_obj = TradingCostsDefaultsCfg(
-                spread_pips=defaults_raw.get("spread_pips", 0.8),
-                slippage_pips=defaults_raw.get("slippage_pips", 0.5),
-                commission_per_trade=defaults_raw.get("commission_per_trade", 0.0),
-                lot_size=defaults_raw.get("lot_size", 0.1),
-                pip_value=defaults_raw.get("pip_value", 0.0001),
-                adaptive_slippage=defaults_raw.get("adaptive_slippage", True),
-                retry_order_send=defaults_raw.get("retry_order_send", 3),
-                dynamic_slippage_enabled=defaults_raw.get("dynamic_slippage_enabled", False),
-                slippage_atr_multiplier=defaults_raw.get("slippage_atr_multiplier", 0.1),
-                slippage_spread_multiplier=defaults_raw.get("slippage_spread_multiplier", 0.5),
-                slippage_lot_multiplier=defaults_raw.get("slippage_lot_multiplier", 0.01),
-            )
+            defaults_obj = TradingCostsDefaultsCfg(**defaults_raw)
             tc_obj = TradingCostsCfg(
                 source=tc_raw.get("source", "static"),
                 defaults=defaults_obj
@@ -456,28 +356,6 @@ class Cfg:
         except Exception as e:
             logger.warning(f"Invalid backtesting config in YAML: {e}; using defaults.")
             bt_obj = BacktestingCfg()
-
-        # parse tca block if present
-        try:
-            tca_raw = raw.get("tca", {}) or {}
-            tca_obj = TcaCfg(**tca_raw) if tca_raw else TcaCfg()
-        except Exception as e:
-            logger.warning(f"Invalid TCA config in YAML: {e}; using defaults.")
-            tca_obj = TcaCfg()
-
-        # parse alerts block if present
-        try:
-            alerts_raw = raw.get("alerts", {}) or {}
-            alerts_obj = AlertsCfg(
-                enabled=alerts_raw.get("enabled", True),
-                min_notification_level=alerts_raw.get("min_notification_level", "WARNING"),
-                alert_throttle_minutes=alerts_raw.get("alert_throttle_minutes", 5.0),
-                mt5_reconnect_alert_threshold=alerts_raw.get("mt5_reconnect_alert_threshold", 3),
-                order_failure_alert_threshold=alerts_raw.get("order_failure_alert_threshold", 3),
-            ) if alerts_raw else AlertsCfg()
-        except Exception as e:
-            logger.warning(f"Invalid alerts config in YAML: {e}; using defaults.")
-            alerts_obj = AlertsCfg()
 
         return Cfg(
             symbols=raw.get("symbols", ["EURUSD"]),
@@ -500,7 +378,6 @@ class Cfg:
             logging=raw.get("logging", {}),
             watchdog=watchdog_obj,
             monitoring=mon_obj,
-            alerts=alerts_obj, # NEW
             fetch=fetch_obj,
             thompson_sampling=ts_obj,
             trading_costs=tc_obj,
@@ -511,5 +388,4 @@ class Cfg:
             magic_number=int(raw.get("magic_number", 424242)),
             symbol_overrides=raw.get("symbol_overrides", {}),
             backtesting=bt_obj,
-            tca=tca_obj,
         )

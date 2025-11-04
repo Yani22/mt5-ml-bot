@@ -14,13 +14,11 @@ from src.execution import Execution
 from src.utils import setup_logging, get_training_data, load_ensemble, save_ensemble, safe_retrain_ensemble, load_optuna_params, log_symbol_specific_configs, log_startup_summary
 from src.live_performance_monitor import LivePerformanceMonitor
 from src.notifier import TelegramNotifier
-from src.alert_manager import AlertManager # NEW
 from src.risk_controller import RiskController
 import datetime
 import json
-from typing import Dict, Any, List
-from src.data_manager import DataManager, DataStatus
-from src.tca_analyzer import TcaAnalyzer
+from typing import Dict, Any
+from src.data_manager import DataManager
 from src.labels import generate_long_short_labels
 from src.bandit_warmstart import find_latest_backtest_state, merge_warmstart
 import csv
@@ -65,14 +63,6 @@ METRICS_HEADERS = [
     "rule_scale", "reward", "equity", "peak_equity", "drawdown", "ensemble_auc"
 ]
 
-TCA_CSV_FILE = "results/tca_metrics.csv"
-TCA_HEADERS = [
-    "timestamp", "symbol", "direction", "lots", "intended_entry_price", "actual_entry_price",
-    "slippage_pips", "slippage_currency", "spread_at_entry_pips", "commission_per_trade",
-    "total_transaction_cost_currency", "order_type", "fill_type", "deviation_pips",
-    "retries_taken", "entry_auc", "entry_equity", "position_id"
-]
-
 def _initialize_metrics_csv():
     if not os.path.exists(METRICS_CSV_FILE):
         with open(METRICS_CSV_FILE, 'w', newline='') as f:
@@ -80,73 +70,14 @@ def _initialize_metrics_csv():
             writer.writerow(METRICS_HEADERS)
         logger.info(f"Initialized metrics CSV file: {METRICS_CSV_FILE}")
 
-def _initialize_tca_csv():
-    if not os.path.exists(TCA_CSV_FILE):
-        with open(TCA_CSV_FILE, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(TCA_HEADERS)
-        logger.info(f"Initialized TCA CSV file: {TCA_CSV_FILE}")
-
 # Call initialization at startup
 _initialize_metrics_csv()
-_initialize_tca_csv()
 
 def log_metrics_to_csv(data: Dict[str, Any]):
     with open(METRICS_CSV_FILE, 'a', newline='') as f:
         writer = csv.writer(f)
         row = [data.get(header, "") for header in METRICS_HEADERS]
         writer.writerow(row)
-
-def log_tca_to_csv(data: Dict[str, Any]):
-    with open(TCA_CSV_FILE, 'a', newline='') as f:
-        writer = csv.writer(f)
-        row = [data.get(header, "") for header in TCA_HEADERS]
-        writer.writerow(row)
-
-def log_tca_to_csv(data: Dict[str, Any]):
-    with open(TCA_CSV_FILE, 'a', newline='') as f:
-        writer = csv.writer(f)
-        row = [data.get(header, "") for header in TCA_HEADERS]
-        writer.writerow(row)
-
-def sleep_until_next_bar(cfg: Cfg, current_bar_timestamp: datetime.datetime, buffer_seconds: float = 5.0):
-    """
-    Calculates the precise time to sleep until the next bar opens, with a buffer.
-    This prevents drift and ensures the bot wakes up just before new data is available.
-    """
-    timeframe_seconds = cfg.timeframe_seconds()
-    if timeframe_seconds is None:
-        logger.warning("Invalid timeframe_seconds, defaulting to 60 seconds sleep.")
-        time.sleep(60)
-        return
-
-    # Calculate the expected open time of the *next* bar
-    # current_bar_timestamp is the timestamp of the *last completed* bar
-    # So, next_bar_open_time is current_bar_timestamp + timeframe_seconds
-    next_bar_open_timestamp = current_bar_timestamp + datetime.timedelta(seconds=timeframe_seconds)
-
-    # Calculate how long we need to sleep
-    time_to_sleep = (next_bar_open_timestamp - datetime.datetime.now(datetime.timezone.utc)).total_seconds()
-
-    if time_to_sleep <= buffer_seconds:
-        # If we are already too close or past the next bar open time, just log and proceed
-        logger.warning(f"Already past or too close to next bar open time. Proceeding without full sleep. Time to next bar: {time_to_sleep:.2f}s")
-        # Small sleep to prevent busy-waiting if already past
-        if time_to_sleep < -timeframe_seconds: # If we are more than a full timeframe behind, something is wrong
-            logger.error(f"Bot is significantly behind market data. Current time: {datetime.datetime.now(datetime.timezone.utc)}, Expected next bar: {next_bar_open_timestamp}")
-        time.sleep(1) # Sleep for a second to avoid busy loop
-        return
-
-    # Sleep for most of the duration, leaving a buffer
-    sleep_duration = time_to_sleep - buffer_seconds
-    if sleep_duration > 0:
-        logger.debug(f"Sleeping for {sleep_duration:.2f} seconds until {buffer_seconds:.2f}s before next bar open.")
-        time.sleep(sleep_duration)
-
-    # Busy-wait for the remaining buffer time to ensure precise wake-up
-    while datetime.datetime.now(datetime.timezone.utc) < next_bar_open_timestamp:
-        time.sleep(0.1) # Small sleep to avoid 100% CPU usage
-    logger.debug(f"Woke up precisely at next bar open time: {datetime.datetime.now(datetime.timezone.utc)}")
 
 def print_dashboard(cfg, risk, ens, X, sym, bar_counter, is_first_symbol, equity, balance):
     """ Prints a live portfolio dashboard for a single symbol, throttled. """
@@ -179,7 +110,7 @@ def print_dashboard(cfg, risk, ens, X, sym, bar_counter, is_first_symbol, equity
             for p in positions_for_symbol
         ]) if positions_for_symbol else "None"
 
-def run_retraining_in_background(cfg, sym, feature_cfg, dry_run, alert_manager, optuna_params_per_symbol):
+def run_retraining_in_background(cfg, sym, feature_cfg, dry_run, notifier, optuna_params_per_symbol):
     """
     A wrapper function to run the entire retraining pipeline for both long and short models in a separate process.
     This function now saves optimized parameters to the symbol_overrides section of config.yaml.
@@ -191,7 +122,7 @@ def run_retraining_in_background(cfg, sym, feature_cfg, dry_run, alert_manager, 
         if full_X is None or full_X.empty:
             message = f"[{sym}] <b>WARNING:</b> No data for retraining, background process exiting."
             logger.warning(message)
-            alert_manager.send_alert(message, level="WARNING", category="RETRAINING")
+            if notifier: notifier.send_message(message, level="WARNING")
             return
 
         y_long, y_short = generate_long_short_labels(full_data, cfg.prediction_horizon, feature_cfg.min_pct_change)
@@ -208,7 +139,6 @@ def run_retraining_in_background(cfg, sym, feature_cfg, dry_run, alert_manager, 
 
     except Exception as e:
         logger.exception(f"[{sym}] Background retraining process failed: {e}")
-        alert_manager.send_alert(f"[{sym}] Background retraining process failed: {e}", level="ERROR", category="RETRAINING")
 
 def _handle_model_acceptance(sym, cfg, ens_per_symbol_long, ens_per_symbol_short, active_model_auc, live_monitor, notifier, optuna_params_per_symbol):
     """Loads newly trained models, compares them, and accepts them if they are an improvement."""
@@ -237,21 +167,21 @@ def _handle_model_acceptance(sym, cfg, ens_per_symbol_long, ens_per_symbol_short
             live_monitor.update_ensemble_auc(new_auc_long)
             message = f"[{sym}] New LONG model accepted (AUC: {old_auc_long:.4f} -> {new_auc_long:.4f})."
             logger.info(message)
-            alert_manager.send_alert(message, level="INFO", category="MODEL_ACCEPTANCE")
+            if notifier: notifier.send_message(message, level="INFO")
         else:
             message = f"[{sym}] New LONG model rejected (AUC: {old_auc_long:.4f} -> {new_auc_long:.4f}). Keeping old model."
             logger.warning(message)
-            alert_manager.send_alert(message, level="WARNING", category="MODEL_ACCEPTANCE")
+            if notifier: notifier.send_message(message, level="WARNING")
 
         if short_accepted:
             ens_per_symbol_short[sym] = new_ens_short
             message = f"[{sym}] New SHORT model accepted (AUC: {old_auc_short:.4f} -> {new_auc_short:.4f})."
             logger.info(message)
-            alert_manager.send_alert(message, level="INFO", category="MODEL_ACCEPTANCE")
+            if notifier: notifier.send_message(message, level="INFO")
         else:
             message = f"[{sym}] New SHORT model rejected (AUC: {old_auc_short:.4f} -> {new_auc_short:.4f}). Keeping old model."
             logger.warning(message)
-            alert_manager.send_alert(message, level="WARNING", category="MODEL_ACCEPTANCE")
+            if notifier: notifier.send_message(message, level="WARNING")
 
     except Exception as e:
         logger.exception(f"[{sym}] Error during model acceptance: {e}")
@@ -274,13 +204,6 @@ def run(dry_run: bool = False):
     # Initialize notifier
     notifier = TelegramNotifier(cfg)
 
-    # Initialize AlertManager
-    alert_manager = AlertManager(cfg, notifier) # NEW
-
-    # Initialize TCA Analyzer
-    tca_analyzer = TcaAnalyzer(cfg)
-    tca_analyzer.set_alert_manager(alert_manager) # Pass alert_manager
-
     # Initialize DataManager
     data_manager = DataManager(cfg)
 
@@ -296,8 +219,6 @@ def run(dry_run: bool = False):
     retraining_processes = {}
     retraining_status = {sym: False for sym in cfg.symbols}  # Track if retraining is active
     trading_blocked_by_low_new_model_auc = {sym: False for sym in cfg.symbols}  # Track if trading is blocked due to low new model AUC
-    trading_paused_due_to_data_issue = {sym: False for sym in cfg.symbols} # Track if trading is paused due to data issues
-    consecutive_data_issues = {sym: 0 for sym in cfg.symbols} # Track consecutive data issues for recovery
     last_diagnostics_log_time = 0.0  # For throttling diagnostics logging
     last_retrain_date = {sym: None for sym in cfg.symbols}  # Track last retraining date per symbol
 
@@ -314,12 +235,12 @@ def run(dry_run: bool = False):
                 )
                 if not mt5c.connect():
                     logger.error("MT5 initial connection failed. Retrying in 60 seconds...")
-                    alert_manager.send_alert("MT5 initial connection failed. Retrying...", level="CRITICAL", category="MT5_CONNECTION")
+                    notifier.send_message("<b>CRITICAL:</b> MT5 initial connection failed. Retrying...", level="CRITICAL")
                     time.sleep(RECONNECTION_RETRY_SECONDS)
                     continue  # Try connecting again
 
                 logger.info("MT5 connection established.")
-                alert_manager.send_alert("MT5 connection established.", level="INFO", category="MT5_CONNECTION")
+                notifier.send_message("MT5 connection established.", level="INFO")
 
                 # Get initial equity from MT5 account info
                 account_info = mt5.account_info()
@@ -371,12 +292,12 @@ def run(dry_run: bool = False):
                     logger.exception(f"Warmstart merge failed; continuing without warmstart.")
 
                 # Instantiate risk controller AFTER warmstart merge so it loads the merged state
-                risk = RiskManager(cfg, alert_manager=alert_manager)  # Pass alert_manager
-                risk_controller = RiskController(cfg, alert_manager=alert_manager)  # Pass alert_manager
+                risk = RiskManager(cfg, notifier=notifier)  # Pass notifier
+                risk_controller = RiskController(cfg, notifier=notifier)  # Instantiate RiskController
                 loaded_open_positions = risk_controller.load_state()  # Load state again to get open_positions_cache
 
                 # Execution object (single instance)
-                exe = Execution(ens_per_symbol_long, ens_per_symbol_short, risk, mt5c, data_manager, dry_run=dry_run, alert_manager=alert_manager)
+                exe = Execution(ens_per_symbol_long, ens_per_symbol_short, risk, mt5c, data_manager, dry_run=dry_run, notifier=notifier)
                 exe.risk.open_positions_cache.update(loaded_open_positions)  # Initialize exe's cache with loaded data
 
                 # Reconcile open positions with MT5 to ensure accuracy
@@ -386,8 +307,6 @@ def run(dry_run: bool = False):
                 trading_blocked_by_low_new_model_auc = {sym: False for sym in cfg.symbols}  # Track if trading is blocked due to low new model AUC
                 last_diagnostics_log_time = 0.0  # For throttling diagnostics logging
                 last_retrain_date = {sym: None for sym in cfg.symbols}  # Track last retraining date per symbol
-                last_tca_analysis_time = 0.0 # For throttling TCA analysis
-                last_state_save_time = 0.0 # For throttling state saving
 
                 # Inner loop for trading operations
                 while True:
@@ -465,10 +384,10 @@ def run(dry_run: bool = False):
                                 if p.exitcode != 0:
                                     message = f"[{sym}] <b>ERROR:</b> Background retraining process failed with exit code {p.exitcode}. Keeping current models."
                                     logger.error(message)
-                                    alert_manager.send_alert(message, level="ERROR", category="RETRAINING")
+                                    if notifier: notifier.send_message(message, level="ERROR")
                                 else:
                                     # Call the centralized model acceptance function
-                                    _handle_model_acceptance(sym, cfg, ens_per_symbol_long, ens_per_symbol_short, active_model_auc, live_monitor, alert_manager, optuna_params_per_symbol)
+                                    _handle_model_acceptance(sym, cfg, ens_per_symbol_long, ens_per_symbol_short, active_model_auc, live_monitor, notifier, optuna_params_per_symbol)
 
                                 del retraining_processes[sym]
                                 retraining_status[sym] = False
@@ -476,44 +395,8 @@ def run(dry_run: bool = False):
 
                             # --- Fetch latest bar data using the centralized DataManager pipeline ---
                             feature_cfg = feature_cfg_per_symbol[sym]
-                            data, X, y, data_status, data_msg = data_manager.fetch_live(sym, feature_cfg, feature_cfg.min_pct_change, notifier)
-
-                            # --- Data Validation Logic ---
-                            if data_status != DataStatus.OK:
-                                consecutive_data_issues[sym] += 1
-                                if not trading_paused_due_to_data_issue[sym]:
-                                    if consecutive_data_issues[sym] >= cfg.fetch.max_consecutive_data_issues:
-                                        trading_paused_due_to_data_issue[sym] = True
-                                        logger.critical(f"[{sym}] CRITICAL: Trading paused due to persistent data issues: {data_msg}")
-                                        alert_manager.send_alert(f"[{sym}] Trading paused due to persistent data issues. {data_msg}", level="CRITICAL", category="DATA_ISSUE")
-                                    else:
-                                        logger.warning(f"[{sym}] Data issue detected (consecutive: {consecutive_data_issues[sym]}): {data_msg}")
-                                        alert_manager.send_alert(f"[{sym}] Data issue detected. {data_msg}", level="WARNING", category="DATA_ISSUE")
-                                else:
-                                    logger.warning(f"[{sym}] Trading remains paused due to data issues: {data_msg}")
-                                continue # Skip further processing for this symbol if data is not OK
-                            else:
-                                # Data is OK. Check for recovery.
-                                if trading_paused_due_to_data_issue[sym]:
-                                    # Increment valid fetches to recover
-                                    data_manager.consecutive_valid_fetches[sym] += 1
-                                    if data_manager.consecutive_valid_fetches[sym] >= cfg.fetch.min_valid_fetches_to_recover:
-                                        trading_paused_due_to_data_issue[sym] = False
-                                        data_manager.consecutive_valid_fetches[sym] = 0 # Reset counter
-                                        logger.info(f"[{sym}] Data feed recovered. Resuming trading.")
-                                        alert_manager.send_alert(f"[{sym}] Data feed recovered. Resuming trading.", level="INFO", category="DATA_ISSUE")
-                                    else:
-                                        logger.info(f"[{sym}] Data OK, but still recovering ({data_manager.consecutive_valid_fetches[sym]}/{cfg.fetch.min_valid_fetches_to_recover} valid fetches). Trading remains paused.")
-                                else:
-                                    # Data is OK and not paused, reset consecutive issues
-                                    consecutive_data_issues[sym] = 0
-                                    data_manager.consecutive_valid_fetches[sym] = 0 # Ensure this is reset on continuous OK
-
+                            data, X, y = data_manager.fetch_live(sym, feature_cfg, feature_cfg.min_pct_change)
                             if data.empty:
-                                continue
-
-                            # Skip further processing if trading is paused for this symbol due to data issues
-                            if trading_paused_due_to_data_issue[sym]:
                                 continue
 
                             X_per_symbol[sym] = X
@@ -565,8 +448,8 @@ def run(dry_run: bool = False):
                                 if cfg.fetch.retrain_in_background:
                                     if sym not in retraining_processes:
                                         logger.info(f"[{sym}] Triggering background retraining (time-based: {time_to_retrain_today}).")
-                                        alert_manager.send_alert(f"[{sym}] Background retraining started.", level="INFO", category="RETRAINING")
-                                        p = Process(target=run_retraining_in_background, args=(cfg, sym, feature_cfg, dry_run, alert_manager, optuna_params_per_symbol))
+                                        if notifier: notifier.send_message(f"[{sym}] Background retraining started.", level="INFO")
+                                        p = Process(target=run_retraining_in_background, args=(cfg, sym, feature_cfg, dry_run, notifier, optuna_params_per_symbol))
                                         p.start()
                                         retraining_processes[sym] = p
                                         retraining_status[sym] = True
@@ -575,15 +458,15 @@ def run(dry_run: bool = False):
                                 else:
                                     # Synchronous retraining
                                     logger.info(f"[{sym}] Starting synchronous retraining. Trading loop will pause.")
-                                    alert_manager.send_alert(f"[{sym}] Synchronous retraining started. Bot is paused.", level="INFO", category="RETRAINING")
+                                    if notifier: notifier.send_message(f"[{sym}] Synchronous retraining started. Bot is paused.", level="INFO")
 
-                                    run_retraining_in_background(cfg, sym, feature_cfg, dry_run, alert_manager, optuna_params_per_symbol)
+                                    run_retraining_in_background(cfg, sym, feature_cfg, dry_run, notifier, optuna_params_per_symbol)
 
                                     logger.info(f"[{sym}] Synchronous retraining finished. Reloading models...")
-                                    _handle_model_acceptance(sym, cfg, ens_per_symbol_long, ens_per_symbol_short, active_model_auc, live_monitor, alert_manager, optuna_params_per_symbol)
+                                    _handle_model_acceptance(sym, cfg, ens_per_symbol_long, ens_per_symbol_short, active_model_auc, live_monitor, notifier, optuna_params_per_symbol)
 
                                     logger.info(f"[{sym}] Models reloaded. Resuming trading loop.")
-                                    alert_manager.send_alert(f"[{sym}] Synchronous retraining finished. Resuming operations.", level="INFO", category="RETRAINING")
+                                    if notifier: notifier.send_message(f"[{sym}] Synchronous retraining finished. Resuming operations.", level="INFO")
 
                             # --- Now handle trading decision for this symbol ---
                             try:
@@ -602,7 +485,8 @@ def run(dry_run: bool = False):
                                         if risk.cooldown_until is None:  # Only trigger if not already in cooldown
                                             logger.warning(f"[{sym}] Watchdog triggered: {consecutive_losses} consecutive losses >= threshold ({max_losses}). Pausing trading.")
                                             risk._trigger_cooldown(cooldown_hours=getattr(cfg.watchdog, "cooldown_hours", 1))
-                                            alert_manager.send_alert(f"[{sym}] Watchdog triggered due to {consecutive_losses} consecutive losses. Trading paused.", level="WARNING", category="WATCHDOG")
+                                            if notifier:
+                                                notifier.send_message(f"<b>RISK ALERT:</b> [{sym}] Watchdog triggered due to {consecutive_losses} consecutive losses. Trading paused.", level="WARNING")
 
                             last_features = X.iloc[[-1]] if (X is not None and not X.empty) else pd.DataFrame()
 
@@ -682,7 +566,7 @@ def run(dry_run: bool = False):
                                     price = float(mt5.symbol_info_tick(sym).ask) if direction == "long" else float(mt5.symbol_info_tick(sym).bid)
                                     sl, tp = risk.stop_targets(price, atr, direction, auc_score, sym, sl_mult=dynamic_risk_params["atr_multiplier_sl"], tp_mult=dynamic_risk_params["atr_multiplier_tp"])
 
-                                    result, tca_data = exe.trade(
+                                    result = exe.trade(
                                         symbol=sym,
                                         direction=direction,
                                         lots=lots,
@@ -700,9 +584,6 @@ def run(dry_run: bool = False):
                                         min_prob_long_idx=dynamic_risk_params.get("min_prob_long_idx") if direction == "long" else -1,
                                         min_prob_short_idx=dynamic_risk_params.get("min_prob_short_idx") if direction == "short" else -1
                                     )
-
-                                    if tca_data:
-                                        log_tca_to_csv(tca_data)
 
                                     if result.ok:
                                         logger.info(f"[{sym}] Trade executed: {result.message}")
@@ -723,56 +604,14 @@ def run(dry_run: bool = False):
                         # logger.info(f"RiskController Diagnostics: {json.dumps(ts_diagnostics, indent=2)}")
                         last_diagnostics_log_time = current_loop_time
 
-                    # --- Automated TCA Analysis ---
-                    if cfg.tca.enabled and (current_loop_time - last_tca_analysis_time) >= (cfg.tca.analysis_interval_hours * 3600):
-                        logger.info("Triggering automated TCA analysis...")
-                        tca_analyzer.run_analysis_and_notify(lookback_days=cfg.tca.lookback_days)
-                        last_tca_analysis_time = current_loop_time
-
-                    # --- Periodic State Saving ---
-                    if (current_loop_time - last_state_save_time) >= (cfg.monitoring.state_save_interval_minutes * 60):
-                        logger.info("Triggering periodic state save...")
-                        try:
-                            live_monitor.save_state()
-                            exe._save_open_positions_state()
-                            risk_controller.save_state(open_positions_cache=exe.risk.open_positions_cache)
-                            logger.info("Periodic state save complete.")
-                        except Exception as e:
-                            logger.exception(f"Failed during periodic state save: {e}")
-                            alert_manager.send_alert(f"Failed during periodic state save: {e}", level="ERROR", category="STATE_SAVE")
-                        last_state_save_time = current_loop_time
-
-                    # --- Periodic State Saving ---
-                    if (current_loop_time - last_state_save_time) >= (cfg.monitoring.state_save_interval_minutes * 60):
-                        logger.info("Triggering periodic state save...")
-                        try:
-                            live_monitor.save_state()
-                            exe._save_open_positions_state()
-                            risk_controller.save_state(open_positions_cache=exe.risk.open_positions_cache)
-                            logger.info("Periodic state save complete.")
-                        except Exception as e:
-                            logger.exception(f"Failed during periodic state save: {e}")
-                            alert_manager.send_alert(f"Failed during periodic state save: {e}", level="ERROR", category="STATE_SAVE")
-                        last_state_save_time = current_loop_time
-
-                    # --- Sleep until the next bar opens ---
-                    # We need the latest_bar_time from *any* symbol that successfully fetched a new bar.
-                    # If no new bar was detected for any symbol, we might have an issue or just be waiting.
-                    # For simplicity, we'll use the latest_bar_time of the last processed symbol, or current time if none.
-                    # A more robust solution might track the *earliest* next expected bar across all symbols.
-                    # For now, assuming all symbols are on the same timeframe and roughly synchronized.
-                    valid_bar_times = [t.to_pydatetime() for t in last_bar_time.values() if t is not None] # Convert to datetime
-                    if valid_bar_times:
-                        latest_overall_bar_time = max(valid_bar_times)
-                        sleep_until_next_bar(cfg, latest_overall_bar_time)
-                    else:
-                        # If no new bar was detected for any symbol, just sleep for the timeframe duration
-                        logger.warning("No new bar detected for any symbol. Sleeping for full timeframe duration.")
-                        time.sleep(cfg.timeframe_seconds() or 60)
-
+                    time.sleep(cfg.timeframe_seconds() or 60)
+                    #TODO: why not to make a countdown for 5 minutes and wakes up 3-5 seconds before 5 minutes to make sure it sees 
+                    # the new bar at the same exact time the new bar appears instead of sleeping every timeframe it would make huge 
+                    # delays probably detecting a new bar at exactly 5 seconds before another new bar appears
+                    
             except Exception as e:
                 logger.exception(f"MT5 connection lost or critical error in trading loop: {e}. Attempting to reconnect...")
-                alert_manager.send_alert(f"MT5 connection lost or critical error: {e}. Attempting to reconnect...", level="CRITICAL", category="MT5_CONNECTION")
+                notifier.send_message(f"<b>CRITICAL:</b> MT5 connection lost or critical error: {e}. Attempting to reconnect...", level="CRITICAL")
                 try:
                     mt5c.shutdown()  # Ensure old connection is closed
                 except Exception:
@@ -781,7 +620,7 @@ def run(dry_run: bool = False):
 
     except KeyboardInterrupt:
         logger.info("=== Stopping MT5 ML Bot ===")
-        alert_manager.send_alert("MT5 ML Bot stopped by user (KeyboardInterrupt).", level="WARNING", category="SHUTDOWN")
+        notifier.send_message("MT5 ML Bot stopped by user (KeyboardInterrupt).", level="WARNING")
         # Optional: clean up any running child processes
         for sym, p in retraining_processes.items():
             if p.is_alive():
@@ -812,7 +651,7 @@ def run(dry_run: bool = False):
         except Exception:
             logger.exception("Failed to shutdown mt5 client cleanly.")
         logger.info("MT5 shutdown complete.")
-        alert_manager.send_alert("MT5 ML Bot shutdown complete.", level="INFO", category="SHUTDOWN")
+        notifier.send_message("MT5 ML Bot shutdown complete.", level="INFO")
 
 if __name__ == "__main__":
     # Default to dry-run to be safe; change to False when you are ready.

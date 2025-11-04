@@ -331,8 +331,7 @@ class HybridBacktester:
                         entry_equity=self.equity,
                         atr_idx=atr_idx,
                         min_prob_long_idx=min_prob_long_idx,
-                        min_prob_short_idx=min_prob_short_idx, # Store discrete choices
-                        dynamic_risk_base_idx=dynamic_risk_params.get("dynamic_risk_base_idx", -1)
+                        min_prob_short_idx=min_prob_short_idx # Store discrete choices
                     )
                     self.positions.append(pos)
                     logger.info(
