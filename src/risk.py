@@ -44,6 +44,11 @@ class RiskManager:
 
     # ---------- Position sizing ----------
     def position_size(self, equity: float, atr: float, pip_value: float, pip_size: float, auc_score: float, spread_value: float, total_open_risk: float = 0.0, symbol: str | None = None, exploration_mult: float = 1.0) -> tuple[float, float]:
+        # CRITICAL SAFETY CHECK: Do not open a new position if one already exists for this symbol.
+        if any(pos.get('symbol') == symbol for pos in self.open_positions_cache.values()):
+            logger.warning(f"[{symbol}] Blocking new trade: A position is already open for this symbol.")
+            return 0.0, 0.0
+
         # Get symbol-specific or default risk per trade
         risk_per_trade_base = self.cfg.get_symbol_value(symbol, 'risk_per_trade', 0.005)
         risk_per_trade = self._get_dynamic_value(self.cfg.get_symbol_value(symbol, 'dynamic_risk'), auc_score, risk_per_trade_base)
@@ -130,8 +135,24 @@ class RiskManager:
         else:
             sl = price + _sl_mult * atr
             tp = price - _tp_mult * atr
-        logger.debug(f"Stop targets: dir={direction}, price={price:.6f}, SL={sl:.6f}, TP={tp:.6f}, sl_mult={_sl_mult:.2f}, tp_mult={_tp_mult:.2f}")
-        return float(sl), float(tp)
+
+        if self.cfg.data_source == "mt5":
+            import MetaTrader5 as mt5
+            symbol_info = mt5.symbol_info(symbol)
+            if not symbol_info:
+                logger.error(f"[{symbol}] Could not get symbol info for rounding SL/TP.")
+                return float(sl), float(tp) # Return unrounded, may fail
+
+            price_digits = symbol_info.digits
+            sl = round(sl, price_digits)
+            tp = round(tp, price_digits)
+
+            logger.debug(f"Stop targets (rounded): dir={direction}, price={price:.{price_digits}f}, SL={sl:.{price_digits}f}, TP={tp:.{price_digits}f}, sl_mult={_sl_mult:.2f}, tp_mult={_tp_mult:.2f}")
+            return float(sl), float(tp)
+        else:
+            # For CSV data source, return unrounded values
+            logger.debug(f"Stop targets (unrounded, CSV): dir={direction}, price={price:.5f}, SL={sl:.5f}, TP={tp:.5f}, sl_mult={_sl_mult:.2f}, tp_mult={_tp_mult:.2f}")
+            return float(sl), float(tp)
 
     # ---------- Watchdog / cooldown helpers ----------
     def _update_equity_peak(self, equity_value: float):
@@ -150,6 +171,8 @@ class RiskManager:
         return False
 
     def _count_consecutive_losses(self, lookback_hours: int = 48) -> int:
+        if self.cfg.data_source != "mt5":
+            return 0 # Not applicable for CSV backtesting
         import MetaTrader5 as mt5  # type: ignore
         """
         Query MT5 deal history in the last `lookback_hours` and compute the number
@@ -235,18 +258,27 @@ class RiskManager:
                     return False
 
         # 2) Drawdown check (based on cfg.block_on_drawdown)
-        try:
-            acct = mt5.account_info()
-            if acct:
-                equity = float(getattr(acct, "equity", 0.0))
-                self._update_equity_peak(equity)
-                if self._drawdown_exceeded(equity):
-                    # Trigger cooldown only if watchdog is also enabled
-                    if self.watchdog_cfg.enabled:
-                        self._trigger_cooldown()
-                    return False
-        except Exception:
-            logger.debug("should_trade: account_info() unavailable for drawdown checks")
+        if self.cfg.data_source == "mt5":
+            import MetaTrader5 as mt5  # type: ignore
+            try:
+                acct = mt5.account_info()
+                if acct:
+                    equity = float(getattr(acct, "equity", 0.0))
+                    self._update_equity_peak(equity)
+                    if self._drawdown_exceeded(equity):
+                        # Trigger cooldown only if watchdog is also enabled
+                        if self.watchdog_cfg.enabled:
+                            self._trigger_cooldown()
+                        return False
+            except Exception:
+                logger.debug("should_trade: account_info() unavailable for drawdown checks")
+        else:
+            # For CSV backtesting, rely on the passed drawdown parameter
+            if drawdown >= getattr(self.risk_cfg, "block_on_drawdown", 0.10):
+                message = f"<b>RISK ALERT:</b> Trading blocked: drawdown {drawdown:.3f} >= {self.risk_cfg.block_on_drawdown}"
+                logger.info(message)
+                if self.notifier: self.notifier.send_message(message, level="INFO")
+                return False
 
         # 3) Session filter
         sess = self.risk_cfg.session_filter
@@ -262,18 +294,20 @@ class RiskManager:
                 logger.warning("Invalid session_filter in config; allowing trades by default.")
                 return True
 
-        # 4) Block on drawdown parameter (if provided separately)
-        if drawdown >= getattr(self.risk_cfg, "block_on_drawdown", 0.10):
-            message = f"<b>RISK ALERT:</b> Trading blocked: drawdown {drawdown:.3f} >= {self.risk_cfg.block_on_drawdown}"
-            logger.info(message)
-            if self.notifier: self.notifier.send_message(message, level="INFO")
-            return False
+        # 4) Block on drawdown parameter (if provided separately) - This is now handled in the else block above for CSV
+        # if drawdown >= getattr(self.risk_cfg, "block_on_drawdown", 0.10):
+        #     message = f"<b>RISK ALERT:</b> Trading blocked: drawdown {drawdown:.3f} >= {self.risk_cfg.block_on_drawdown}"
+        #     logger.info(message)
+        #     if self.notifier: self.notifier.send_message(message, level="INFO")
+        #     return False
 
         # allowed by default
         return True
 
     # ---------- Manage open positions (unchanged mostly) ----------
     def manage_open_positions(self, symbol: str, current_atr: float):
+        if self.cfg.data_source != "mt5":
+            return # Not applicable for CSV backtesting
         """
         Manages trailing stops for open positions of a given symbol.
         Includes breakeven and ATR trailing logic, adapted for live trading.
@@ -338,6 +372,38 @@ class RiskManager:
                         new_sl = potential_new_sl
 
             if new_sl > 0 and abs(new_sl - current_sl) > 1e-9:
+                # --- Dynamic Freeze Level Check based on Spread ---
+                symbol_info = mt5.symbol_info(symbol)
+                if not symbol_info:
+                    logger.warning(f"[{symbol}] Could not get symbol info for dynamic freeze level check. Skipping SL modification.")
+                    continue
+
+                # Ensure new_sl is rounded to correct precision before checks
+                price_digits = symbol_info.digits
+                new_sl = round(new_sl, price_digits)
+
+                # Calculate current spread
+                current_spread = abs(tick.ask - tick.bid)
+                # Enforce a minimum distance of 1.5x the current spread as a safety margin
+                # This is more robust than a fixed point value.
+                MIN_SPREAD_MULTIPLIER = 1.5
+                effective_min_distance = current_spread * MIN_SPREAD_MULTIPLIER
+
+                # For a buy position, the SL is triggered by the Bid price. For a sell, by the Ask price.
+                market_price_for_sl = tick.bid if direction == "long" else tick.ask
+
+                # Calculate distance from market price to new SL
+                sl_dist_from_market = 0.0
+                if direction == "long":
+                    sl_dist_from_market = market_price_for_sl - new_sl
+                else: # short
+                    sl_dist_from_market = new_sl - market_price_for_sl
+                
+                # Check if the new SL is too close to the market price
+                if sl_dist_from_market < effective_min_distance:
+                    logger.info(f"[{symbol}] Skipping SL modification for ticket {ticket}. New SL {new_sl:.{price_digits}f} is too close to market price {market_price_for_sl:.{price_digits}f} (within dynamic min distance of {effective_min_distance:.{price_digits}f}).")
+                    continue # Skip to the next position
+
                 request = {
                     "action": mt5.TRADE_ACTION_SLTP,
                     "position": ticket,
@@ -345,7 +411,7 @@ class RiskManager:
                     "tp": pos_details.get('tp', 0.0),
                 }
                 
-                logger.info(f"[{symbol}] Moving SL to breakeven for {direction} position at {entry_price:.5f}")
+                logger.info(f"[{symbol}] Attempting to modify SL for position {ticket} to {new_sl:.{price_digits}f}")
                 result = mt5.order_send(request)
                 
                 if result and result.retcode == mt5.TRADE_RETCODE_DONE:
@@ -354,4 +420,4 @@ class RiskManager:
                 else:
                     retcode = result.retcode if result else 'N/A'
                     comment = result.comment if result else 'N/A'
-                    logger.error(f"[{symbol}] Failed to modify SL for position {ticket}. Code: {retcode}, Comment: {comment}")
+                    logger.error(f"[{symbol}] Failed to modify SL for position {ticket}. Request: {request}. Code: {retcode}, Comment: {comment}")

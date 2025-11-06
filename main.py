@@ -603,8 +603,8 @@ def run(dry_run: bool = False):
                         ts_diagnostics = risk_controller.diagnostics()
                         # logger.info(f"RiskController Diagnostics: {json.dumps(ts_diagnostics, indent=2)}")
                         last_diagnostics_log_time = current_loop_time
-
-                    time.sleep(cfg.timeframe_seconds() or 60)
+                    time.sleep(60)
+                    # time.sleep(cfg.timeframe_seconds() or 60)
                     #TODO: why not to make a countdown for 5 minutes and wakes up 3-5 seconds before 5 minutes to make sure it sees 
                     # the new bar at the same exact time the new bar appears instead of sleeping every timeframe it would make huge 
                     # delays probably detecting a new bar at exactly 5 seconds before another new bar appears
@@ -655,4 +655,4 @@ def run(dry_run: bool = False):
 
 if __name__ == "__main__":
     # Default to dry-run to be safe; change to False when you are ready.
-    run(dry_run=True)
+    run(dry_run=False)

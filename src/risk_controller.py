@@ -193,13 +193,16 @@ class SymbolRiskState:
         if "min_prob_bandit_short" in state:
             inst.min_prob_bandit_short = ThompsonBandit.from_state(state["min_prob_bandit_short"])
 
-        inst.peak_equity = state.get("peak_equity", inst.peak_equity)
-        inst.current_equity = state.get("current_equity", inst.current_equity)
-        inst.consecutive_losses = state.get("consecutive_losses", inst.consecutive_losses)
+        # CRITICAL FIX: When loading from a warm-start state, these keys will be missing.
+        # We must fall back to the initial equity from the main config, not the instance's default.
+        inst.peak_equity = state.get("peak_equity", cfg.initial_equity)
+        inst.current_equity = state.get("current_equity", cfg.initial_equity)
+        
+        inst.consecutive_losses = state.get("consecutive_losses", 0)
         inst.recent_returns = deque(state.get("recent_returns", []), maxlen=cfg.thompson_sampling.rule_rolling_window)
-        inst.last_atr = state.get("last_atr", inst.last_atr)
-        inst.atr_updates_since_last_adaptation = state.get("atr_updates_since_last_adaptation", inst.atr_updates_since_last_adaptation)
-        inst.min_prob_updates_since_last_adaptation = state.get("min_prob_updates_since_last_adaptation", inst.min_prob_updates_since_last_adaptation)
+        inst.last_atr = state.get("last_atr", 0.0)
+        inst.atr_updates_since_last_adaptation = state.get("atr_updates_since_last_adaptation", 0)
+        inst.min_prob_updates_since_last_adaptation = state.get("min_prob_updates_since_last_adaptation", 0)
         last_reset_time_str = state.get("last_reset_time")
         inst.last_reset_time = datetime.datetime.fromisoformat(last_reset_time_str) if last_reset_time_str else None
         
@@ -256,7 +259,7 @@ class RiskController:
         vol = context.get("vol", sym_state.last_atr) # Use last_atr if current vol not provided
         equity = context.get("equity", sym_state.current_equity)
         peak_equity = context.get("peak_equity", sym_state.peak_equity)
-        max_drawdown = 1.0 - (equity / peak_equity) if peak_equity > 0 else 0.0
+        max_drawdown = 1.0 - (equity / peak_equity) if peak_equity is not None and peak_equity > 0 else 0.0
         consecutive_losses = sym_state.consecutive_losses
 
         rule_scale = 1.0
@@ -322,7 +325,7 @@ class RiskController:
             vol = float(context.get("vol", sym_state.last_atr or 0.0))
             auc = float(context.get("ensemble_auc", 0.5))
             equity = float(context.get("equity", sym_state.current_equity or self.cfg.initial_equity))
-            peak = float(context.get("peak_equity", sym_state.peak_equity or self.cfg.initial_equity))
+            peak = float(context.get("peak_equity") or sym_state.peak_equity or self.cfg.initial_equity)
             drawdown = 1.0 - (equity / peak) if peak > 0 else 0.0
             # time-of-day features (hour sin/cos)
             now = datetime.datetime.utcnow()
@@ -759,7 +762,7 @@ class RiskController:
         # 1. Drawdown trigger
         equity = context.get("equity", sym_state.current_equity)
         peak_equity = context.get("peak_equity", sym_state.peak_equity)
-        if peak_equity > 0:
+        if peak_equity is not None and peak_equity > 0:
             current_drawdown = 1.0 - (equity / peak_equity)
             if current_drawdown >= ts_cfg.reset_on_drawdown_percent:
                 reset_triggered = True

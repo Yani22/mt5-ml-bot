@@ -111,74 +111,62 @@ def merge_warmstart(backtest_state_path: str | None, live_state_path: str, warms
     live = _load_json(live_state_path) if os.path.exists(live_state_path) else {}
 
     out = {}
-    # Work on symbol_states level if exists, otherwise assume structure matches
     back_sym = back.get("symbol_states", back) if isinstance(back, dict) else {}
     live_sym = live.get("symbol_states", live) if isinstance(live, dict) else {}
 
     merged_sym_states = {}
+    # First, copy all existing live states to the merged dictionary
+    for symbol, lstate in (live_sym or {}).items():
+        merged_sym_states[symbol] = lstate.copy()
+
+    # Now, iterate over the backtest states and merge their data
     for symbol, bstate in (back_sym or {}).items():
-        lstate = live_sym.get(symbol, {})
-        merged = {}
-        # Merge known bandit blocks
-        for bandit_key in ["atr_bandit", "min_prob_bandit", "contextual_bandit"]:
-            b_band = bstate.get(bandit_key, {})
-            l_band = lstate.get(bandit_key, {})
-            if not b_band and not l_band:
+        lstate = merged_sym_states.get(symbol, {})
+        merged = lstate.copy()
+
+        # Merge bandit blocks
+        for bandit_key in ["atr_bandit", "min_prob_bandit_long", "min_prob_bandit_short", "contextual_bandit"]:
+            b_band = bstate.get(bandit_key)
+            l_band = lstate.get(bandit_key)
+
+            if not b_band:
+                continue # Nothing to merge from backtest
+
+            if not l_band:
+                # If live bandit state doesn't exist, create it from backtest state
+                merged[bandit_key] = b_band
                 continue
-            merged_band = {}
-            # numeric lists to merge
+
+            merged_band = l_band.copy()
+
+            # Merge numeric lists
             for key in ["counts", "sum_rewards", "sum_squared_rewards"]:
-                merged_band[key] = _merge_numeric_lists(l_band.get(key, []), b_band.get(key, []), warmstart_weight)
-            # context matrices
-            if "A" in b_band or "A" in l_band:
+                if key in b_band:
+                    merged_band[key] = _merge_numeric_lists(l_band.get(key, []), b_band.get(key, []), warmstart_weight)
+            
+            # Merge context matrices
+            if "A" in b_band:
                 merged_band["A"] = _merge_matrix(l_band.get("A", []), b_band.get("A", []), warmstart_weight)
-            if "b" in b_band or "b" in l_band:
+            if "b" in b_band:
                 merged_band["b"] = _merge_matrix(l_band.get("b", []), b_band.get("b", []), warmstart_weight)
-            # copy over meta fields (num_arms, prior_mean, etc) - prefer live then backtest then defaults
+            
+            # Copy meta fields if they are missing in the live bandit state
             for meta in ["num_arms", "prior_mean", "prior_var", "min_var", "dim", "lambda_prior", "noise_var"]:
-                if meta in l_band:
-                    merged_band[meta] = l_band[meta]
-                elif meta in b_band:
+                if meta not in merged_band and meta in b_band:
                     merged_band[meta] = b_band[meta]
+            
             merged[bandit_key] = merged_band
 
-        # Merge grid values (atr_grid_values, min_prob_grid_long_values, min_prob_grid_short_values)
+        # Grid values: prefer live, but take backtest if live is missing
         for grid_key in ["atr_grid_values", "min_prob_grid_long_values", "min_prob_grid_short_values"]:
-            if grid_key in bstate:
+            if grid_key not in merged and grid_key in bstate:
                 merged[grid_key] = bstate[grid_key]
-            elif grid_key in lstate:
-                merged[grid_key] = lstate[grid_key]
-            # If neither has it, SymbolRiskState.from_state will fall back to cfg defaults
-
-        # Merge additional SymbolRiskState fields
-        # peak_equity: take the max of live and backtest
-        merged["peak_equity"] = max(lstate.get("peak_equity", 0.0), bstate.get("peak_equity", 0.0))
-
-        # adaptation counters: sum them up
-        merged["atr_updates_since_last_adaptation"] = lstate.get("atr_updates_since_last_adaptation", 0) + bstate.get("atr_updates_since_last_adaptation", 0)
-        merged["min_prob_updates_since_last_adaptation"] = lstate.get("min_prob_updates_since_last_adaptation", 0) + bstate.get("min_prob_updates_since_last_adaptation", 0)
-
-        # last_reset_time: prefer the earlier of the two, or the one that exists
-        l_reset_time_str = lstate.get("last_reset_time")
-        b_reset_time_str = bstate.get("last_reset_time")
-        l_reset_time = datetime.datetime.fromisoformat(l_reset_time_str) if l_reset_time_str else None
-        b_reset_time = datetime.datetime.fromisoformat(b_reset_time_str) if b_reset_time_str else None
-
-        if l_reset_time and b_reset_time:
-            merged["last_reset_time"] = min(l_reset_time, b_reset_time).isoformat()
-        elif l_reset_time:
-            merged["last_reset_time"] = l_reset_time.isoformat()
-        elif b_reset_time:
-            merged["last_reset_time"] = b_reset_time.isoformat()
-        else:
-            merged["last_reset_time"] = None # Ensure it's explicitly set to None if neither exists
+        
+        # Session-specific state is NOT copied from bstate.
+        # It is preserved by the initial lstate.copy() if it exists,
+        # or it is left absent to be initialized by RiskController on a fresh start.
 
         merged_sym_states[symbol] = merged
-
-    # If live had other symbols not in backtest, keep them
-    for symbol, lstate in (live_sym or {}).items():
-        if symbol not in merged_sym_states:
-            merged_sym_states[symbol] = lstate
 
     out["symbol_states"] = merged_sym_states
 

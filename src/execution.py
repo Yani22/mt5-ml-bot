@@ -102,80 +102,56 @@ class Execution:
 
     def reconcile_open_positions_with_mt5(self):
         """
-        Queries MT5 for all currently open positions and updates the internal
-        open_positions_cache to reflect the ground truth from the broker.
-        This is crucial for maintaining state across bot restarts.
-        It attempts to restore detailed information from a saved state.
+        Enhances the internal position cache by adding any new positions
+        that were opened on the broker (e.g., manually) while the bot was offline.
+        This function no longer handles the detection of closed trades.
         """
-        logger.info("Reconciling open positions with MT5...")
-        try:
-            # 1. Load previously saved detailed state for open positions
-            loaded_state = self._load_open_positions_state()
-            
-            if self.dry_run:
-                logger.info("[DRY-RUN] Reconciling open positions from saved state only.")
-                self.risk.open_positions_cache.clear()
-                for pos_id, details in loaded_state.items():
-                    # Ensure entry_time is a datetime object (might be string from JSON)
-                    if isinstance(details["entry_time"], str):
-                        details["entry_time"] = datetime.datetime.fromisoformat(details["entry_time"])
-                    self.risk.open_positions_cache[int(pos_id)] = details # Ensure key is int
-                    logger.info(f'[DRY-RUN] Reconciled open position from state: Ticket={pos_id}, Symbol={details.get("symbol")}, Direction={details.get("direction")}, Lots={details.get("lots")}')
-                logger.info(f"[DRY-RUN] Reconciliation complete. {len(self.risk.open_positions_cache)} open positions tracked.")
-                return
+        logger.info("Checking for new externally-opened positions on MT5...")
+        if self.dry_run:
+            logger.info("[DRY-RUN] Skipping reconciliation of new external positions.")
+            return
 
-            # --- LIVE MODE LOGIC ---
-            # 2. Get all open positions from MT5 (ground truth)
+        try:
+            # 1. Get all open positions from MT5 (ground truth)
             mt5_open_positions = mt5.positions_get() or []
             
-            # 3. Clear the existing internal cache
-            self.risk.open_positions_cache.clear()
-
-            # 4. Populate the internal cache with positions from MT5, prioritizing loaded_state details
+            # 2. Identify positions that are on the broker but NOT in our internal cache
             for pos in mt5_open_positions:
-                direction = "long" if pos.type == mt5.POSITION_TYPE_BUY else "short"
-                entry_time_dt = datetime.datetime.fromtimestamp(pos.time, tz=datetime.timezone.utc)
-
-                # Check if this position was in our previously saved state
-                if pos.ticket in loaded_state:
-                    # Restore full details from loaded state
-                    self.risk.open_positions_cache[pos.ticket] = loaded_state[pos.ticket]
-                    # Ensure entry_time is a datetime object (might be string from JSON)
-                    if isinstance(self.risk.open_positions_cache[pos.ticket]["entry_time"], str):
-                        self.risk.open_positions_cache[pos.ticket]["entry_time"] = datetime.datetime.fromisoformat(self.risk.open_positions_cache[pos.ticket]["entry_time"])
-                    logger.info(f'Reconciled open position (restored from state): Ticket={pos.ticket}, Symbol={pos.symbol}, Direction={direction}, Lots={pos.volume}')
-                else:
-                    # New position or position opened while bot was down, use placeholders
+                if pos.ticket not in self.risk.open_positions_cache:
+                    # This is a new position that the bot was not tracking.
+                    direction = "long" if pos.type == mt5.POSITION_TYPE_BUY else "short"
+                    entry_time_dt = datetime.datetime.fromtimestamp(pos.time, tz=datetime.timezone.utc)
+                    
+                    # Add it to the cache with placeholder data.
                     self.risk.open_positions_cache[pos.ticket] = {
-                        "risk": 0.0, # Cannot infer from MT5 position directly, will be updated on next trade decision
+                        "risk": 0.0,
                         "ticket": pos.ticket,
                         "symbol": pos.symbol,
                         "entry_price": pos.price_open,
                         "direction": direction,
                         "lots": pos.volume,
                         "entry_time": entry_time_dt,
-                        "atr": 0.0, # Placeholder, will be updated on next trade decision
-                        "entry_auc": 0.5, # Placeholder, will be updated on next trade decision
-                        "risk_fraction": 0.0, # Placeholder, will be updated on next trade decision
-                        "entry_equity": 0.0, # Placeholder, will be updated on next trade decision
+                        "atr": 0.0,
+                        "entry_auc": 0.5,
+                        "risk_fraction": 0.0,
+                        "entry_equity": 0.0,
                         "sl": pos.sl,
                         "tp": pos.tp,
-                        "atr_idx": -1, # Placeholder
-                        "min_prob_idx": -1, # Placeholder
-                        "adx": 0.0, # Placeholder
-                        "macd_diff": 0.0, # Placeholder
-                        "volatility_10": 0.0, # Placeholder
-                        "dist_from_ema_200": 0.0, # Placeholder
-                        "inter_market_feature": 0.0, # Placeholder
-                        "mta_feature": 0.0, # Placeholder
+                        "atr_idx": -1,
+                        "min_prob_long_idx": -1,
+                        "min_prob_short_idx": -1,
+                        "adx": 0.0,
+                        "macd_diff": 0.0,
+                        "volatility_10": 0.0,
+                        "dist_from_ema_200": 0.0,
                     }
-                    logger.info(f'Reconciled open position (new/placeholder): Ticket={pos.ticket}, Symbol={pos.symbol}, Direction={direction}, Lots={pos.volume}')
+                    logger.info(f'Discovered new external position: Ticket={pos.ticket}, Symbol={pos.symbol}, Direction={direction}, Lots={pos.volume}')
             
-            logger.info(f"Reconciliation complete. {len(self.risk.open_positions_cache)} open positions tracked.")
+            logger.info("Reconciliation of new positions complete.")
 
         except Exception as e:
-            logger.exception(f"Failed to reconcile open positions with MT5: {e}")
-            if self.notifier: self.notifier.send_message(f"<b>ERROR:</b> Failed to reconcile open positions with MT5: {e}", level="ERROR")
+            logger.exception(f"Failed to reconcile new external positions with MT5: {e}")
+            if self.notifier: self.notifier.send_message(f"<b>ERROR:</b> Failed to reconcile new external positions with MT5: {e}", level="ERROR")
 
     def _send_order_with_retry(self, request: dict, retries: int = -1, delay: float = 1.0):
         num_retries = self.risk.cfg.trading_costs.defaults.retry_order_send if retries == -1 else retries
@@ -252,6 +228,12 @@ class Execution:
                         closure_reason = "TP hit"
                 
                 if closed:
+                    # Defensive check for malformed cache data from old versions
+                    if not all([pip_size, pip_value]) or pip_size <= 0 or pip_value <= 0:
+                        logger.warning(f"[DRY-RUN] Cannot simulate closure for trade {pid} due to missing or invalid pip_size/pip_value in cache. Removing position.")
+                        self.risk.open_positions_cache.pop(pid, None)
+                        continue
+
                     # Calculate PnL for the simulated trade
                     if direction == "long":
                         gross_pnl = (exit_price - entry_price) / pip_size * pip_value * lots
@@ -410,7 +392,7 @@ class Execution:
 
         if self.dry_run:
             simulated_ticket = int(time.time() * 1000000) # Unique enough for simulation
-            logger.info(f"[DRY-RUN][{symbol}][{datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S%z')}] Opened {direction} position at {price:.5f}. Lots: {lots:.2f}, SL: {sl:.5f}, TP: {tp:.5f}, AUC: {auc_score:.4f}")
+            logger.info(f"[DRY-RUN][{symbol}][{datetime.datetime.fromtimestamp(time.time(), tz=datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S%z')}] Opened {direction} position at {price:.5f}. Lots: {lots:.2f}, SL: {sl:.5f}, TP: {tp:.5f}, AUC: {auc_score:.4f}")
             if self.notifier: self.notifier.send_message(f"[DRY-RUN] Prepared {direction} for {symbol}: lots={lots}, SL={sl}, TP={tp}", level="INFO")
 
             # Store comprehensive details for later SimPosition reconstruction in dry-run
@@ -421,7 +403,7 @@ class Execution:
                 "entry_price": price,
                 "direction": direction,
                 "lots": float(lots),
-                "entry_time": datetime.datetime.now(datetime.timezone.utc),
+                "entry_time": datetime.datetime.fromtimestamp(time.time(), tz=datetime.timezone.utc),
                 "atr": atr,
                 "entry_auc": auc_score,
                 "risk_fraction": self.risk._get_dynamic_value(self.risk.risk_cfg.dynamic_risk, auc_score, getattr(self.risk.risk_cfg, "risk_per_trade", 0.005)),
@@ -479,13 +461,15 @@ class Execution:
                 "entry_price": price,
                 "direction": direction,
                 "lots": float(lots),
-                "entry_time": datetime.datetime.now(datetime.timezone.utc), # Use current UTC time
+                "entry_time": datetime.datetime.fromtimestamp(time.time(), tz=datetime.timezone.utc), # Use current UTC time
                 "atr": atr, # ATR at the time of entry
                 "entry_auc": auc_score, # AUC at the time of entry
                 "risk_fraction": risk_per_trade, # Store the risk_per_trade as risk_fraction
                 "entry_equity": equity, # Store equity at the time of entry
                 "sl": sl, # SL at entry
                 "tp": tp, # TP at entry
+                "pip_size": pip_size, # <-- ADD THIS
+                "pip_value": pip_value, # <-- ADD THIS
                 "atr_idx": atr_idx,
                 "min_prob_long_idx": min_prob_long_idx,
                 "min_prob_short_idx": min_prob_short_idx,

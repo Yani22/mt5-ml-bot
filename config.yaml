@@ -10,7 +10,7 @@ optuna_n_trials: 1  # 150
 
 # --- Backtesting Settings ---
 backtesting:
-  initial_equity: 9.26
+  initial_equity: 8.75
   simulation_volume_min: 0.1 # NEW: Force backtester to use this minimum lot size
 
 optuna_pruning_interval: 100 # New: Interval for Optuna pruning checks
@@ -39,7 +39,7 @@ ensemble_training:
 
 # --- Symbols & timeframe ---
 # historical_data symbols for .csv needed: M5-EURUSD#, H1-EURUSD#, and M5-USDX-DEC25
-symbols: ["GBPUSDm#"] #, "GBPUSDm#"
+symbols: ["GBPUSDm#", "EURUSDm#"] #, "GBPUSDm#"
 # symbols: ["EURUSDm#", "GOLDm#", "GBPUSDm#", "USDJPYm#", "AUDUSDm#"] 
 timeframe: "M5"            # One of: M1, M5, M15, M30, H1, H4
 history_bars: 45000          #6048 18000 36000 45000 #12000-for-tuner.py #5000-for-backtesting

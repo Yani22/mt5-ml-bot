@@ -8,11 +8,13 @@ Saves ensembles via utils.save_ensemble() and optionally writes training artifac
 from __future__ import annotations
 import os
 from loguru import logger  # type: ignore
+import numpy as np
+from typing import List
 from typing import List # Added List
 
 from src.config import Cfg
 from src.features import FeatureCfg
-from src.utils import load_ensemble, save_ensemble, safe_retrain_ensemble, load_optuna_params
+from src.utils import load_ensemble, save_ensemble, safe_retrain_ensemble, load_optuna_params, get_training_data
 from src.data_manager import DataManager
 from src.ensemble import Ensemble
 from src.labels import generate_long_short_labels
@@ -44,11 +46,15 @@ def train_and_save_model(cfg: Cfg, symbol: str, model_type: str, X: pd.DataFrame
         old_auc = getattr(ens_old, "ensemble_cv_auc_", getattr(ens_old, "cv_auc_", None))
         return {"ok": True, "old_auc": old_auc, "new_auc": new_auc}
 
-def retrain_symbol(cfg: Cfg, symbol: str, dry_run: bool = True) -> dict:
+def retrain_symbol(cfg: Cfg, symbol: str, dry_run: bool = True, mt5_instance=None) -> dict:
     """
-    Retrain ensemble for one symbol safely and update the config.yaml with symbol-specific overrides.
+    Retrain ensemble for one symbol safely.
     """
     logger.info(f"[{symbol}] Starting safe retrain (dry_run={dry_run})")
+
+    if mt5_instance is None:
+        logger.error(f"[{symbol}] MT5 connection instance not provided to retrain_symbol. Cannot proceed.")
+        return {"ok": False, "reason": "MT5 connection not provided"}
 
     optuna_params = load_optuna_params(symbol, cfg)
     feature_params = optuna_params.get('features', {}) if optuna_params else {}
@@ -56,36 +62,58 @@ def retrain_symbol(cfg: Cfg, symbol: str, dry_run: bool = True) -> dict:
 
     logger.info(f"[{symbol}] Loading full history via DataManager...")
     dm = DataManager(cfg)
-    data, X, _ = dm.load_cached(symbol, feature_cfg, min_pct_change=feature_cfg.min_pct_change)
+    
+    # Use get_training_data with build_dynamic=False to get untrimmed data and features
+    X, _, data = get_training_data(
+        cfg=cfg,
+        symbol=symbol,
+        feature_cfg=feature_cfg,
+        count=cfg.retraining_window_bars,
+        min_pct_change=feature_cfg.min_pct_change,
+        build_dynamic=False # We need raw data (df) and features (X), will generate labels (y) later
+    )
 
     if X is None or X.empty or len(X) < MIN_SAMPLES_TO_RETRAIN:
         msg = f"[{symbol}] Not enough data to retrain: {0 if X is None else len(X)} samples"
         logger.warning(msg)
         return {"ok": False, "reason": msg}
 
+    # Generate labels from the full, untrimmed data
     y_long, y_short = generate_long_short_labels(data, cfg.prediction_horizon, feature_cfg.min_pct_change)
 
+    # CRITICAL: Align X and y to their common index to prevent training on mismatched data
+    common_idx = X.index.intersection(y_long.index)
+    X = X.loc[common_idx]
+    y_long = y_long.loc[common_idx]
+    y_short = y_short.loc[common_idx]
+    close_prices = data["close"].loc[common_idx]
+
+    logger.info(f"[{symbol}] Aligned training data to {len(X)} bars.")
+
     results = {}
-    results["long"] = train_and_save_model(cfg, symbol, "long", X, y_long, data["close"], dry_run=dry_run)
-    results["short"] = train_and_save_model(cfg, symbol, "short", X, y_short, data["close"], dry_run=dry_run)
+    results["long"] = train_and_save_model(cfg, symbol, "long", X, y_long, close_prices, dry_run=dry_run)
+    results["short"] = train_and_save_model(cfg, symbol, "short", X, y_short, close_prices, dry_run=dry_run)
 
     return results
 
-def retrain_all(cfg: Cfg, symbols: list[str], dry_run: bool = True) -> dict:
+def retrain_all(cfg: Cfg, symbols: list[str], dry_run: bool = True, mt5_instance=None) -> dict:
     results = {}
     for s in symbols:
         try:
-            results[s] = retrain_symbol(cfg, s, dry_run=dry_run)
+            results[s] = retrain_symbol(cfg, s, dry_run=dry_run, mt5_instance=mt5_instance)
         except Exception as e:
             logger.exception(f"[{s}] retrain_all error: {e}")
             results[s] = {"ok": False, "reason": str(e)}
     return results
 
 
+
+
+
 def _ensure_min_grid_size(thresholds: List[float], best_thr: float, min_size: int = 5, spread: float = 0.02) -> List[float]:
     """Ensures a list of thresholds has at least min_size elements, expanding around best_thr if needed."""
     if len(thresholds) >= min_size:
-        return sorted(list(set(thresholds))) # Ensure unique and sorted
+        return sorted(list(set(thresholds)))  # Ensure unique and sorted
 
     # If not enough, generate a new grid around best_thr
     new_thresholds = [best_thr]
@@ -93,10 +121,10 @@ def _ensure_min_grid_size(thresholds: List[float], best_thr: float, min_size: in
     for i in range(1, half_size + 1):
         new_thresholds.append(best_thr + i * spread)
         new_thresholds.append(best_thr - i * spread)
-    
+
     # Combine with existing and ensure unique, sorted, and within reasonable bounds
     combined = sorted(list(set(thresholds + new_thresholds)))
-    
+
     # Filter to reasonable range (e.g., 0.0 to 1.0 for probabilities)
     combined = [round(x, 2) for x in combined if 0.0 <= x <= 1.0]
 
@@ -151,7 +179,7 @@ if __name__ == "__main__":
             print("No symbols found in config.yaml. Exiting.")
             quit()
         print("Running retrain_all with dry_run=False (model files will be overwritten).")
-        res = retrain_all(cfg, symbols, dry_run=False)
+        res = retrain_all(cfg, symbols, dry_run=False, mt5_instance=mt5)
         print(res)
     finally:
         # Shutdown MT5 connection

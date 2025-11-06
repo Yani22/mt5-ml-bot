@@ -55,11 +55,11 @@ class DataManager:
             df = df.tail(count)
         return df
 
-    def append_new_bars(self, symbol: str, new_bars: pd.DataFrame):
+    def append_new_bars(self, symbol: str, new_bars: pd.DataFrame, timeframe: Optional[str] = None):
         if not isinstance(new_bars, pd.DataFrame) or new_bars.empty:
             logger.debug(f"[{symbol}] No new bars to append.")
             return
-        path = self._local_csv_path(symbol, self.cfg.timeframe)
+        path = self._local_csv_path(symbol, timeframe if timeframe else self.cfg.timeframe)
         nb = new_bars.copy()
         try:
             nb.index = pd.to_datetime(nb.index)
@@ -99,13 +99,13 @@ class DataManager:
         if count is None:
             count = 36000
         try:
-            logger.info(f"[{symbol}] Fetching {count} bars from MT5 for timeframe {timeframe}...") # New log
+            logger.debug(f"[{symbol}] Fetching {count} bars from MT5 for timeframe {timeframe}...") # New log
             rates = mt5.copy_rates_from_pos(symbol, tf, 0, int(count))
             if rates is None or len(rates) == 0:
                 logger.warning(f"[{symbol}] MT5 returned no bars.")
                 return pd.DataFrame()
             
-            logger.info(f"[{symbol}] Fetched {len(rates)} bars from MT5.") # New log
+            logger.debug(f"[{symbol}] Fetched {len(rates)} bars from MT5.") # New log
 
             df = pd.DataFrame(rates)
             if "time" not in df.columns:
@@ -146,6 +146,12 @@ class DataManager:
             data = pd.concat([data, recent_data])
             data = data[~data.index.duplicated(keep='last')].sort_index()
 
+            # Save the newly fetched recent data to local history if enabled
+            if self.cfg.fetch.save_raw_data_locally:
+                # Append only the new recent_data to avoid re-writing entire history
+                # The append_new_bars method handles merging with existing data
+                self.append_new_bars(symbol, recent_data)
+
         if data.empty:
             return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
@@ -158,6 +164,9 @@ class DataManager:
             if mta_df.empty:
                 logger.warning(f"[{symbol}] No live MTA data loaded for timeframe {self.cfg.context_features.mta.timeframe}. Disabling MTA for this tick.")
                 mta_df = None
+            elif self.cfg.fetch.save_raw_data_locally:
+                # Save the newly fetched MTA data to local history
+                self.append_new_bars(symbol, mta_df, timeframe=self.cfg.context_features.mta.timeframe)
 
         inter_market_df = None
         if self.cfg.context_features.inter_market.enabled:
