@@ -92,6 +92,50 @@ def _merge_matrix(live: list, back: list, weight: float) -> list:
     return merged
 
 
+def _merge_bandit_states(lstate: Dict[str, Any], bstate: Dict[str, Any], warmstart_weight: float) -> Dict[str, Any]:
+    """Merges the bandit states from a backtest into a live state."""
+    merged = lstate.copy()
+
+    # Merge bandit blocks
+    for bandit_key in ["atr_bandit", "min_prob_bandit_long", "min_prob_bandit_short", "contextual_bandit"]:
+        b_band = bstate.get(bandit_key)
+        l_band = lstate.get(bandit_key)
+
+        if not b_band:
+            continue # Nothing to merge from backtest
+
+        if not l_band:
+            # If live bandit state doesn't exist, create it from backtest state
+            merged[bandit_key] = b_band
+            continue
+
+        merged_band = l_band.copy()
+
+        # Merge numeric lists
+        for key in ["counts", "sum_rewards", "sum_squared_rewards"]:
+            if key in b_band:
+                merged_band[key] = _merge_numeric_lists(l_band.get(key, []), b_band.get(key, []), warmstart_weight)
+        
+        # Merge context matrices
+        if "A" in b_band:
+            merged_band["A"] = _merge_matrix(l_band.get("A", []), b_band.get("A", []), warmstart_weight)
+        if "b" in b_band:
+            merged_band["b"] = _merge_matrix(l_band.get("b", []), b_band.get("b", []), warmstart_weight)
+        
+        # Copy meta fields if they are missing in the live bandit state
+        for meta in ["num_arms", "prior_mean", "prior_var", "min_var", "dim", "lambda_prior", "noise_var"]:
+            if meta not in merged_band and meta in b_band:
+                merged_band[meta] = b_band[meta]
+        
+        merged[bandit_key] = merged_band
+
+    # Grid values: prefer live, but take backtest if live is missing
+    for grid_key in ["atr_grid_values", "min_prob_grid_long_values", "min_prob_grid_short_values"]:
+        if grid_key not in merged and grid_key in bstate:
+            merged[grid_key] = bstate[grid_key]
+    
+    return merged
+
 def merge_warmstart(backtest_state_path: str | None, live_state_path: str, warmstart_weight: float = 1.0) -> None:
     """
     Merge a backtest bandit JSON into the live state file.
@@ -122,51 +166,7 @@ def merge_warmstart(backtest_state_path: str | None, live_state_path: str, warms
     # Now, iterate over the backtest states and merge their data
     for symbol, bstate in (back_sym or {}).items():
         lstate = merged_sym_states.get(symbol, {})
-        merged = lstate.copy()
-
-        # Merge bandit blocks
-        for bandit_key in ["atr_bandit", "min_prob_bandit_long", "min_prob_bandit_short", "contextual_bandit"]:
-            b_band = bstate.get(bandit_key)
-            l_band = lstate.get(bandit_key)
-
-            if not b_band:
-                continue # Nothing to merge from backtest
-
-            if not l_band:
-                # If live bandit state doesn't exist, create it from backtest state
-                merged[bandit_key] = b_band
-                continue
-
-            merged_band = l_band.copy()
-
-            # Merge numeric lists
-            for key in ["counts", "sum_rewards", "sum_squared_rewards"]:
-                if key in b_band:
-                    merged_band[key] = _merge_numeric_lists(l_band.get(key, []), b_band.get(key, []), warmstart_weight)
-            
-            # Merge context matrices
-            if "A" in b_band:
-                merged_band["A"] = _merge_matrix(l_band.get("A", []), b_band.get("A", []), warmstart_weight)
-            if "b" in b_band:
-                merged_band["b"] = _merge_matrix(l_band.get("b", []), b_band.get("b", []), warmstart_weight)
-            
-            # Copy meta fields if they are missing in the live bandit state
-            for meta in ["num_arms", "prior_mean", "prior_var", "min_var", "dim", "lambda_prior", "noise_var"]:
-                if meta not in merged_band and meta in b_band:
-                    merged_band[meta] = b_band[meta]
-            
-            merged[bandit_key] = merged_band
-
-        # Grid values: prefer live, but take backtest if live is missing
-        for grid_key in ["atr_grid_values", "min_prob_grid_long_values", "min_prob_grid_short_values"]:
-            if grid_key not in merged and grid_key in bstate:
-                merged[grid_key] = bstate[grid_key]
-        
-        # Session-specific state is NOT copied from bstate.
-        # It is preserved by the initial lstate.copy() if it exists,
-        # or it is left absent to be initialized by RiskController on a fresh start.
-
-        merged_sym_states[symbol] = merged
+        merged_sym_states[symbol] = _merge_bandit_states(lstate, bstate, warmstart_weight)
 
     out["symbol_states"] = merged_sym_states
 

@@ -29,6 +29,27 @@ class RiskManager:
         self.notifier = notifier # NEW
         self.mt5_client = mt5_client
 
+    def get_contract_size(self, symbol: str) -> float:
+        symbol_info = self.mt5_client.symbol_info(symbol)
+        if not symbol_info:
+            logger.warning(f"[{symbol}] Could not get symbol info. Returning default contract size.")
+            return 100000.0
+        return symbol_info.trade_contract_size
+
+    def get_pip_size(self, symbol: str) -> float:
+        symbol_info = self.mt5_client.symbol_info(symbol)
+        if not symbol_info:
+            logger.warning(f"[{symbol}] Could not get symbol info. Returning default pip size.")
+            return 0.0001
+        return symbol_info.point
+
+    def get_pip_value(self, symbol: str) -> float:
+        symbol_info = self.mt5_client.symbol_info(symbol)
+        if not symbol_info:
+            logger.warning(f"[{symbol}] Could not get symbol info. Returning default pip value.")
+            return 1.0
+        return symbol_info.point * symbol_info.trade_contract_size
+
     # ---------- Dynamic value helpers ----------
     def _get_dynamic_value(self, dynamic_cfg: dict | None, auc_score: float, default_val: float) -> float:
         if not dynamic_cfg or not dynamic_cfg.get("enabled"):
@@ -44,11 +65,21 @@ class RiskManager:
         return float(val)
 
     # ---------- Position sizing ----------
-    def position_size(self, equity: float, atr: float, pip_value: float, pip_size: float, auc_score: float, spread_value: float, total_open_risk: float = 0.0, symbol: str | None = None, exploration_mult: float = 1.0) -> tuple[float, float]:
+    def position_size(self, equity: float, atr: float, auc_score: float, spread_value: float, total_open_risk: float = 0.0, symbol: str | None = None, exploration_mult: float = 1.0) -> tuple[float, float]:
         # CRITICAL SAFETY CHECK: Do not open a new position if one already exists for this symbol.
         if any(pos.get('symbol') == symbol for pos in self.open_positions_cache.values()):
             logger.warning(f"[{symbol}] Blocking new trade: A position is already open for this symbol.")
             return 0.0, 0.0
+
+        # Fetch symbol info dynamically
+        symbol_info = self.mt5_client.symbol_info(symbol)
+        if not symbol_info:
+            logger.warning(f"[{symbol}] Could not get symbol info. Cannot calculate position size.")
+            return 0.0, 0.0
+
+        pip_size = symbol_info.point
+        contract_size = symbol_info.trade_contract_size
+        pip_value = pip_size * contract_size
 
         # Get symbol-specific or default risk per trade
         risk_per_trade_base = self.cfg.get_symbol_value(symbol, 'risk_per_trade', 0.005)
@@ -84,38 +115,30 @@ class RiskManager:
         units = risk_amt / risk_per_lot
 
         # --- Context-aware volume limit enforcement ---
-        if self.cfg.data_source == "mt5":
-            symbol_info = self.mt5_client.symbol_info(symbol)
-            if not symbol_info:
-                logger.warning(f"[{symbol}] Could not get symbol info for live run. Cannot verify volume limits.")
-                return 0.0, 0.0
+        volume_min = symbol_info.volume_min
+        volume_step = symbol_info.volume_step
+        volume_max = symbol_info.volume_max
 
-            volume_min = symbol_info.volume_min
-            volume_step = symbol_info.volume_step
-            volume_max = symbol_info.volume_max
+        if units < volume_min:
+            logger.info(f"Live run: Calculated lot size {units:.4f} is below broker's minimum of {volume_min}. Skipping trade.")
+            return 0.0, 0.0
 
-            if units < volume_min:
-                logger.info(f"Live run: Calculated lot size {units:.4f} is below broker's minimum of {volume_min}. Skipping trade.")
-                return 0.0, 0.0
-
-            # Adjust lots to the nearest valid step and clip to bounds
-            lots = round(units / volume_step) * volume_step
-            lots = float(np.clip(lots, volume_min, volume_max))
-
-        else:  # For backtesting or other data sources
-            # Get the simulated minimum volume from the config, default to 0.01 if not present
-            sim_min_vol = getattr(self.cfg.backtesting, "simulation_volume_min", 0.01)
-
-            if units < sim_min_vol:
-                logger.info(f"Backtest: Calculated lot size {units:.4f} is below simulation minimum of {sim_min_vol}. Skipping trade.")
-                return 0.0, 0.0
-            lots = float(np.clip(units, sim_min_vol, 100.0))
+        # Adjust lots to the nearest valid step and clip to bounds
+        lots = round(units / volume_step) * volume_step
+        lots = float(np.clip(lots, volume_min, volume_max))
 
         logger.info(f"Position sizing: equity={equity:.2f}, ATR={atr:.6f}, lots={lots:.4f}, effective_risk={effective_risk:.6f}")
         return round(lots, 2), effective_risk
 
     # ---------- SL / TP ----------
     def stop_targets(self, price: float, atr: float, direction: str, auc_score: float, symbol: str, sl_mult: float | None = None, tp_mult: float | float | None = None):
+        symbol_info = self.mt5_client.symbol_info(symbol)
+        if not symbol_info:
+            logger.error(f"[{symbol}] Could not get symbol info for stop_targets.")
+            return float(0.0), float(0.0)
+
+        pip_size = symbol_info.point
+
         _sl_mult = sl_mult if sl_mult is not None else self.cfg.get_symbol_value(symbol, 'atr_multiplier_sl', 1.5)
         
         min_rr = self.cfg.get_symbol_value(symbol, "min_risk_reward_ratio", 1.2)
@@ -136,22 +159,12 @@ class RiskManager:
             sl = price + _sl_mult * atr
             tp = price - _tp_mult * atr
 
-        if self.cfg.data_source == "mt5":
-            symbol_info = self.mt5_client.symbol_info(symbol)
-            if not symbol_info:
-                logger.error(f"[{symbol}] Could not get symbol info for rounding SL/TP.")
-                return float(sl), float(tp) # Return unrounded, may fail
+        price_digits = symbol_info.digits
+        sl = round(sl, price_digits)
+        tp = round(tp, price_digits)
 
-            price_digits = symbol_info.digits
-            sl = round(sl, price_digits)
-            tp = round(tp, price_digits)
-
-            logger.debug(f"Stop targets (rounded): dir={direction}, price={price:.{price_digits}f}, SL={sl:.{price_digits}f}, TP={tp:.{price_digits}f}, sl_mult={_sl_mult:.2f}, tp_mult={_tp_mult:.2f}")
-            return float(sl), float(tp)
-        else:
-            # For CSV data source, return unrounded values
-            logger.debug(f"Stop targets (unrounded, CSV): dir={direction}, price={price:.5f}, SL={sl:.5f}, TP={tp:.5f}, sl_mult={_sl_mult:.2f}, tp_mult={_tp_mult:.2f}")
-            return float(sl), float(tp)
+        logger.debug(f"Stop targets (rounded): dir={direction}, price={price:.{price_digits}f}, SL={sl:.{price_digits}f}, TP={tp:.{price_digits}f}, sl_mult={_sl_mult:.2f}, tp_mult={_tp_mult:.2f}")
+        return float(sl), float(tp)
 
     # ---------- Watchdog / cooldown helpers ----------
     def _update_equity_peak(self, equity_value: float):

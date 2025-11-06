@@ -50,31 +50,6 @@ class HybridBacktester:
         self.ts_history_csv = f"results/ts_param_evolution_backtest_{symbol_str}_{ts_ts}.csv"
         os.makedirs("results", exist_ok=True)
 
-        # --- NEW: Per-symbol configuration ---
-        DEFAULT_PIP_SIZE = 0.0001
-        DEFAULT_CONTRACT_SIZE = 100000.0
-
-        self.contract_sizes = {}
-        self.pip_sizes = {}
-        self.pip_values = {}
-        self.costs_in_currency_per_lot = {}
-
-        for sym in cfg.symbols:
-            symbol_cfg = cfg.symbol_overrides.get(sym, {})
-            
-            contract_size = float(symbol_cfg.get('contract_size', DEFAULT_CONTRACT_SIZE))
-            pip_size = float(symbol_cfg.get('pip_size', DEFAULT_PIP_SIZE))
-            
-            self.contract_sizes[sym] = contract_size
-            self.pip_sizes[sym] = pip_size
-            self.pip_values[sym] = pip_size * contract_size
-
-            cost_pips = getattr(cfg.risk, 'transaction_cost_pips', 0.0)
-            self.costs_in_currency_per_lot[sym] = cost_pips * self.pip_values[sym]
-
-            if contract_size == DEFAULT_CONTRACT_SIZE and not ("USD" in sym or "EUR" in sym):
-                logger.warning(f"[{sym}] Using default CONTRACT_SIZE={DEFAULT_CONTRACT_SIZE}. For non-forex assets, specify 'contract_size' and 'pip_size' under 'symbol_overrides' in config.yaml for accurate backtesting.")
-        
         logger.info(f"Initializing backtester with starting equity: {self.equity}")
         self.ens_per_symbol_long = {sym: load_ensemble(cfg, sym, "long") for sym in cfg.symbols}
         self.ens_per_symbol_short = {sym: load_ensemble(cfg, sym, "short") for sym in cfg.symbols}
@@ -118,8 +93,11 @@ class HybridBacktester:
     def _update_positions(self, sym, row):
         """Check open positions for SL/TP, calculate PnL, and update equity using sequential reconstruction."""
         closed_trades_this_cycle = []
-        contract_size = self.contract_sizes[sym]
-        cost_per_lot = self.costs_in_currency_per_lot[sym]
+
+        contract_size = self.risk_manager.get_contract_size(sym)
+        pip_value = self.risk_manager.get_pip_value(sym)
+        cost_pips_per_lot = getattr(self.cfg.risk, 'transaction_cost_pips', 0.0)
+        cost_per_lot = cost_pips_per_lot * pip_value
 
         # This loop identifies trades that close on the current bar
         for pos in [p for p in self.positions if p.symbol==sym and p.status=="open"]:
@@ -142,40 +120,19 @@ class HybridBacktester:
                 transaction_cost = cost_per_lot * pos.lots
                 net_pnl = gross_pnl - transaction_cost
                 
-                # Close the position object but pass a dummy exit_equity for now.
-                pos.close(price, row.name, net_pnl, 0)
-                closed_trades_this_cycle.append(pos)
+                # Update equity
+                self.equity += net_pnl
 
-        if not closed_trades_this_cycle:
-            return
+                # Close the position object
+                pos.close(price, row.name, net_pnl, self.equity)
 
-        # --- Start of sequential equity reconstruction logic ---
-        closed_trades_this_cycle.sort(key=lambda t: t.exit_time)
-        
-        total_profit_this_cycle = sum(t.pnl for t in closed_trades_this_cycle)
-        equity_before_cycle = self.equity
-        
-        running_equity = equity_before_cycle
-        for trade in closed_trades_this_cycle:
-            # Calculate the accurate equity at the moment this specific trade closed
-            exit_equity_for_this_trade = running_equity + trade.pnl
-            trade.exit_equity = exit_equity_for_this_trade
+                # Update the bandit for this trade
+                self.risk_controller.update_after_trade(sym, pos)
 
-            # Update the bandit for this trade
-            self.risk_controller.update_after_trade(sym, trade)
-
-            # Update the running_equity for the next trade in the sequence
-            running_equity = exit_equity_for_this_trade
-
-        # Now, update the backtester's main equity state
-        self.equity += total_profit_this_cycle
-
-        # Log the closures after all processing is done
-        for trade in closed_trades_this_cycle:
-            logger.info(
-                f"[{sym}] Closed {trade.direction} position at {trade.exit_price:.5f}. "
-                f"Entry: {trade.entry_price:.5f}, PnL: {trade.pnl:.2f}, Final Equity: {self.equity:.2f}"
-            )
+                logger.info(
+                    f"[{sym}] Closed {trade.direction} position at {trade.exit_price:.5f}. "
+                    f"Entry: {trade.entry_price:.5f}, PnL: {trade.pnl:.2f}, Final Equity: {self.equity:.2f}"
+                )
     
     def _perform_retraining(self, sym: str, bar_time: pd.Timestamp, i: int, data: pd.DataFrame, X: pd.DataFrame):
         """
@@ -190,23 +147,40 @@ class HybridBacktester:
             MIN_BARS_FOR_RETRAIN = 100
             if window_size < MIN_BARS_FOR_RETRAIN:
                 logger.warning(f"[{sym}] Skipping retraining at {bar_time}: not enough data in window ({window_size} < {MIN_BARS_FOR_RETRAIN} bars).")
-                return self.ens_per_symbol[sym]
+                return self.ens_per_symbol_long[sym], self.ens_per_symbol_short[sym]
 
             train_data = data.iloc[i - window_size + 1: i + 1]
             logger.info(
                 f"[{sym}] Ensemble retraining at {bar_time} using last {len(train_data)} bars..."
             )
 
-            ens_old = self.ens_per_symbol[sym]
+            ens_old_long = self.ens_per_symbol_long[sym]
+            ens_old_short = self.ens_per_symbol_short[sym]
             
             # Use the shared safe_retrain_ensemble function
             # IMPORTANT: A dry_run=True flag should be added here to prevent overwriting prod models.
-            ens_new = safe_retrain_ensemble(self.cfg, sym, ens_old, train_data[X.columns], train_data["y"], train_data["close"] if "close" in train_data.columns else None, dry_run=True)
+            ens_new_long = safe_retrain_ensemble(self.cfg, sym, ens_old_long, train_data[X.columns], train_data["y_long"], train_data["close"] if "close" in train_data.columns else None, dry_run=True, model_type="long")
+            ens_new_short = safe_retrain_ensemble(self.cfg, sym, ens_old_short, train_data[X.columns], train_data["y_short"], train_data["close"] if "close" in train_data.columns else None, dry_run=True, model_type="short")
             
             # Update the ensemble in the backtester's state
-            self.ens_per_symbol[sym] = ens_new
+            self.ens_per_symbol_long[sym] = ens_new_long
+            self.ens_per_symbol_short[sym] = ens_new_short
             
-        return self.ens_per_symbol[sym]
+        return self.ens_per_symbol_long[sym], self.ens_per_symbol_short[sym]
+
+    def _check_and_prune(self, trial: optuna.Trial, i: int):
+        """Checks if the trial should be pruned."""
+        current_returns = pd.Series([eq for _, eq in self.equity_curve]).pct_change().dropna()
+        if not current_returns.empty:
+            intermediate_sharpe = 0.0
+            if current_returns.std() != 0:
+                timeframe_minutes = self.cfg.timeframe_minutes()
+                if timeframe_minutes is not None:
+                    annualization_factor = np.sqrt(252 * (24 * 60 / timeframe_minutes))
+                    intermediate_sharpe = current_returns.mean() / current_returns.std() * annualization_factor
+            trial.report(intermediate_sharpe, i)
+            if trial.should_prune():
+                raise optuna.TrialPruned()
 
     def _process_bar(self, sym: str, data: pd.DataFrame, X: pd.DataFrame, y: pd.DataFrame, trial: optuna.Trial | None = None, pruning_interval: int = 0):
         """Processes each bar of data for a given symbol."""
@@ -266,7 +240,7 @@ class HybridBacktester:
                 continue
 
             # Retrain if needed
-            # ens = self._perform_retraining(sym, bar_time, i, data, X)
+            ens_long, ens_short = self._perform_retraining(sym, bar_time, i, data, X)
 
             # Decide on new trades
             prob_long = ens_long.predict_proba(last_features).iloc[0]
@@ -313,14 +287,14 @@ class HybridBacktester:
                 total_open_risk = sum(p.entry_equity * p.risk_fraction for p in self.positions if p.status == "open")
 
                 # Determine pip_value for position sizing
-                pip_value = self.pip_values[sym]
-                pip_size = self.pip_sizes[sym]
+                pip_value = self.risk_manager.get_pip_value(sym)
+                pip_size = self.risk_manager.get_pip_size(sym)
 
                 spread_pips = getattr(self.cfg.trading_costs.defaults, 'spread_pips', 2.0)
                 spread_value = spread_pips * pip_size
 
                 lots, effective_risk = risk_mgr.position_size(
-                    self.equity, atr, pip_value, pip_size, auc_score, spread_value, total_open_risk, symbol=sym, exploration_mult=dynamic_risk_params.get("exploration_risk_mult", 1.0)
+                    self.equity, atr, auc_score, spread_value, total_open_risk, symbol=sym, exploration_mult=dynamic_risk_params.get("exploration_risk_mult", 1.0)
                 )
 
                 if lots > 0:
@@ -354,17 +328,7 @@ class HybridBacktester:
 
             # --- Pruning Check (if in tuning mode) ---
             if trial and pruning_interval > 0 and (i % pruning_interval == 0) and self.cfg.symbols.index(sym) == 0:
-                current_returns = pd.Series([eq for _, eq in self.equity_curve]).pct_change().dropna()
-                if not current_returns.empty:
-                    intermediate_sharpe = 0.0
-                    if current_returns.std() != 0:
-                        timeframe_minutes = self.cfg.timeframe_minutes()
-                        if timeframe_minutes is not None:
-                            annualization_factor = np.sqrt(252 * (24 * 60 / timeframe_minutes))
-                            intermediate_sharpe = current_returns.mean() / current_returns.std() * annualization_factor
-                        trial.report(intermediate_sharpe, i)
-                        if trial.should_prune():
-                            raise optuna.TrialPruned()
+                self._check_and_prune(trial, i)
 
     def _generate_results(self):
         """Generates and saves the backtesting results."""
@@ -478,8 +442,10 @@ class HybridBacktester:
 
                 # --- Close any positions left open for the current symbol ---
                 logger.info(f"Closing any remaining open positions for {sym}...")
-                contract_size = self.contract_sizes[sym]
-                cost_per_lot = self.costs_in_currency_per_lot[sym]
+                contract_size = self.risk_manager.get_contract_size(sym)
+                pip_value = self.risk_manager.get_pip_value(sym)
+                cost_pips_per_lot = getattr(self.cfg.risk, 'transaction_cost_pips', 0.0)
+                cost_per_lot = cost_pips_per_lot * pip_value
                 for pos in [p for p in self.positions if p.symbol == sym and p.status == "open"]:
                     last_row = data.iloc[-1]
                     last_price = last_row["close"]
@@ -502,27 +468,25 @@ if __name__ == "__main__":
     import numpy as np  # type: ignore
     import random
     import sys
+    from src.mt5_client import MT5Client
+
     np.random.seed(42)
     random.seed(42)
     cfg = Cfg.from_yaml("config.yaml")
     setup_logging(level=cfg.logging["level"], to_file=cfg.logging["to_file"], rotate=cfg.logging["rotate"], retention=cfg.logging["retention"])
     
-    mt5_initialized = False
+    mt5_client = None
     if cfg.data_source == "mt5":
-        if sys.platform == "win32":
-            try:
-                import MetaTrader5 as mt5
-                if not mt5.initialize():
-                    logger.error("MetaTrader5 initialize() failed. Is the terminal running?")
-                    exit()
-                mt5_initialized = True
-                logger.info("MetaTrader5 initialized successfully for backtester.")
-            except ImportError:
-                logger.warning("MetaTrader5 library not found, forcing data_source to 'csv'.")
-                cfg.data_source = "csv"
-        else:
-            logger.warning("MetaTrader5 data source is not supported on this OS. Forcing data_source to 'csv'.")
+        mt5_client = MT5Client(
+            login=os.getenv("MT5_LOGIN"),
+            password=os.getenv("MT5_PASSWORD"),
+            server=os.getenv("MT5_SERVER"),
+            path=os.getenv("MT5_PATH"),
+        )
+        if not mt5_client.connect():
+            logger.error("Failed to connect to MT5, falling back to csv data source.")
             cfg.data_source = "csv"
+            mt5_client = None
 
     cfg.thompson_sampling.state_file = f"ts_risk_controller_state_backtest_{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
 
@@ -539,6 +503,5 @@ if __name__ == "__main__":
             bt._persist_bandit_state(force_path=bt.backtest_ts_state_file)
         except Exception:
             logger.exception("Final persist of bandit state failed.")
-        if mt5_initialized:
-            mt5.shutdown()
-
+        if mt5_client:
+            mt5_client.shutdown()

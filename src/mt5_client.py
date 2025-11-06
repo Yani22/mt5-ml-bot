@@ -125,11 +125,13 @@ class MT5Client:
             # We need a symbol to get the server time. Let's use the first one from the market watch.
             symbols = mt5.symbols_get()
             if symbols:
-                tick = mt5.symbol_info_tick(symbols[0].name)
-                if tick and tick.time > 0:
-                    return datetime.datetime.fromtimestamp(tick.time, tz=datetime.timezone.utc)
-        except Exception:
-            # Fallback to system time if we can't get server time from a tick
+                for symbol_info in symbols:
+                    tick = mt5.symbol_info_tick(symbol_info.name)
+                    if tick and tick.time > 0:
+                        return datetime.datetime.fromtimestamp(tick.time, tz=datetime.timezone.utc)
+        except Exception as e:
+            logger.warning(f"MT5Client: exception getting server time from tick: {e}")
+            # Fallback to system time if we can't get server time from any tick
             pass
         
         return datetime.datetime.now(datetime.timezone.utc)
@@ -173,6 +175,38 @@ class MT5Client:
             return mt5.positions_get(*args, **kwargs)
         except Exception:
             return None
+
+    def get_rates(self, symbol: str, timeframe: int, count: int):
+        """Wrapper for mt5.copy_rates_from_pos()"""
+        if not self._connected: return None
+        try:
+            return mt5.copy_rates_from_pos(symbol, timeframe, 0, count)
+        except Exception:
+            return None
+
+    def wait_for_new_bar(self, symbol: str, timeframe: int = mt5.TIMEFRAME_M1, timeout: int = 60):
+        """Waits for a new bar to appear for a given symbol and timeframe."""
+        if not self._connected:
+            logger.warning("wait_for_new_bar: Not connected to MT5.")
+            return False
+
+        last_bar = self.get_rates(symbol, timeframe, 1)
+        if last_bar is None or len(last_bar) == 0:
+            logger.warning(f"wait_for_new_bar: Could not get last bar for {symbol}.")
+            return False
+
+        last_bar_time = last_bar[0][0]
+        logger.info(f"wait_for_new_bar: Waiting for new bar for {symbol}. Last bar time: {datetime.datetime.fromtimestamp(last_bar_time)}")
+        start_time = time.time()
+
+        while time.time() - start_time < 120: # Increased timeout to 120 seconds
+            new_bar = self.get_rates(symbol, timeframe, 1)
+            if new_bar is not None and len(new_bar) > 0 and new_bar[0][0] > last_bar_time:
+                return True
+            time.sleep(1)
+
+        logger.warning(f"wait_for_new_bar: Timeout waiting for new bar for {symbol}.")
+        return False
 
     # --- MT5 Constants ---
     ORDER_TYPE_BUY = mt5.ORDER_TYPE_BUY

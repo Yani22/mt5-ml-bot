@@ -62,23 +62,21 @@ def retrain_symbol(cfg: Cfg, symbol: str, dry_run: bool = True, mt5_instance=Non
     logger.info(f"[{symbol}] Loading full history via DataManager...")
     dm = DataManager(cfg)
     
-    # Use get_training_data with build_dynamic=False to get untrimmed data and features
-    X, _, data = get_training_data(
+    # Use get_training_data with build_dynamic=False and return_long_short_labels=True to get untrimmed data and features
+    X, y_long, y_short, data = get_training_data(
         cfg=cfg,
         symbol=symbol,
         feature_cfg=feature_cfg,
         count=cfg.retraining_window_bars,
         min_pct_change=feature_cfg.min_pct_change,
-        build_dynamic=False # We need raw data (df) and features (X), will generate labels (y) later
+        build_dynamic=False, # We need raw data (df) and features (X), will generate labels (y) later
+        return_long_short_labels=True
     )
 
     if X is None or X.empty or len(X) < MIN_SAMPLES_TO_RETRAIN:
         msg = f"[{symbol}] Not enough data to retrain: {0 if X is None else len(X)} samples"
         logger.warning(msg)
         return {"ok": False, "reason": msg}
-
-    # Generate labels from the full, untrimmed data
-    y_long, y_short = generate_long_short_labels(data, cfg.prediction_horizon, feature_cfg.min_pct_change)
 
     # CRITICAL: Align X and y to their common index to prevent training on mismatched data
     common_idx = X.index.intersection(y_long.index)
@@ -109,30 +107,7 @@ def retrain_all(cfg: Cfg, symbols: list[str], dry_run: bool = True, mt5_instance
 
 
 
-def _ensure_min_grid_size(thresholds: List[float], best_thr: float, min_size: int = 5, spread: float = 0.02) -> List[float]:
-    """Ensures a list of thresholds has at least min_size elements, expanding around best_thr if needed."""
-    if len(thresholds) >= min_size:
-        return sorted(list(set(thresholds)))  # Ensure unique and sorted
 
-    # If not enough, generate a new grid around best_thr
-    new_thresholds = [best_thr]
-    half_size = (min_size - 1) // 2
-    for i in range(1, half_size + 1):
-        new_thresholds.append(best_thr + i * spread)
-        new_thresholds.append(best_thr - i * spread)
-
-    # Combine with existing and ensure unique, sorted, and within reasonable bounds
-    combined = sorted(list(set(thresholds + new_thresholds)))
-
-    # Filter to reasonable range (e.g., 0.0 to 1.0 for probabilities)
-    combined = [round(x, 2) for x in combined if 0.0 <= x <= 1.0]
-
-    # If still not enough after filtering, just take a wider range
-    if len(combined) < min_size:
-        combined = np.linspace(max(0.0, best_thr - spread * min_size), min(1.0, best_thr + spread * min_size), min_size).tolist()
-        combined = [round(x, 2) for x in combined]
-
-    return sorted(list(set(combined)))
 
 
 if __name__ == "__main__":
@@ -142,35 +117,22 @@ if __name__ == "__main__":
     random.seed(42)
     import os
     from dotenv import load_dotenv  # type: ignore
-    try:
-        import MetaTrader5 as mt5 # type: ignore
-    except ImportError:
-        mt5 = None
-        logger.warning("MetaTrader5 module not found. Live MT5 operations will be disabled.")
     from src.config import Cfg
+    from src.mt5_client import MT5Client
 
     load_dotenv()
 
     # Establish MT5 connection
-    if mt5:
-        login_id_str = os.getenv("MT5_LOGIN")
-        if not login_id_str:
-            print("MT5_LOGIN not found in environment variables. Exiting.")
-            quit()
+    mt5_client = MT5Client(
+        login=os.getenv("MT5_LOGIN"),
+        password=os.getenv("MT5_PASSWORD"),
+        server=os.getenv("MT5_SERVER"),
+        path=os.getenv("MT5_PATH"),
+    )
+    if not mt5_client.connect():
+        logger.error("Failed to connect to MT5, exiting.")
+        quit()
 
-        if not mt5.initialize(
-            login=int(login_id_str),
-            password=os.getenv("MT5_PASSWORD"),
-            server=os.getenv("MT5_SERVER"),
-            path=os.getenv("MT5_PATH")
-        ):
-            print(f"mt5.initialize() failed, error code = {mt5.last_error()}")
-            quit()
-        
-        print("MT5 connection initialized.")
-    else:
-        print("MT5 connection skipped: MetaTrader5 module not available.")
-    
     try:
         cfg = Cfg.from_yaml("config.yaml")
         symbols = getattr(cfg, "symbols", [])
@@ -178,10 +140,9 @@ if __name__ == "__main__":
             print("No symbols found in config.yaml. Exiting.")
             quit()
         print("Running retrain_all with dry_run=False (model files will be overwritten).")
-        res = retrain_all(cfg, symbols, dry_run=False, mt5_instance=mt5)
+        res = retrain_all(cfg, symbols, dry_run=False, mt5_instance=mt5_client.mt5)
         print(res)
     finally:
         # Shutdown MT5 connection
-        if mt5:
-            mt5.shutdown()
-            print("MT5 connection shut down.")
+        mt5_client.shutdown()
+        print("MT5 connection shut down.")

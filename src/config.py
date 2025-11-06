@@ -125,7 +125,7 @@ class FetchCfg:
     save_raw_data_locally: bool = True
     raw_data_dir: str = "data/historical_data"
     retrain_in_background: bool = True
-    retrain_time_utc: Optional[str] = None  # "HH:MM" format or None
+    retrain_time_utc: Optional[List[str]] = None  # "HH:MM" format or None
 
 @dataclass
 class ThompsonSamplingCfg:
@@ -198,6 +198,20 @@ class Cfg:
     symbol_overrides: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     backtesting: BacktestingCfg = field(default_factory=BacktestingCfg)
 
+    def __post_init__(self):
+        # Dynamically calculate context_dim for Thompson Sampling
+        if self.thompson_sampling.contextual_enabled:
+            dim = 0
+            # Base context: vol, equity, peak_equity, ensemble_auc
+            dim += 4
+            if self.context_features.mta.enabled:
+                dim += 2 # rsi, ema
+            if self.context_features.inter_market.enabled:
+                dim += len(self.context_features.inter_market.roc_lags)
+            if self.context_features.price_action.enabled:
+                dim += 2 # dist_from_ema_200, adx
+            self.thompson_sampling.context_dim = dim
+
     def timeframe_seconds(self) -> Optional[int]:
         """ Convert timeframe string like 'M5', 'H1', 'D1' to seconds.
         Returns None for unknown formats.
@@ -255,8 +269,14 @@ class Cfg:
 
     @staticmethod
     def from_yaml(path: str) -> "Cfg":
+        import platform
         with open(path, "r") as f:
             raw = yaml.safe_load(f) or {}
+
+        # Auto-switch data_source to csv on non-windows
+        if platform.system() != "Windows" and raw.get("data_source") == "mt5":
+            logger.warning("MT5 data source is only available on Windows. Falling back to 'csv'.")
+            raw["data_source"] = "csv"
 
         # features may contain lists (for tuning); pick sensible defaults
         raw_features = raw.get("features", {}) or {}
@@ -321,6 +341,9 @@ class Cfg:
         # parse fetch block if present (bootstrap + local caching)
         try:
             fetch_raw = raw.get("fetch", {}) or {}
+            retrain_time = fetch_raw.get("retrain_time_utc")
+            if isinstance(retrain_time, str):
+                fetch_raw["retrain_time_utc"] = [retrain_time]
             if not fetch_raw.get("retrain_time_utc"):
                 logger.warning("Could not find a valid `retrain_time_utc` in config.yaml; falling back to `retrain_every_bars`.")
             fetch_obj = FetchCfg(**fetch_raw) if fetch_raw else FetchCfg()

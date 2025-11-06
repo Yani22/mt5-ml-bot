@@ -6,12 +6,13 @@ import sys
 from loguru import logger  # type: ignore
 import pandas as pd  # type: ignore
 from src.features import FeatureCfg, build_static_features, build_dynamic_features, add_contextual_features, build_features
-from src.labels import generate_labels
+from src.labels import generate_labels, generate_long_short_labels
 from src.ensemble import Ensemble
 from src.config import Cfg
 from src import data_manager
 from src.data import merge_features_labels
 import glob
+import numpy as np
 
 MODEL_DIR = "models"
 PARAMS_DIR = "optuna_params"
@@ -55,11 +56,11 @@ def load_optuna_params(symbol: str, cfg: Cfg) -> dict | None:
     logger.info(f"[{symbol}] Loaded Optuna best params from {file_path}")
     return loaded_params
 
-def get_training_data(cfg: Cfg, symbol: str, feature_cfg: FeatureCfg, count: int | None = None, source: str = "csv", load_all_data: bool = False, build_dynamic: bool = True, min_pct_change: float = 0.0, mta_df: pd.DataFrame | None = None, inter_market_df: pd.DataFrame | None = None):
+def get_training_data(cfg: Cfg, symbol: str, feature_cfg: FeatureCfg, count: int | None = None, source: str = "csv", load_all_data: bool = False, build_dynamic: bool = True, min_pct_change: float = 0.0, mta_df: pd.DataFrame | None = None, inter_market_df: pd.DataFrame | None = None, return_long_short_labels: bool = False):
     """
     New centralized data pipeline.
-    - If build_dynamic is True, returns (data, X, y) for trainers/backtesters.
-    - If build_dynamic is False, returns (X, y, df) for the tuner.
+    - If build_dynamic is True, returns (data, X, y) or (data, X, y_long, y_short) for trainers/backtesters.
+    - If build_dynamic is False, returns (X, y, df) or (X, y_long, y_short, df) for the tuner.
     """
     fetch_count = None if load_all_data else (count if count is not None else cfg.history_bars)
 
@@ -110,26 +111,46 @@ def get_training_data(cfg: Cfg, symbol: str, feature_cfg: FeatureCfg, count: int
     
     # Build all features using the unified build_features function
     X = build_features(df.copy(), feature_cfg, cfg, symbol=symbol, mta_df=mta_df, inter_market_df=inter_market_df)
-    y = generate_labels(df, cfg.prediction_horizon, min_pct_change)
-
-    # Align X and y by index
-    aligned_idx = X.index.intersection(y.index)
-    X = X.loc[aligned_idx]
-    y = y.loc[aligned_idx]
+    
+    if return_long_short_labels:
+        y_long, y_short = generate_long_short_labels(df, cfg.prediction_horizon, min_pct_change)
+        # Align X and y by index
+        aligned_idx = X.index.intersection(y_long.index)
+        X = X.loc[aligned_idx]
+        y_long = y_long.loc[aligned_idx]
+        y_short = y_short.loc[aligned_idx]
+    else:
+        y = generate_labels(df, cfg.prediction_horizon, min_pct_change)
+        # Align X and y by index
+        aligned_idx = X.index.intersection(y.index)
+        X = X.loc[aligned_idx]
+        y = y.loc[aligned_idx]
 
     if not build_dynamic:
         # Return the intermediate artifacts needed by the tuner
         logger.info(f"[{symbol}] Data pipeline complete for tuner. Returning features and labels.")
-        return X, y, df # Return X, y, df for consistency
+        if return_long_short_labels:
+            return X, y_long, y_short, df
+        else:
+            return X, y, df # Return X, y, df for consistency
 
     # For trainer/backtester, X and y are already built
-    data = merge_features_labels(df, X, y)
+    if return_long_short_labels:
+        data = merge_features_labels(df, X, y_long) # merge with y_long for consistency
+    else:
+        data = merge_features_labels(df, X, y)
 
     if data is None or data.empty:
-        return pd.DataFrame(), X if X is not None else pd.DataFrame(), y if y is not None else pd.Series(dtype="float64")
+        if return_long_short_labels:
+            return pd.DataFrame(), X if X is not None else pd.DataFrame(), pd.Series(dtype="float64"), pd.Series(dtype="float64")
+        else:
+            return pd.DataFrame(), X if X is not None else pd.DataFrame(), y if y is not None else pd.Series(dtype="float64")
     
     logger.info(f"[{symbol}] Data pipeline complete. Final shape: {data.shape}")
-    return data, X, y
+    if return_long_short_labels:
+        return data, X, y_long, y_short
+    else:
+        return data, X, y
 
 def load_ensemble(cfg: Cfg, symbol: str, model_type: str, model_params: dict | None = None) -> Ensemble:
     # New: ensemble is saved in a directory, not a single file
@@ -259,18 +280,51 @@ def log_startup_summary(cfg: "Cfg"):
     logger.info(f"Dynamic Risk Enabled: {cfg.risk.dynamic_risk['enabled']}")
     logger.info("--- End of Summary ---")
 
-def timeframe_to_seconds(timeframe: str) -> int:
-    """Converts a timeframe string to seconds."""
-    if timeframe.startswith("M"):
-        return int(timeframe[1:]) * 60
-    elif timeframe.startswith("H"):
-        return int(timeframe[1:]) * 60 * 60
-    elif timeframe.startswith("D"):
-        return int(timeframe[1:]) * 24 * 60 * 60
-    elif timeframe.startswith("W"):
-        return int(timeframe[1:]) * 7 * 24 * 60 * 60
-    elif timeframe.startswith("MN"):
-        return int(timeframe[2:]) * 30 * 24 * 60 * 60  # Approximation
-    else:
-        raise ValueError(f"Unknown timeframe: {timeframe}")
+def timeframe_to_mt5_timeframe(timeframe_str: str):
+    """Converts a timeframe string (e.g., 'M5') to a MetaTrader 5 timeframe constant."""
+    import MetaTrader5 as mt5
+    timeframe_map = {
+        "M1": mt5.TIMEFRAME_M1,
+        "M5": mt5.TIMEFRAME_M5,
+        "M15": mt5.TIMEFRAME_M15,
+        "M30": mt5.TIMEFRAME_M30,
+        "H1": mt5.TIMEFRAME_H1,
+        "H4": mt5.TIMEFRAME_H4,
+        "D1": mt5.TIMEFRAME_D1,
+    }
+    return timeframe_map.get(timeframe_str, mt5.TIMEFRAME_M1)
 
+def timeframe_to_seconds(timeframe: str) -> int:
+    """Converts a timeframe string (e.g., 'M5') to seconds."""
+    if timeframe.startswith('M'):
+        return int(timeframe[1:]) * 60
+    elif timeframe.startswith('H'):
+        return int(timeframe[1:]) * 60 * 60
+    elif timeframe.startswith('D'):
+        return int(timeframe[1:]) * 24 * 60 * 60
+    return 60 # Default to 1 minute
+
+def ensure_min_grid_size(thresholds: list[float], best_thr: float, min_size: int = 5, spread: float = 0.02) -> list[float]:
+    """Ensures a list of thresholds has at least min_size elements, expanding around best_thr if needed."""
+    if len(thresholds) >= min_size:
+        return sorted(list(set(thresholds)))  # Ensure unique and sorted
+
+    # If not enough, generate a new grid around best_thr
+    new_thresholds = [best_thr]
+    half_size = (min_size - 1) // 2
+    for i in range(1, half_size + 1):
+        new_thresholds.append(best_thr + i * spread)
+        new_thresholds.append(best_thr - i * spread)
+
+    # Combine with existing and ensure unique, sorted, and within reasonable bounds
+    combined = sorted(list(set(thresholds + new_thresholds)))
+
+    # Filter to reasonable range (e.g., 0.0 to 1.0 for probabilities)
+    combined = [round(x, 2) for x in combined if 0.0 <= x <= 1.0]
+
+    # If still not enough after filtering, just take a wider range
+    if len(combined) < min_size:
+        combined = np.linspace(max(0.0, best_thr - spread * min_size), min(1.0, best_thr + spread * min_size), min_size).tolist()
+        combined = [round(x, 2) for x in combined]
+
+    return sorted(list(set(combined)))

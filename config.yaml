@@ -167,8 +167,6 @@ risk:
   session_filter:
     start: "00:00"
     end: "23:59"
-    # start: "07:00"
-    # end: "22:00"
 
 # --- Logging ---
 logging:
@@ -197,51 +195,19 @@ startup_logging: true             # log key settings at bot launch for transpare
 # Use this section to override settings for specific symbols, like pip_value for non-forex instruments.
 symbol_overrides:
   "EURUSDm#":
-    # Instrument-specific values
-    contract_size: 1000.0
-    pip_size: 1e-05
     retrain_time_utc: "23:55" # Staggered retraining time
-    # --- Strategy & Risk Overrides ---
-    min_prob_long: 0.55 #0.65-max #0.51-0.55|low #0.56-0.65|high
-    min_prob_short: 0.55  #0.65-max #0.51-0.55|low #0.56-0.65|high
-    atr_multiplier_sl: 1.0
-    atr_multiplier_tp: 2.0
-    trailing_atr_mult: 1.0
-    min_ensemble_auc: 0.55
-    min_auc_improvement: 0.005
     # --- Thompson Sampling Grid Overrides ---
     atr_grid: [1.0, 1.5, 2.0, 2.5]
     min_prob_grid_long: [0.53, 0.55, 0.57, 0.60, 0.63]
     min_prob_grid_short: [0.53, 0.55, 0.57, 0.60, 0.63]
   "GBPUSDm#":
-    # Instrument-specific values
-    contract_size: 1000.0
-    pip_size: 1e-05
     retrain_time_utc: "23:55" # Staggered retraining time
-    # --- Strategy & Risk Overrides ---
-    min_prob_long: 0.55 #0.65-max #0.51-0.55|low #0.56-0.65|high
-    min_prob_short: 0.55  #0.65-max #0.51-0.55|low #0.56-0.65|high
-    atr_multiplier_sl: 1.0
-    atr_multiplier_tp: 2.0
-    trailing_atr_mult: 1.0
-    min_ensemble_auc: 0.55
-    min_auc_improvement: 0.005
     # --- Thompson Sampling Grid Overrides ---
     atr_grid: [1.0, 1.5, 2.0, 2.5]
     min_prob_grid_long: [0.53, 0.55, 0.57, 0.60, 0.63]
     min_prob_grid_short: [0.53, 0.55, 0.57, 0.60, 0.63]
   "AUDUSDm#":
-    contract_size: 1000.0
-    pip_size: 1e-05
     retrain_time_utc: "23:55" # Staggered retraining time
-    # --- Strategy & Risk Overrides ---
-    min_prob_long: 0.55 #0.65-max #0.51-0.55|low #0.56-0.65|high
-    min_prob_short: 0.55  #0.65-max #0.51-0.55|low #0.56-0.65|high
-    atr_multiplier_sl: 1.0
-    atr_multiplier_tp: 2.0
-    trailing_atr_mult: 1.0
-    min_ensemble_auc: 0.55
-    min_auc_improvement: 0.005
     # --- Thompson Sampling Grid Overrides ---
     atr_grid: [1.0, 1.5, 2.0, 2.5]
     min_prob_grid_long: [0.53, 0.55, 0.57, 0.60, 0.63]

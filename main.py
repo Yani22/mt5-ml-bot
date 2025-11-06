@@ -11,7 +11,7 @@ from src.config import Cfg, FeatureCfg
 from src.mt5_client import MT5Client
 from src.risk import RiskManager
 from src.execution import Execution
-from src.utils import setup_logging, get_training_data, load_ensemble, save_ensemble, safe_retrain_ensemble, load_optuna_params, log_symbol_specific_configs, log_startup_summary, timeframe_to_seconds
+from src.utils import setup_logging, get_training_data, load_ensemble, save_ensemble, safe_retrain_ensemble, load_optuna_params, log_symbol_specific_configs, log_startup_summary, timeframe_to_seconds, ensure_min_grid_size, timeframe_to_mt5_timeframe
 from src.live_performance_monitor import LivePerformanceMonitor
 from src.notifier import TelegramNotifier
 from src.risk_controller import RiskController
@@ -28,30 +28,6 @@ from typing import List
 
 max_wait_multiplier = 2.0
 
-def _ensure_min_grid_size(thresholds: List[float], best_thr: float, min_size: int = 5, spread: float = 0.02) -> List[float]:
-    """Ensures a list of thresholds has at least min_size elements, expanding around best_thr if needed."""
-    if len(thresholds) >= min_size:
-        return sorted(list(set(thresholds)))  # Ensure unique and sorted
-
-    # If not enough, generate a new grid around best_thr
-    new_thresholds = [best_thr]
-    half_size = (min_size - 1) // 2
-    for i in range(1, half_size + 1):
-        new_thresholds.append(best_thr + i * spread)
-        new_thresholds.append(best_thr - i * spread)
-
-    # Combine with existing and ensure unique, sorted, and within reasonable bounds
-    combined = sorted(list(set(thresholds + new_thresholds)))
-
-    # Filter to reasonable range (e.g., 0.0 to 1.0 for probabilities)
-    combined = [round(x, 2) for x in combined if 0.0 <= x <= 1.0]
-
-    # If still not enough after filtering, just take a wider range
-    if len(combined) < min_size:
-        combined = np.linspace(max(0.0, best_thr - spread * min_size), min(1.0, best_thr + spread * min_size), min_size).tolist()
-        combined = [round(x, 2) for x in combined]
-
-    return sorted(list(set(combined)))
 
 # --- Initial Setup ---
 load_dotenv()
@@ -287,6 +263,8 @@ def run(dry_run: bool = False):
 
     live_monitor = None
     risk_controller = None
+    risk = None
+    mt5c = None
     try:
         # Outer loop for MT5 reconnection attempts
         while True:
@@ -668,31 +646,11 @@ def run(dry_run: bool = False):
                         except Exception:
                             logger.exception(f"Per-symbol loop failed for {sym}")
 
-                    # --- Update RiskManager's equity peak for drawdown tracking (done for whole loop) ---
-                    risk._update_equity_peak(equity)
+                        # Wait for the next bar
+                        logger.info(f"Waiting for the next bar...")
+                        mt5c.wait_for_new_bar(sym, timeframe=timeframe_to_mt5_timeframe(cfg.timeframe))
 
-                    # --- Diagnostics Logging ---
-                    # Throttled logging for RiskController diagnostics
-                    if current_loop_time - last_diagnostics_log_time >= (cfg.timeframe_seconds() * cfg.dashboard_every_bars):
-                        ts_diagnostics = risk_controller.diagnostics()
-                        # logger.info(f"RiskController Diagnostics: {json.dumps(ts_diagnostics, indent=2)}")
-                        last_diagnostics_log_time = current_loop_time
-                    # logger.info("Waiting for updates...")
-                    # time.sleep(1)
-                    # time.sleep(cfg.timeframe_seconds() or 60)
-                    #TODO: why not to make a countdown for 5 minutes and wakes up 3-5 seconds before 5 minutes to make sure it sees 
-                    # the new bar at the same exact time the new bar appears instead of sleeping every timeframe it would make huge 
-                    # delays probably detecting a new bar at exactly 5 seconds before another new bar appears
-                    # --- Smart sleep: wake shortly before next expected closed bar across symbols to reduce delay ---
-                    WAKE_MARGIN_SECONDS = getattr(cfg, "bar_wake_margin_seconds", 5)  # default 5s; you can override in config.yaml
-                    POLL_INTERVAL_SECONDS = getattr(cfg, "bar_poll_interval_seconds", 0.5)
 
-                    try:
-                        wait_for_new_closed_bar(mt5c, data_manager, cfg, last_bar_time, wake_margin=WAKE_MARGIN_SECONDS, poll_interval=POLL_INTERVAL_SECONDS)
-                    except Exception:
-                        # If anything goes wrong with smart sleep, fallback to short sleep
-                        logger.exception("Smart wait for new bar failed; falling back to safe short sleep.")
-                        time.sleep(1)
 
                     
             except Exception as e:
@@ -722,15 +680,12 @@ def run(dry_run: bool = False):
 
         if risk_controller:
             try:
-                risk_controller.save_state(open_positions_cache=open_pos_cache_to_save)
+                open_pos_cache_to_save = risk.open_positions_cache if risk else {}
+                mt5c.shutdown()
             except Exception:
-                logger.error("Failed to save risk_controller state on shutdown.", exc_info=True)
-        try:
-            mt5c.shutdown()
-        except Exception:
-            logger.exception("Failed to shutdown mt5 client cleanly.")
-        logger.info("MT5 shutdown complete.")
-        notifier.send_message("MT5 ML Bot shutdown complete.", level="INFO")
+                logger.exception("Failed to shutdown mt5 client cleanly.")
+            logger.info("MT5 shutdown complete.")
+            notifier.send_message("MT5 ML Bot shutdown complete.", level="INFO")
 
 if __name__ == "__main__":
     # Default to dry-run to be safe; change to False when you are ready.

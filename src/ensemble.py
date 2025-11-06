@@ -332,6 +332,113 @@ class Ensemble:
         
         return ensemble
 
+    def _perform_cross_validation(
+        self,
+        Xc: pd.DataFrame,
+        yc: pd.Series,
+        prices_c: Optional[pd.Series] = None,
+        model_type: str = "long"
+    ) -> None:
+        """Performs time-series cross-validation to evaluate the ensemble and its members."""
+        n_samples = len(Xc)
+        cv_split = min(5, max(2, n_samples // self.cv_samples))
+        tscv = TimeSeriesSplit(n_splits=cv_split)
+        oof_preds: List[pd.Series] = []
+        oof_true: List[pd.Series] = []
+        member_cv_raw: Dict[str, List[float]] = {name: [] for name in self.members}
+
+        for fold_idx, (tr_idx, val_idx) in enumerate(tscv.split(Xc)):
+            X_tr, X_val = Xc.iloc[tr_idx], Xc.iloc[val_idx]
+            y_tr, y_val = yc.iloc[tr_idx], yc.iloc[val_idx]
+
+            if len(X_tr) < 20 or len(X_val) < 20:
+                logger.debug(f"Skip fold {fold_idx} due to too small split: {len(X_tr)}/{len(X_val)}")
+                continue
+
+            # Fit each member
+            fold_base_preds: Dict[str, pd.Series] = {}
+            for name, model in self.members.items():
+                try:
+                    if not model.fit(X_tr, y_tr):
+                        logger.warning(f"Ensemble.fit: member {name} skipped fitting in fold {fold_idx} due to insufficient data.")
+                        continue
+                    proba = model.predict_proba(X_val)
+                    # ensure proba is shaped correctly
+                    if hasattr(proba, "ndim") and proba.ndim == 2:
+                        p1 = proba[:, 1]
+                    else:
+                        p1 = np.array(proba).flatten()
+                    fold_base_preds[name] = pd.Series(p1, index=y_val.index, name=name)
+                    # record CV score
+                    auc = roc_auc_score(y_val, p1)
+                    member_cv_raw[name].append(auc)
+                except Exception as e:
+                    logger.warning(f"Ensemble.fit: member {name} failed in fold {fold_idx}: {e}")
+                    self.failed_members.add(name)
+
+            if not fold_base_preds:
+                logger.warning(f"Ensemble.fit: no valid member predictions in fold {fold_idx}")
+                continue
+
+            # Aggregate OOF
+            P_val_df = pd.concat(fold_base_preds.values(), axis=1)
+            # Ensure P_val_df columns correspond to member names
+            P_val_df.columns = list(fold_base_preds.keys())
+
+            oof_preds.append(P_val_df)
+            oof_true.append(y_val)
+
+            # Update dynamic weights
+            self.dynamic_ensemble.update_weights(X_val, y_val)
+
+        if not oof_preds:
+            # no valid folds
+            logger.warning("Ensemble.fit: no valid CV folds; skipping threshold optimization.")
+            self.ensemble_cv_auc_ = np.mean([np.mean(v) for v in member_cv_raw.values() if v]) if any(member_cv_raw.values()) else 0.5
+        else:
+            P_oof = pd.concat(oof_preds)
+            y_oof = pd.concat(oof_true)
+            # Log member CV AUC
+            for name, auc_list in member_cv_raw.items():
+                if auc_list:
+                    self.member_cv_aucs_[name] = float(np.mean(auc_list))
+                else:
+                    self.member_cv_aucs_[name] = 0.5
+                logger.info(f"[{name}] CV AUC: {self.member_cv_aucs_[name]:.4f}")
+
+            if self.method == "stacking":
+                from sklearn.linear_model import LogisticRegression # type: ignore
+
+                try:
+                    self._stacker = LogisticRegression(C=self.meta.get("C", 1.0), max_iter=200, random_state=42)
+                    self._stacker.fit(P_oof.values, y_oof.values)
+                    proba_stacked = self._stacker.predict_proba(P_oof.values)[:, 1]
+                    self.ensemble_cv_auc_ = roc_auc_score(y_oof, proba_stacked)
+                except Exception as e:
+                    logger.error(f"Ensemble.fit: stacking failed: {e}")
+                    # fallback: average of member CVs
+                    self.ensemble_cv_auc_ = float(np.mean(list(self.member_cv_aucs_.values()))
+                                                 if self.member_cv_aucs_ else 0.5)
+                    self._stacker = None
+            else:
+                # using soft vote or other methods
+                self.ensemble_cv_auc_ = float(np.mean(list(self.member_cv_aucs_.values())))
+
+            logger.info(f"Ensemble CV AUC: {self.ensemble_cv_auc_:.4f}")
+
+            # threshold optimization if prices aligned and auto_threshold is enabled
+            if self.auto_threshold and prices_c is not None:
+                try:
+                    # use last len(y_oof) prices
+                    price_segment = prices_c.iloc[-len(y_oof):]
+                    # prepare average base model proba across folds
+                    # compute mean predictions across folds per sample
+                    # simplest: use P_oof.mean(axis=1)
+                    mean_proba = P_oof.mean(axis=1)
+                    self.best_threshold_, self.promising_thresholds_ = self._optimize_threshold(y_oof, mean_proba, price_segment, model_type=model_type) # MODIFIED
+                except Exception as e:
+                    logger.warning(f"Ensemble.fit: threshold optimization failed: {e}")
+
     def fit(
         self,
         X: pd.DataFrame,
@@ -376,104 +483,7 @@ class Ensemble:
             return self
 
         if cv:
-            # TimeSeriesSplit CV
-            cv_split = min(5, max(2, n_samples // self.cv_samples))
-            tscv = TimeSeriesSplit(n_splits=cv_split)
-            oof_preds: List[pd.Series] = []
-            oof_true: List[pd.Series] = []
-            member_cv_raw: Dict[str, List[float]] = {name: [] for name in self.members}
-
-            for fold_idx, (tr_idx, val_idx) in enumerate(tscv.split(Xc)):
-                X_tr, X_val = Xc.iloc[tr_idx], Xc.iloc[val_idx]
-                y_tr, y_val = yc.iloc[tr_idx], yc.iloc[val_idx]
-
-                if len(X_tr) < 20 or len(X_val) < 20:
-                    logger.debug(f"Skip fold {fold_idx} due to too small split: {len(X_tr)}/{len(X_val)}")
-                    continue
-
-                # Fit each member
-                fold_base_preds: Dict[str, pd.Series] = {}
-                for name, model in self.members.items():
-                    try:
-                        if not model.fit(X_tr, y_tr):
-                            logger.warning(f"Ensemble.fit: member {name} skipped fitting in fold {fold_idx} due to insufficient data.")
-                            continue
-                        proba = model.predict_proba(X_val)
-                        # ensure proba is shaped correctly
-                        if hasattr(proba, "ndim") and proba.ndim == 2:
-                            p1 = proba[:, 1]
-                        else:
-                            p1 = np.array(proba).flatten()
-                        fold_base_preds[name] = pd.Series(p1, index=y_val.index, name=name)
-                        # record CV score
-                        auc = roc_auc_score(y_val, p1)
-                        member_cv_raw[name].append(auc)
-                    except Exception as e:
-                        logger.warning(f"Ensemble.fit: member {name} failed in fold {fold_idx}: {e}")
-                        self.failed_members.add(name)
-
-                if not fold_base_preds:
-                    logger.warning(f"Ensemble.fit: no valid member predictions in fold {fold_idx}")
-                    continue
-
-                # Aggregate OOF
-                P_val_df = pd.concat(fold_base_preds.values(), axis=1)
-                # Ensure P_val_df columns correspond to member names
-                P_val_df.columns = list(fold_base_preds.keys())
-
-                oof_preds.append(P_val_df)
-                oof_true.append(y_val)
-
-                # Update dynamic weights
-                self.dynamic_ensemble.update_weights(X_val, y_val)
-
-            if not oof_preds:
-                # no valid folds
-                logger.warning("Ensemble.fit: no valid CV folds; skipping threshold optimization.")
-                self.ensemble_cv_auc_ = np.mean([np.mean(v) for v in member_cv_raw.values() if v]) if any(member_cv_raw.values()) else 0.5
-            else:
-                P_oof = pd.concat(oof_preds)
-                y_oof = pd.concat(oof_true)
-                # Log member CV AUC
-                for name, auc_list in member_cv_raw.items():
-                    if auc_list:
-                        self.member_cv_aucs_[name] = float(np.mean(auc_list))
-                    else:
-                        self.member_cv_aucs_[name] = 0.5
-                    logger.info(f"[{name}] CV AUC: {self.member_cv_aucs_[name]:.4f}")
-
-                if self.method == "stacking":
-                    from sklearn.linear_model import LogisticRegression # type: ignore
-
-                    try:
-                        self._stacker = LogisticRegression(C=self.meta.get("C", 1.0), max_iter=200, random_state=42)
-                        self._stacker.fit(P_oof.values, y_oof.values)
-                        proba_stacked = self._stacker.predict_proba(P_oof.values)[:, 1]
-                        self.ensemble_cv_auc_ = roc_auc_score(y_oof, proba_stacked)
-                    except Exception as e:
-                        logger.error(f"Ensemble.fit: stacking failed: {e}")
-                        # fallback: average of member CVs
-                        self.ensemble_cv_auc_ = float(np.mean(list(self.member_cv_aucs_.values()))
-                                                     if self.member_cv_aucs_ else 0.5)
-                        self._stacker = None
-                else:
-                    # using soft vote or other methods
-                    self.ensemble_cv_auc_ = float(np.mean(list(self.member_cv_aucs_.values())))
-
-                logger.info(f"Ensemble CV AUC: {self.ensemble_cv_auc_:.4f}")
-
-                # threshold optimization if prices aligned and auto_threshold is enabled
-                if self.auto_threshold and prices_c is not None:
-                    try:
-                        # use last len(y_oof) prices
-                        price_segment = prices_c.iloc[-len(y_oof):]
-                        # prepare average base model proba across folds
-                        # compute mean predictions across folds per sample
-                        # simplest: use P_oof.mean(axis=1)
-                        mean_proba = P_oof.mean(axis=1)
-                        self.best_threshold_, self.promising_thresholds_ = self._optimize_threshold(y_oof, mean_proba, price_segment, model_type=model_type) # MODIFIED
-                    except Exception as e:
-                        logger.warning(f"Ensemble.fit: threshold optimization failed: {e}")
+            self._perform_cross_validation(Xc, yc, prices_c, model_type)
 
         # After CV, refit members on all data
         for name, model in self.members.items():
