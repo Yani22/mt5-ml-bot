@@ -10,7 +10,6 @@ import os
 from loguru import logger  # type: ignore
 import numpy as np
 from typing import List
-from typing import List # Added List
 
 from src.config import Cfg
 from src.features import FeatureCfg

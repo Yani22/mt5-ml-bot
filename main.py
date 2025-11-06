@@ -1,4 +1,5 @@
 # main.py
+import argparse
 import os
 import time
 import copy
@@ -72,6 +73,88 @@ def _initialize_metrics_csv():
 
 # Call initialization at startup
 _initialize_metrics_csv()
+
+def _now_utc():
+    # Get time from the broker for a reliable UTC timestamp
+    # Using a high-volume symbol to ensure frequent ticks.
+    # Fallback to system time if MT5 call fails.
+    try:
+        # Use a symbol from the config to ensure it's available
+        tick = mt5.symbol_info_tick("EURUSDm#")
+        if tick and tick.time > 0:
+            return datetime.datetime.fromtimestamp(tick.time, tz=datetime.timezone.utc)
+    except Exception as e:
+        logger.warning(f"Could not fetch time from MT5, falling back to system time: {e}")
+    
+    # Fallback to system clock if MT5 fails
+    return datetime.datetime.now(datetime.timezone.utc)
+
+def _expected_next_bar_time(last_bar_time: datetime.datetime, timeframe_seconds: int) -> datetime.datetime:
+    """Return expected next closed-bar timestamp (timezone-aware)"""
+    return last_bar_time + datetime.timedelta(seconds=timeframe_seconds)
+
+def _compute_sleep_until_next_pre_wakeup(last_bar_time_map: Dict[str, Any], timeframe_seconds: int, wake_margin: float = 5.0) -> float:
+    """
+    Compute number of seconds to sleep until we should wake up *before* the earliest next expected closed bar.
+    Returns a float >= 0 (seconds). If no valid last_bar_time entries, returns a small default (1.0).
+    """
+    now = _now_utc()
+    sleeps = []
+    for sym, last_bt in last_bar_time_map.items():
+        if last_bt is None:
+            continue
+        try:
+            next_expected = _expected_next_bar_time(last_bt, timeframe_seconds)
+            seconds_until_next = (next_expected - now).total_seconds() - wake_margin
+            # If already past next_expected - wake_margin, we should wake immediately (0)
+            sleeps.append(max(0.0, seconds_until_next))
+        except Exception:
+            continue
+
+    if not sleeps:
+        # No known last bar times — don't sleep too long
+        return 1.0
+    # Wake before the earliest next-bar across symbols
+    return max(0.0, min(sleeps))
+
+def wait_for_new_closed_bar(data_manager, cfg, last_bar_time, wake_margin: float = 5.0, poll_interval: float = 0.5, max_wait_multiplier: float = 1.5):
+    """
+    Sleep until just before the expected next closed bar across symbols, then poll frequently (poll_interval)
+    until at least one symbol's closed bar timestamp differs from last_bar_time for that symbol.
+    - data_manager.fetch_live is used by caller per-symbol; however here we just sleep/wait centrally.
+    - Returns when time is up to re-enter per-symbol fetching loop.
+    """
+    # Compute an initial coarse sleep
+    timeframe_sec = cfg.timeframe_seconds() or 60
+    coarse_sleep = _compute_sleep_until_next_pre_wakeup(last_bar_time, timeframe_sec, wake_margin=wake_margin)
+
+    # Cap coarse sleep to not exceed one timeframe (safety)
+    coarse_sleep = min(coarse_sleep, timeframe_sec)
+
+    if coarse_sleep > 0.05:
+        logger.info(f"Pre-wakeup sleep: {coarse_sleep:.2f}s (waking {wake_margin}s before expected bar)")
+        time.sleep(coarse_sleep)
+
+    # After waking, poll repeatedly until we detect a new closed bar timestamp change or timeout
+    now = _now_utc()
+    # Allow at most (timeframe * max_wait_multiplier) seconds for the new bar to appear (safety)
+    timeout_seconds = timeframe_sec * max_wait_multiplier
+    deadline = now + datetime.timedelta(seconds=timeout_seconds)
+
+    # Start polling loop. We don't fetch data here (expensive / duplicate) — caller does fetch per-symbol.
+    # So we just yield control back to the main loop which will call data_manager.fetch_live() per symbol again soon.
+    # To keep CPU reasonable, sleep in short increments until deadline.
+    while _now_utc() < deadline:
+        # small sleep to avoid busy spin; caller will soon fetch data again
+        time.sleep(poll_interval)
+        # exit loop quickly; main loop will call fetch and detect bar changes
+        # (We don't break here because we don't have fetch access; this just keeps us awake in small steps)
+        # The main loop will run immediately after this function returns.
+        return
+    # Timeout reached; return to main loop anyway so it can attempt fetch / recover.
+    logger.warning("wait_for_new_closed_bar: timeout waiting for new closed bar; resuming per-symbol processing.")
+    return
+
 
 def log_metrics_to_csv(data: Dict[str, Any]):
     with open(METRICS_CSV_FILE, 'a', newline='') as f:
@@ -190,7 +273,7 @@ def run(dry_run: bool = False):
     """ Production-ready main loop for hybrid adaptive MT5 ML bot. """
     RECONNECTION_RETRY_SECONDS = 60
     cfg = Cfg.from_yaml("config.yaml")
-    log_symbol_specific_configs(cfg)
+    setup_logging(level=cfg.logging['level'])
 
     cfg.dashboard_every_bars = getattr(cfg, "dashboard_every_bars", 10)
 
@@ -311,12 +394,12 @@ def run(dry_run: bool = False):
                 # Inner loop for trading operations
                 while True:
                     current_loop_time = time.time()  # Capture current time for throttling
-                    now_utc = datetime.datetime.now(datetime.timezone.utc)
+                    now_utc = _now_utc()
 
                     # refresh account info once per loop
                     account_info = mt5.account_info()
                     equity = getattr(account_info, "equity", 0.0) if account_info else 0.0
-                    live_monitor.update_equity(datetime.datetime.now(datetime.timezone.utc), equity)
+                    live_monitor.update_equity(now_utc, equity)
                     balance = getattr(account_info, "balance", 0.0) if account_info else 0.0
                     drawdown = 0.0
                     try:
@@ -325,8 +408,14 @@ def run(dry_run: bool = False):
                         drawdown = 0.0
 
                     # --- Process closed trades first so bandit gets rewards before opening new trades ---
-                    latest_prices = {sym: mt5.symbol_info_tick(sym).ask for sym in cfg.symbols}
-                    closed_trades_this_cycle = exe.check_closed_trades(latest_prices)
+                    latest_prices = {}
+                    for sym in cfg.symbols:
+                        tick_info = mt5.symbol_info_tick(sym)
+                        if tick_info is not None:
+                            latest_prices[sym] = tick_info.ask
+                        else:
+                            logger.warning(f"[{sym}] Could not get tick info. Skipping price update for this symbol.")
+                    closed_trades_this_cycle = exe.check_closed_trades(latest_prices, now_utc)
 
                     # --- FIX: Reconstruct sequential equity to provide accurate reward normalization ---
                     # The `equity` from account_info is after all trades in the cycle have closed.
@@ -353,7 +442,7 @@ def run(dry_run: bool = False):
                                 normalized_reward = trade.pnl / max(1.0, exit_equity)
                                 trade_auc = active_model_auc.get(trade.symbol, 0.5)
                                 log_metrics_to_csv({
-                                    "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                                    "timestamp": now_utc.isoformat(),
                                     "symbol": trade.symbol,
                                     "event_type": "trade_reward",
                                     "atr_idx": trade.atr_idx,
@@ -400,12 +489,14 @@ def run(dry_run: bool = False):
                                 continue
 
                             X_per_symbol[sym] = X
-                            latest_bar_time = data.index[-1]
-                            if last_bar_time[sym] == latest_bar_time:
-                                continue  # skip if no new bar
-                            last_bar_time[sym] = latest_bar_time
+                            # Use the second to last bar as the latest *closed* bar
+                            # The last bar in `data` is the currently forming bar from MT5
+                            latest_closed_bar_time = data.index[-2]
+                            if last_bar_time[sym] == latest_closed_bar_time:
+                                continue  # skip if no new *closed* bar
+                            last_bar_time[sym] = latest_closed_bar_time
                             bar_counters[sym] += 1
-                            logger.info(f"[{sym}] New bar detected at {latest_bar_time}")
+                            logger.info(f"[{sym}] New *closed* bar detected at {latest_closed_bar_time}")
 
                             # --- Live Dashboard (throttled per-symbol) ---
                             if bar_counters[sym] % cfg.dashboard_every_bars == 0:
@@ -488,10 +579,10 @@ def run(dry_run: bool = False):
                                             if notifier:
                                                 notifier.send_message(f"<b>RISK ALERT:</b> [{sym}] Watchdog triggered due to {consecutive_losses} consecutive losses. Trading paused.", level="WARNING")
 
-                            last_features = X.iloc[[-1]] if (X is not None and not X.empty) else pd.DataFrame()
+                            last_features = X.iloc[[-2]] if (X is not None and not X.empty and len(X) >= 2) else pd.DataFrame()
 
                             # Permission checks (drawdown/session)
-                            if not risk.should_trade(pd.Timestamp.now(), drawdown):
+                            if not risk.should_trade(pd.Timestamp(now_utc), drawdown):
                                 logger.info(f"[{sym}] Trade skipped due to drawdown/session rules")
                                 continue
 
@@ -514,7 +605,7 @@ def run(dry_run: bool = False):
                                 "vol": atr,
                                 "equity": equity,
                                 "peak_equity": risk.equity_peak,
-                                "ensemble_auc": ens_long.ensemble_cv_auc_,  # Use long model's AUC for context
+                                "ensemble_auc": (ens_long.ensemble_cv_auc_ + ens_short.ensemble_cv_auc_) / 2,  # Use average AUC for context
                                 "adx": float(last_features["adx"].iloc[0]) if "adx" in last_features.columns else 0.0,
                                 "macd_diff": float(last_features["macd_diff"].iloc[0]) if "macd_diff" in last_features.columns else 0.0,
                                 "volatility_10": float(last_features["volatility_10"].iloc[0]) if "volatility_10" in last_features.columns else 0.0,
@@ -528,7 +619,7 @@ def run(dry_run: bool = False):
 
                             # Decision / trade
                             if last_features.empty:
-                                logger.debug(f"[{sym}] Skipping decision: no features for latest bar")
+                                logger.info(f"[{sym}] Skipping decision: no features for latest bar")
                                 continue
 
                             prob_long = ens_long.predict_proba(last_features).iloc[0]
@@ -576,6 +667,7 @@ def run(dry_run: bool = False):
                                         equity=equity,
                                         pip_size=pip_size,
                                         pip_value=pip_value,
+                                        now_utc=now_utc,
                                         X=last_features,
                                         atr=atr,
                                         auc_score=auc_score,
@@ -603,11 +695,23 @@ def run(dry_run: bool = False):
                         ts_diagnostics = risk_controller.diagnostics()
                         # logger.info(f"RiskController Diagnostics: {json.dumps(ts_diagnostics, indent=2)}")
                         last_diagnostics_log_time = current_loop_time
-                    time.sleep(60)
+                    # logger.info("Waiting for updates...")
+                    # time.sleep(1)
                     # time.sleep(cfg.timeframe_seconds() or 60)
                     #TODO: why not to make a countdown for 5 minutes and wakes up 3-5 seconds before 5 minutes to make sure it sees 
                     # the new bar at the same exact time the new bar appears instead of sleeping every timeframe it would make huge 
                     # delays probably detecting a new bar at exactly 5 seconds before another new bar appears
+                    # --- Smart sleep: wake shortly before next expected closed bar across symbols to reduce delay ---
+                    WAKE_MARGIN_SECONDS = getattr(cfg, "bar_wake_margin_seconds", 5)  # default 5s; you can override in config.yaml
+                    POLL_INTERVAL_SECONDS = getattr(cfg, "bar_poll_interval_seconds", 0.5)
+
+                    try:
+                        wait_for_new_closed_bar(data_manager, cfg, last_bar_time, wake_margin=WAKE_MARGIN_SECONDS, poll_interval=POLL_INTERVAL_SECONDS)
+                    except Exception:
+                        # If anything goes wrong with smart sleep, fallback to short sleep
+                        logger.exception("Smart wait for new bar failed; falling back to safe short sleep.")
+                        time.sleep(1)
+
                     
             except Exception as e:
                 logger.exception(f"MT5 connection lost or critical error in trading loop: {e}. Attempting to reconnect...")
@@ -655,4 +759,5 @@ def run(dry_run: bool = False):
 
 if __name__ == "__main__":
     # Default to dry-run to be safe; change to False when you are ready.
+    # run(dry_run=True)
     run(dry_run=False)

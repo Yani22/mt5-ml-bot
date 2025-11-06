@@ -48,4 +48,4 @@ if __name__ == "__main__":
     else:
         get_info(sys.argv[1])
 
-# run $python get_symbol_info_2.py "EURUSDm#"
+# run $python get_symbol_info_2.py "AUDUSDm#"

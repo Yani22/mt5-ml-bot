@@ -168,7 +168,7 @@ class Execution:
             time.sleep(delay)
         return last
 
-    def check_closed_trades(self, latest_prices: Dict[str, float]) -> List[ClosedTrade]:
+    def check_closed_trades(self, latest_prices: Dict[str, float], now_utc: datetime.datetime) -> List[ClosedTrade]:
         """
         Reconciles the internal cache of open positions with the broker's state (live)
         or simulates closures based on price action (dry-run).
@@ -262,7 +262,7 @@ class Execution:
                         entry_price=entry_price,
                         exit_price=exit_price,
                         entry_time=entry_time,
-                        exit_time=datetime.datetime.now(datetime.timezone.utc), # Use current time as simulated exit time
+                        exit_time=now_utc, # Use current time as simulated exit time
                         pnl=pnl,
                         risk_fraction=risk_fraction,
                         atr=atr,
@@ -367,9 +367,7 @@ class Execution:
         closed_trades_list.sort(key=lambda trade: trade.exit_time)
         return closed_trades_list
 
-    def trade(self, symbol: str, direction: str, lots: float, price: float, sl: float, tp: float, equity: float, pip_size: float, pip_value: float, X: pd.DataFrame | None = None, atr: float | None = None, auc_score: float | None = 0.5, total_open_risk: float = 0.0, atr_idx: int = -1, min_prob_long_idx: int = -1, min_prob_short_idx: int = -1) -> OrderResult:
-
-
+    def trade(self, symbol: str, direction: str, lots: float, price: float, sl: float, tp: float, equity: float, pip_size: float, pip_value: float, now_utc: datetime.datetime, X: pd.DataFrame | None = None, atr: float | None = None, auc_score: float | None = 0.5, total_open_risk: float = 0.0, atr_idx: int = -1, min_prob_long_idx: int = -1, min_prob_short_idx: int = -1) -> OrderResult:
         type_map = {"long": mt5.ORDER_TYPE_BUY, "short": mt5.ORDER_TYPE_SELL}
         tick = mt5.symbol_info_tick(symbol)
         deviation_ticks = (float(tick.ask) - float(tick.bid)) if hasattr(tick, "ask") and hasattr(tick, "bid") else 0.0
@@ -392,18 +390,13 @@ class Execution:
 
         if self.dry_run:
             simulated_ticket = int(time.time() * 1000000) # Unique enough for simulation
-            logger.info(f"[DRY-RUN][{symbol}][{datetime.datetime.fromtimestamp(time.time(), tz=datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S%z')}] Opened {direction} position at {price:.5f}. Lots: {lots:.2f}, SL: {sl:.5f}, TP: {tp:.5f}, AUC: {auc_score:.4f}")
+            logger.info(f"[DRY-RUN][{symbol}][{now_utc.strftime('%Y-%m-%d %H:%M:%S%z')}] Opened {direction} position at {price:.5f}. Lots: {lots:.2f}, SL: {sl:.5f}, TP: {tp:.5f}, AUC: {auc_score:.4f}")
             if self.notifier: self.notifier.send_message(f"[DRY-RUN] Prepared {direction} for {symbol}: lots={lots}, SL={sl}, TP={tp}", level="INFO")
 
             # Store comprehensive details for later SimPosition reconstruction in dry-run
             self.risk.open_positions_cache[simulated_ticket] = {
                 "risk": float(equity * self.risk._get_dynamic_value(self.risk.risk_cfg.dynamic_risk, auc_score, getattr(self.risk.risk_cfg, "risk_per_trade", 0.005))), # Store the dollar amount at risk
-                "ticket": simulated_ticket,
-                "symbol": symbol,
-                "entry_price": price,
-                "direction": direction,
-                "lots": float(lots),
-                "entry_time": datetime.datetime.fromtimestamp(time.time(), tz=datetime.timezone.utc),
+                "entry_time": now_utc,
                 "atr": atr,
                 "entry_auc": auc_score,
                 "risk_fraction": self.risk._get_dynamic_value(self.risk.risk_cfg.dynamic_risk, auc_score, getattr(self.risk.risk_cfg, "risk_per_trade", 0.005)),
@@ -443,7 +436,7 @@ class Execution:
         
         position_id = deals[0].position_id
 
-        logger.info(f"[{symbol}][{datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S%z')}] Opened {direction} position at {price:.5f}. Lots: {lots:.2f}, SL: {sl:.5f}, TP: {tp:.5f}, AUC: {auc_score:.4f}")
+        logger.info(f"[{symbol}][{now_utc.strftime('%Y-%m-%d %H:%M:%S%z')}] Opened {direction} position at {price:.5f}. Lots: {lots:.2f}, SL: {sl:.5f}, TP: {tp:.5f}, AUC: {auc_score:.4f}")
         if self.notifier: self.notifier.send_message(f"<b>TRADE EXECUTED:</b> {direction} {lots} lots of {symbol} at {price:.5f}. SL:{sl:.5f} TP:{tp:.5f}", level="INFO")
 
         # compute effective risk and store in cache keyed by the reliable position_id
@@ -461,7 +454,7 @@ class Execution:
                 "entry_price": price,
                 "direction": direction,
                 "lots": float(lots),
-                "entry_time": datetime.datetime.fromtimestamp(time.time(), tz=datetime.timezone.utc), # Use current UTC time
+                "entry_time": now_utc, # Use current UTC time
                 "atr": atr, # ATR at the time of entry
                 "entry_auc": auc_score, # AUC at the time of entry
                 "risk_fraction": risk_per_trade, # Store the risk_per_trade as risk_fraction

@@ -215,11 +215,12 @@ class HybridBacktester:
         risk_mgr = self.risk_manager
 
         logger.info(f"Processing {len(data)} bars for {sym}...")
-        for i in range(20, len(data)):
-            bar_time = data.index[i]
-            current_row = data.iloc[i]
+        # Iterate over the aligned features (X), which do not include the forming bar
+        for i in range(20, len(X)):
+            bar_time = X.index[i] # Use X's index for bar_time
+            current_row = data.loc[[bar_time]].iloc[0] # Get the corresponding row from the original data using X's index
             self.bar_counters[sym] += 1
-            last_features = X.iloc[[i]]
+            last_features = X.iloc[[i]] # X is already aligned, so X.iloc[[i]] is correct
             atr = X["atr_14"].iloc[i]
 
             # Manage existing positions first
@@ -276,7 +277,7 @@ class HybridBacktester:
                 "vol": atr,
                 "equity": self.equity,
                 "peak_equity": self.risk_manager.equity_peak,
-                "ensemble_auc": ens_long.ensemble_cv_auc_, # Pass current model confidence
+                "ensemble_auc": (ens_long.ensemble_cv_auc_ + ens_short.ensemble_cv_auc_) / 2, # Pass current model confidence
                 "adx": float(last_features["adx"].iloc[0]) if "adx" in last_features.columns else 0.0,
                 "macd_diff": float(last_features["macd_diff"].iloc[0]) if "macd_diff" in last_features.columns else 0.0,
                 "volatility_10": float(last_features["volatility_10"].iloc[0]) if "volatility_10" in last_features.columns else 0.0,

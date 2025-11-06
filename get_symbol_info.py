@@ -26,7 +26,7 @@ def get_symbol_info():
         logger.error("Failed to connect to MT5 using the project's client. Please check credentials and MT5 terminal.")
         return
 
-    symbol = "GBPUSDm#"
+    symbol = "AUDUSDm#"
     
     # Get symbol info
     info = mt5.symbol_info(symbol)

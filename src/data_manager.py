@@ -177,13 +177,16 @@ class DataManager:
                 logger.warning(f"[{symbol}] No live Inter-Market data loaded for symbol {im_sym}. Disabling for this tick.")
                 inter_market_df = None
 
-        # 3. Build features and labels with all data
-        X, y = self._build_features_and_labels(data, feature_cfg, symbol, min_pct_change, mta_df=mta_df, inter_market_df=inter_market_df)
+        # 3. Build features. For live data, labels are not needed.
+        X = build_features(data.copy(), feature_cfg, self.cfg, symbol=symbol, mta_df=mta_df, inter_market_df=inter_market_df)
+        
+        # Create an empty dataframe for y to match function signature, it's not used in live trading.
+        y = pd.DataFrame()
 
-        # 4. Align all dataframes by index
-        common_idx = X.index.intersection(y.index)
+        # 4. Align data with X. This handles any rows dropped from the start by feature engineering.
+        # This ensures that we don't truncate the most recent data needed for live decisions.
+        common_idx = data.index.intersection(X.index)
         X = X.loc[common_idx]
-        y = y.loc[common_idx]
         data = data.loc[common_idx]
 
         return data, X, y

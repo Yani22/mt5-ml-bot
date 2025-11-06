@@ -6,7 +6,7 @@ magic_number: 424242 # Unique ID for this bot's trades
 data_source: mt5 # "mt5" or "csv". Automatically switches to csv on non-windows
 
 # --- Optuna Tuning Specifics ---
-optuna_n_trials: 1  # 150
+optuna_n_trials: 100  # 150
 
 # --- Backtesting Settings ---
 backtesting:
@@ -39,7 +39,7 @@ ensemble_training:
 
 # --- Symbols & timeframe ---
 # historical_data symbols for .csv needed: M5-EURUSD#, H1-EURUSD#, and M5-USDX-DEC25
-symbols: ["GBPUSDm#", "EURUSDm#"] #, "GBPUSDm#"
+symbols: ["EURUSDm#", "GBPUSDm#"] #, "GBPUSDm#"
 # symbols: ["EURUSDm#", "GOLDm#", "GBPUSDm#", "USDJPYm#", "AUDUSDm#"] 
 timeframe: "M5"            # One of: M1, M5, M15, M30, H1, H4
 history_bars: 45000          #6048 18000 36000 45000 #12000-for-tuner.py #5000-for-backtesting
@@ -56,17 +56,17 @@ features:
 context_features:
   mta:
     enabled: true
-    timeframe: "H1"
-    ema_period: 50
-    rsi_period: 14
+    timeframe: "H1"   #M5 H1
+    ema_period: 50    #600  50
+    rsi_period: 14    #600  14
   inter_market:
     enabled: false
     symbol: "USDX-DEC25" # Make sure this symbol is available in your data source
     roc_lags: [5, 21, 63]
   price_action:
     enabled: true
-    home_base_ma_period: 200
-    swing_lookback: 50
+    home_base_ma_period: 200  #1000 200
+    swing_lookback: 50        #250  50
 
 # --- Base learners / models ---
 # For live bot: after tuning, Optuna best parameters overwrite these
@@ -141,8 +141,8 @@ risk:
   risk_per_trade: 0.02
   dynamic_risk:
     enabled: true
-    base_risk: 0.01      #0.02 Risk 2% of equity on the least confident trades 0.01
-    max_risk: 0.015         #0.035 Risk up to 3% of equity on the most confident trades  0.015
+    base_risk: 0.02      #0.02 Risk 2% of equity on the least confident trades 0.01
+    max_risk: 0.035         #0.035 Risk up to 3% of equity on the most confident trades  0.015
     auc_floor: 0.55        # The AUC score that corresponds to base_risk
     auc_ceiling: 0.65      # The AUC score that corresponds to max_risk
 
@@ -154,7 +154,7 @@ risk:
     auc_ceiling: 0.65      # Same AUC ceiling as risk
 
   max_positions: 3               # Max concurrent positions
-  max_portfolio_risk: 0.03       #0.05 5% Total equity risk cap  0.03
+  max_portfolio_risk: 0.05       #0.05 5% Total equity risk cap  0.03
   atr_multiplier_sl: 1.0
   atr_multiplier_tp: 2.0
   breakeven_at_1R: true
@@ -200,7 +200,7 @@ symbol_overrides:
     # Instrument-specific values
     contract_size: 1000.0
     pip_size: 1e-05
-    retrain_time_utc: "02:00" # Staggered retraining time
+    retrain_time_utc: "23:55" # Staggered retraining time
     # --- Strategy & Risk Overrides ---
     min_prob_long: 0.55 #0.65-max #0.51-0.55|low #0.56-0.65|high
     min_prob_short: 0.55  #0.65-max #0.51-0.55|low #0.56-0.65|high
@@ -217,7 +217,7 @@ symbol_overrides:
     # Instrument-specific values
     contract_size: 1000.0
     pip_size: 1e-05
-    retrain_time_utc: "03:00" # Staggered retraining time
+    retrain_time_utc: "23:55" # Staggered retraining time
     # --- Strategy & Risk Overrides ---
     min_prob_long: 0.55 #0.65-max #0.51-0.55|low #0.56-0.65|high
     min_prob_short: 0.55  #0.65-max #0.51-0.55|low #0.56-0.65|high
@@ -230,4 +230,19 @@ symbol_overrides:
     atr_grid: [1.0, 1.5, 2.0, 2.5]
     min_prob_grid_long: [0.53, 0.55, 0.57, 0.60, 0.63]
     min_prob_grid_short: [0.53, 0.55, 0.57, 0.60, 0.63]
-
+  "AUDUSDm#":
+    contract_size: 1000.0
+    pip_size: 1e-05
+    retrain_time_utc: "23:55" # Staggered retraining time
+    # --- Strategy & Risk Overrides ---
+    min_prob_long: 0.55 #0.65-max #0.51-0.55|low #0.56-0.65|high
+    min_prob_short: 0.55  #0.65-max #0.51-0.55|low #0.56-0.65|high
+    atr_multiplier_sl: 1.0
+    atr_multiplier_tp: 2.0
+    trailing_atr_mult: 1.0
+    min_ensemble_auc: 0.55
+    min_auc_improvement: 0.005
+    # --- Thompson Sampling Grid Overrides ---
+    atr_grid: [1.0, 1.5, 2.0, 2.5]
+    min_prob_grid_long: [0.53, 0.55, 0.57, 0.60, 0.63]
+    min_prob_grid_short: [0.53, 0.55, 0.57, 0.60, 0.63]

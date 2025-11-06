@@ -170,7 +170,7 @@ class RiskManager:
             return True
         return False
 
-    def _count_consecutive_losses(self, lookback_hours: int = 48) -> int:
+    def _count_consecutive_losses(self, now: datetime.datetime, lookback_hours: int = 48) -> int:
         if self.cfg.data_source != "mt5":
             return 0 # Not applicable for CSV backtesting
         import MetaTrader5 as mt5  # type: ignore
@@ -179,7 +179,6 @@ class RiskManager:
         of most recent consecutive losing closed trades (profit < 0).
         """
         try:
-            now = datetime.datetime.now(timezone.utc)
             since = now - timedelta(hours=lookback_hours)
             # fetch recent deals
             deals = mt5.history_deals_get(since, now)
@@ -242,19 +241,19 @@ class RiskManager:
         # 1) Watchdog checks (if enabled)
         if self.watchdog_cfg.enabled:
             # Cooldown check (highest priority)
-            if self.cooldown_active():
+            if self.cooldown_active(now=now_local):
                 logger.info(f"Trading blocked: watchdog cooldown active until {self.cooldown_until.isoformat()}")
                 return False
 
             # Consecutive losses check
             max_losses = getattr(self.watchdog_cfg, "max_consecutive_losses", None)
             if max_losses is not None and max_losses > 0:
-                lost = self._count_consecutive_losses()
+                lost = self._count_consecutive_losses(now=now_local)
                 if lost >= max_losses:
                     message = f"<b>RISK ALERT:</b> Watchdog: consecutive losses {lost} >= threshold {max_losses}. Triggering cooldown."
                     logger.warning(message)
                     if self.notifier: self.notifier.send_message(message, level="WARNING")
-                    self._trigger_cooldown()
+                    self._trigger_cooldown(now=now_local)
                     return False
 
         # 2) Drawdown check (based on cfg.block_on_drawdown)
