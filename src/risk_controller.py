@@ -238,6 +238,9 @@ class RiskController:
         self.last_daily_retrain_date: Dict[str, Optional[datetime.date]] = {sym: None for sym in cfg.symbols}
         self.bar_counters: Dict[str, int] = {sym: 0 for sym in cfg.symbols}
 
+    def update_last_daily_retrain_date(self, symbol: str, date: datetime.date):
+        self.last_daily_retrain_date[symbol] = date
+
     def _calculate_rule_scale(self, symbol: str, context: Dict[str, Any]) -> float:
         """
         Computes a rule-based scaling factor (between 0 and 1, inclusive) based on
@@ -351,8 +354,8 @@ class RiskController:
                 volatility_10 * 100.0, # Scale volatility
                 dist_from_ema_200 * 100.0, # Scale distance
             ], dtype=float)
-            # ensure dimension matches context_dim; if not, pad/truncate
-            ctx_dim = int(getattr(self.cfg.thompson_sampling, "context_dim", len(x)))
+            # ensure dimension matches bandit's dimension; if not, pad/truncate
+            ctx_dim = sym_state.contextual_bandit.dim
             if len(x) < ctx_dim:
                 x = np.concatenate([x, np.zeros(ctx_dim - len(x))])
             elif len(x) > ctx_dim:
@@ -503,7 +506,7 @@ class RiskController:
                     volatility_10 * 100.0, # Scale volatility
                     dist_from_ema_200 * 100.0, # Scale distance
                 ], dtype=float)
-                ctx_dim = int(getattr(ts_cfg, "context_dim", len(x)))
+                ctx_dim = sym_state.contextual_bandit.dim
                 if len(x) < ctx_dim:
                     x = np.concatenate([x, np.zeros(ctx_dim - len(x))])
                 elif len(x) > ctx_dim:
@@ -609,7 +612,7 @@ class RiskController:
             }
             with open(state_path, 'w') as f:
                 json.dump(state, f, indent=4, default=_json_serial)
-            logger.info(f"RiskController state saved to {state_path}")
+            logger.debug(f"RiskController state saved to {state_path}")
         except Exception as e:
             logger.error(f"Failed to save RiskController state: {e}")
             if self.notifier: self.notifier.send_message(f"<b>ERROR:</b> Failed to save RiskController state: {e}", level="ERROR")

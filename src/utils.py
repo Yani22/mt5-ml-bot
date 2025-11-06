@@ -53,7 +53,7 @@ def load_optuna_params(symbol: str, cfg: Cfg) -> dict | None:
     if "min_pct_change" not in loaded_params["features"]:
         loaded_params["features"]["min_pct_change"] = cfg.features.min_pct_change
 
-    logger.info(f"[{symbol}] Loaded Optuna best params from {file_path}")
+    logger.debug(f"[{symbol}] Loaded Optuna best params from {file_path}")
     return loaded_params
 
 def get_training_data(cfg: Cfg, symbol: str, feature_cfg: FeatureCfg, count: int | None = None, source: str = "csv", load_all_data: bool = False, build_dynamic: bool = True, min_pct_change: float = 0.0, mta_df: pd.DataFrame | None = None, inter_market_df: pd.DataFrame | None = None, return_long_short_labels: bool = False):
@@ -161,7 +161,7 @@ def load_ensemble(cfg: Cfg, symbol: str, model_type: str, model_params: dict | N
         model_params = load_optuna_params(symbol, cfg)
 
     if os.path.isdir(model_dir_path):
-        logger.info(f"[{symbol}] Loading saved ensemble from directory {model_dir_path}")
+        logger.debug(f"[{symbol}] Loading saved ensemble from directory {model_dir_path}")
         try:
             # Use the new class method to load
             return Ensemble.load(model_dir_path, cfg, model_params=model_params)
@@ -221,10 +221,10 @@ def safe_retrain_ensemble(cfg: Cfg, symbol: str, ens_old: Ensemble, X_train: pd.
         if old_auc is None or (new_auc - old_auc) >= cfg.risk.min_auc_improvement:
             if not dry_run:
                 save_ensemble(ens_new, symbol, model_type)
-            logger.info(f"[{symbol}] Retrain accepted. old_auc={old_auc} new_auc={new_auc}")
+            logger.info(f"[{symbol}] {model_type.upper()} Retrain accepted. old_auc={old_auc} new_auc={new_auc}")
             return ens_new
         else:
-            logger.info(f"[{symbol}] Retrain NOT accepted. improvement {(new_auc - old_auc):.4f} < {cfg.risk.min_auc_improvement}")
+            logger.info(f"[{symbol}] {model_type.upper()} Retrain NOT accepted. improvement {(new_auc - old_auc):.4f} < {cfg.risk.min_auc_improvement}")
             return ens_old
     except Exception as e:
         logger.exception(f"[{symbol}] Retraining failed: {e}")
@@ -294,15 +294,37 @@ def timeframe_to_mt5_timeframe(timeframe_str: str):
     }
     return timeframe_map.get(timeframe_str, mt5.TIMEFRAME_M1)
 
-def timeframe_to_seconds(timeframe: str) -> int:
-    """Converts a timeframe string (e.g., 'M5') to seconds."""
-    if timeframe.startswith('M'):
-        return int(timeframe[1:]) * 60
-    elif timeframe.startswith('H'):
-        return int(timeframe[1:]) * 60 * 60
-    elif timeframe.startswith('D'):
-        return int(timeframe[1:]) * 24 * 60 * 60
-    return 60 # Default to 1 minute
+def timeframe_to_seconds(timeframe: int | str) -> int:
+    """Converts a MetaTrader 5 timeframe constant (e.g., mt5.TIMEFRAME_M5) or string ('M5') to seconds."""
+    import MetaTrader5 as mt5
+    if isinstance(timeframe, int):
+        # Handle MT5 integer constants
+        if timeframe == mt5.TIMEFRAME_M1: return 60
+        if timeframe == mt5.TIMEFRAME_M5: return 300
+        if timeframe == mt5.TIMEFRAME_M15: return 900
+        if timeframe == mt5.TIMEFRAME_M30: return 1800
+        if timeframe == mt5.TIMEFRAME_H1: return 3600
+        if timeframe == mt5.TIMEFRAME_H4: return 14400
+        if timeframe == mt5.TIMEFRAME_D1: return 86400
+        if timeframe == mt5.TIMEFRAME_W1: return 604800
+        if timeframe == mt5.TIMEFRAME_MN1: return 2592000 # Approximate for 30 days
+        raise ValueError(f"Unsupported MT5 integer timeframe: {timeframe}")
+    elif isinstance(timeframe, str):
+        if timeframe.startswith('M'):
+            minutes = int(timeframe[1:])
+            return minutes * 60
+        elif timeframe.startswith('H'):
+            hours = int(timeframe[1:])
+            return hours * 60 * 60
+        elif timeframe.startswith('D'):
+            return 24 * 60 * 60 # D1
+        elif timeframe.startswith('W'):
+            return 7 * 24 * 60 * 60 # W1
+        elif timeframe.startswith('MN'):
+            return 30 * 24 * 60 * 60 # MN1 (approx)
+        raise ValueError(f"Unsupported string timeframe: {timeframe}")
+    else:
+        raise TypeError(f"timeframe must be int or str, got {type(timeframe)}")
 
 def ensure_min_grid_size(thresholds: list[float], best_thr: float, min_size: int = 5, spread: float = 0.02) -> list[float]:
     """Ensures a list of thresholds has at least min_size elements, expanding around best_thr if needed."""

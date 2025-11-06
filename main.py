@@ -26,7 +26,8 @@ import yaml
 import numpy as np
 from typing import List
 
-max_wait_multiplier = 2.0
+import threading
+from src.symbol_processor import SymbolProcessor
 
 
 # --- Initial Setup ---
@@ -50,67 +51,6 @@ def _initialize_metrics_csv():
 
 # Call initialization at startup
 _initialize_metrics_csv()
-
-def _expected_next_bar_time(last_bar_time: datetime.datetime, timeframe_seconds: int) -> datetime.datetime:
-    """Return expected next closed-bar timestamp (timezone-aware)"""
-    return last_bar_time + datetime.timedelta(seconds=timeframe_seconds)
-
-def _compute_sleep_until_next_pre_wakeup(mt5c, last_bar_time, timeframe_sec, wake_margin):
-    """
-    Compute number of seconds to sleep until we should wake up *before* the earliest next expected closed bar.
-    Returns a float >= 0 (seconds). If no valid last_bar_time entries, returns a small default (1.0).
-    """
-    now = mt5c.now_utc()
-    sleeps = []
-    for sym, last_bt in last_bar_time.items():
-        if last_bt is None:
-            continue
-        try:
-            next_expected = _expected_next_bar_time(last_bt, timeframe_sec)
-            seconds_until_next = (next_expected - now).total_seconds() - wake_margin
-            # If already past next_expected - wake_margin, we should wake immediately (0)
-            sleeps.append(max(0.0, seconds_until_next))
-        except Exception:
-            continue
-
-    if not sleeps:
-        # No known last bar times — don't sleep too long
-        return 1.0
-    # Wake before the earliest next-bar across symbols
-    return max(0.0, min(sleeps))
-
-def wait_for_new_closed_bar(mt5c, data_manager, cfg, last_bar_time, wake_margin, poll_interval):
-    """Waits until a new bar is closed for all symbols."""
-    timeframe_sec = timeframe_to_seconds(cfg.timeframe)
-    coarse_sleep = _compute_sleep_until_next_pre_wakeup(mt5c, last_bar_time, timeframe_sec, wake_margin=wake_margin)
-
-    # Cap coarse sleep to not exceed one timeframe (safety)
-    coarse_sleep = min(coarse_sleep, timeframe_sec)
-
-    if coarse_sleep > 0.05:
-        logger.info(f"Pre-wakeup sleep: {coarse_sleep:.2f}s (waking {wake_margin}s before expected bar)")
-        time.sleep(coarse_sleep)
-
-    # After waking, poll repeatedly until we detect a new closed bar timestamp change or timeout
-    now = mt5c.now_utc()
-    # Allow at most (timeframe * max_wait_multiplier) seconds for the new bar to appear (safety)
-    timeout_seconds = timeframe_sec * max_wait_multiplier
-    deadline = now + datetime.timedelta(seconds=timeout_seconds)
-
-    # Start polling loop. We don't fetch data here (expensive / duplicate) — caller does fetch per-symbol.
-    # So we just yield control back to the main loop which will call data_manager.fetch_live() per symbol again soon.
-    # To keep CPU reasonable, sleep in short increments until deadline.
-    while mt5c.now_utc() < deadline:
-        # small sleep to avoid busy spin; caller will soon fetch data again
-        time.sleep(poll_interval)
-        # exit loop quickly; main loop will call fetch and detect bar changes
-        # (We don't break here because we don't have fetch access; this just keeps us awake in small steps)
-        # The main loop will run immediately after this function returns.
-        return
-    # Timeout reached; return to main loop anyway so it can attempt fetch / recover.
-    logger.warning("wait_for_new_closed_bar: timeout waiting for new closed bar; resuming per-symbol processing.")
-    return
-
 
 def log_metrics_to_csv(data: Dict[str, Any]):
     with open(METRICS_CSV_FILE, 'a', newline='') as f:
@@ -225,6 +165,62 @@ def _handle_model_acceptance(sym, cfg, ens_per_symbol_long, ens_per_symbol_short
     except Exception as e:
         logger.exception(f"[{sym}] Error during model acceptance: {e}")
 
+def _check_and_trigger_retraining(cfg: Cfg, sym: str, feature_cfg_per_symbol: Dict[str, FeatureCfg], dry_run: bool, notifier: TelegramNotifier, optuna_params_per_symbol: Dict[str, Any], retraining_processes: Dict[str, Process], retraining_status: Dict[str, bool], last_retrain_date: Dict[str, datetime.date], risk_controller: RiskController):
+    """
+    Checks if retraining should be triggered for a given symbol based on retrain_time_utc.
+    """
+    current_utc_datetime = datetime.datetime.now(datetime.timezone.utc)
+    current_utc_time = current_utc_datetime.time()
+    current_utc_date = current_utc_datetime.date()
+
+    retrain_time_value = cfg.get_symbol_value(sym, 'retrain_time_utc', None)
+    retrain_times = [retrain_time_value] if isinstance(retrain_time_value, str) else retrain_time_value
+    if not retrain_times:
+        # If retrain_time_utc is not configured, fall back to retrain_every_bars logic if needed
+        # For now, we'll just return if no specific time is set.
+        return
+
+    for retrain_time_str in retrain_times:
+        try:
+            retrain_hour, retrain_minute = map(int, retrain_time_str.split(':'))
+            retrain_datetime = datetime.datetime.combine(current_utc_date, datetime.time(retrain_hour, retrain_minute), tzinfo=datetime.timezone.utc)
+
+            # Check if current time is past the retrain time and it hasn't been retrained today
+            if current_utc_datetime >= retrain_datetime and last_retrain_date[sym] != current_utc_date:
+                if not retraining_status[sym]:
+                    if cfg.fetch.retrain_in_background:
+                        logger.info(f"[{sym}] Triggering background retraining at {current_utc_datetime.time().strftime('%H:%M')} UTC...")
+                        notifier.send_message(f"[{sym}] Triggering background retraining.", level="INFO")
+                    else:
+                        logger.info(f"[{sym}] Triggering foreground retraining at {current_utc_datetime.time().strftime('%H:%M')} UTC...")
+                        notifier.send_message(f"[{sym}] Triggering foreground retraining.", level="INFO")
+
+                    if cfg.fetch.retrain_in_background:
+                        logger.info(f"[{sym}] Starting background retraining process...")
+                        process = Process(
+                            target=run_retraining_in_background,
+                            args=(cfg, sym, feature_cfg_per_symbol[sym], dry_run, notifier, optuna_params_per_symbol)
+                        )
+                        process.start()
+                        retraining_processes[sym] = process
+                        retraining_status[sym] = True
+                    else:
+                        logger.info(f"[{sym}] Running foreground retraining (blocking)...")
+                        run_retraining_in_background(cfg, sym, feature_cfg_per_symbol[sym], dry_run, notifier, optuna_params_per_symbol)
+                        logger.info(f"[{sym}] Foreground retraining finished.")
+                        # For foreground retraining, it's immediately done, so no process to track
+                        retraining_status[sym] = False # Mark as done
+                        # No need to add to retraining_processes as it's not a background process
+                    last_retrain_date[sym] = current_utc_date  # Mark as retrained for today
+                    risk_controller.update_last_daily_retrain_date(sym, current_utc_date) # Update RiskController's internal state
+                else:
+                    logger.info(f"[{sym}] Retraining already in progress for today. Skipping.")
+                return # Only trigger once per day per symbol
+        except ValueError:
+            logger.error(f"[{sym}] Invalid retrain_time_utc format: {retrain_time_str}. Expected HH:MM.")
+        except Exception as e:
+            logger.exception(f"[{sym}] Error checking or triggering retraining: {e}")
+
 def run(dry_run: bool = False):
     """ Production-ready main loop for hybrid adaptive MT5 ML bot. """
     RECONNECTION_RETRY_SECONDS = 60
@@ -282,7 +278,7 @@ def run(dry_run: bool = False):
                     time.sleep(RECONNECTION_RETRY_SECONDS)
                     continue  # Try connecting again
 
-                logger.info("MT5 connection established.")
+                logger.debug("MT5 connection established.")
                 notifier.send_message("MT5 connection established.", level="INFO")
 
                 # Get initial equity from MT5 account info
@@ -349,329 +345,96 @@ def run(dry_run: bool = False):
                 retraining_status = {sym: False for sym in cfg.symbols}  # Track if retraining is active
                 trading_blocked_by_low_new_model_auc = {sym: False for sym in cfg.symbols}  # Track if trading is blocked due to low new model AUC
                 last_diagnostics_log_time = 0.0  # For throttling diagnostics logging
-                last_retrain_date = {sym: None for sym in cfg.symbols}  # Track last retraining date per symbol
+                # Initialize last_retrain_date from RiskController's loaded state
+                last_retrain_date = risk_controller.last_daily_retrain_date
 
-                # Inner loop for trading operations
+                # --- Start Symbol Processors ---
+                symbol_threads = []
+                for sym in cfg.symbols:
+                    # Each MT5Client instance needs to be independent for thread safety
+                    # Initialize a new MT5Client for each SymbolProcessor
+                    mt5_client_per_symbol = MT5Client(
+                        login=os.getenv("MT5_LOGIN"),
+                        password=os.getenv("MT5_PASSWORD"),
+                        server=os.getenv("MT5_SERVER"),
+                        path=os.getenv("MT5_PATH"),
+                    )
+                    if not mt5_client_per_symbol.connect():
+                        logger.error(f"Failed to connect MT5 client for symbol {sym}. This symbol will not be processed.")
+                        continue
+
+                    processor = SymbolProcessor(cfg, sym, mt5_client_per_symbol, risk_controller, live_monitor, exe, dry_run)
+                    thread = threading.Thread(target=processor.run_loop, daemon=True)
+                    symbol_threads.append({"symbol": sym, "thread": thread, "processor": processor, "mt5_client": mt5_client_per_symbol})
+                    thread.start()
+                    logger.info(f"Started processing thread for symbol: {sym}")
+
+                # Main thread now monitors symbol threads and performs global tasks
                 while True:
-                    current_loop_time = time.time()  # Capture current time for throttling
-                    now_utc = mt5c.now_utc()
+                    # Periodically save global states and check thread health
+                    live_monitor.save_state()
+                    risk_controller.save_state(risk.open_positions_cache)
 
-                    # refresh account info once per loop
-                    account_info = mt5c.account_info()
-                    equity = getattr(account_info, "equity", 0.0) if account_info else 0.0
-                    live_monitor.update_equity(now_utc, equity)
-                    balance = getattr(account_info, "balance", 0.0) if account_info else 0.0
-                    drawdown = 0.0
-                    try:
-                        drawdown = 1 - (equity / balance) if balance else 0.0
-                    except Exception:
-                        drawdown = 0.0
+                    for i, symbol_data in enumerate(symbol_threads):
+                        if not symbol_data["thread"].is_alive():
+                            logger.error(f"Thread for {symbol_data['symbol']} died unexpectedly. Attempting to restart...")
+                            # For simplicity, we'll log and exit the main loop for now.
+                            # A more robust solution would re-initialize the processor and restart the thread.
+                            notifier.send_message(f"<b>CRITICAL:</b> Thread for {symbol_data['symbol']} died. Shutting down bot.", level="CRITICAL")
+                            raise RuntimeError(f"Thread for {symbol_data['symbol']} died.")
 
-                    # --- Process closed trades first so bandit gets rewards before opening new trades ---
-                    latest_prices = {}
+                    # --- Retraining Logic ---
                     for sym in cfg.symbols:
-                        tick_info = mt5c.symbol_info_tick(sym)
-                        if tick_info is not None:
-                            latest_prices[sym] = tick_info.ask
-                        else:
-                            logger.warning(f"[{sym}] Could not get tick info. Skipping price update for this symbol.")
-                    closed_trades_this_cycle = exe.check_closed_trades(latest_prices, now_utc)
+                        # Check and trigger retraining if conditions are met
+                        _check_and_trigger_retraining(
+                            cfg, sym, feature_cfg_per_symbol, dry_run, notifier,
+                            optuna_params_per_symbol, retraining_processes,
+                            retraining_status, last_retrain_date, risk_controller
+                        )
 
-                    # --- FIX: Reconstruct sequential equity to provide accurate reward normalization ---
-                    # The `equity` from account_info is after all trades in the cycle have closed.
-                    # We work backwards to find the equity state before this cycle's trades.
-                    if closed_trades_this_cycle:
-                        # Assuming trades are sorted by close time from check_closed_trades()
-                        total_profit_this_cycle = sum(t.pnl for t in closed_trades_this_cycle)
-                        equity_before_cycle = equity - total_profit_this_cycle
+                        # Check if a retraining process has finished
+                        if retraining_status[sym] and not retraining_processes[sym].is_alive():
+                            logger.info(f"[{sym}] Background retraining process finished.")
+                            _handle_model_acceptance(
+                                sym, cfg, ens_per_symbol_long, ens_per_symbol_short,
+                                active_model_auc, live_monitor, notifier, optuna_params_per_symbol
+                            )
+                            retraining_status[sym] = False
+                            del retraining_processes[sym] # Clean up the process entry
 
-                        running_equity = equity_before_cycle
-                        for trade in closed_trades_this_cycle:
-                            try:
-                                # Calculate the exact equity at the moment this trade closed
-                                exit_equity = running_equity + trade.pnl
+                    # Sleep for a short interval before checking again
+                    time.sleep(5) # Check every 5 seconds
 
-                                # Set exit_equity on the trade object so RiskController can compute accurate reward
-                                # This assumes the trade object is mutable and the controller knows to use this attribute.
-                                trade.exit_equity = exit_equity
-
-                                live_monitor.add_closed_trade(trade)
-                                risk_controller.update_after_trade(trade.symbol, trade)
-
-                                # For logging, calculate the accurate normalized reward
-                                normalized_reward = trade.pnl / max(1.0, exit_equity)
-                                trade_auc = active_model_auc.get(trade.symbol, 0.5)
-                                log_metrics_to_csv({
-                                    "timestamp": now_utc.isoformat(),
-                                    "symbol": trade.symbol,
-                                    "event_type": "trade_reward",
-                                    "atr_idx": trade.atr_idx,
-                                    "min_prob_long_idx": trade.min_prob_long_idx,
-                                    "min_prob_short_idx": trade.min_prob_short_idx,
-                                    "reward": normalized_reward,
-                                    "equity": exit_equity,  # Log the accurate equity
-                                    "peak_equity": risk.equity_peak,
-                                    "drawdown": drawdown,
-                                    "ensemble_auc": trade_auc
-                                })
-
-                                # Update running_equity for the next trade in the sequence
-                                running_equity = exit_equity
-
-                            except Exception:
-                                logger.exception("Error processing closed trade.")
-
-                    # --- Per-symbol processing: fetch, update cache, optionally retrain, then make trade decision for that symbol ---
-                    for sym in cfg.symbols:
-                        try:
-                            # --- Check for finished retraining processes for this symbol ---
-                            if sym in retraining_processes and not retraining_processes[sym].is_alive():
-                                logger.info(f"[{sym}] Background retraining process finished. Joining and reloading models.")
-                                p = retraining_processes[sym]
-                                p.join()
-
-                                if p.exitcode != 0:
-                                    message = f"[{sym}] <b>ERROR:</b> Background retraining process failed with exit code {p.exitcode}. Keeping current models."
-                                    logger.error(message)
-                                    if notifier: notifier.send_message(message, level="ERROR")
-                                else:
-                                    # Call the centralized model acceptance function
-                                    _handle_model_acceptance(sym, cfg, ens_per_symbol_long, ens_per_symbol_short, active_model_auc, live_monitor, notifier, optuna_params_per_symbol)
-
-                                del retraining_processes[sym]
-                                retraining_status[sym] = False
-                                logger.info(f"[{sym}] Model handling complete.")
-
-                            # --- Fetch latest bar data using the centralized DataManager pipeline ---
-                            feature_cfg = feature_cfg_per_symbol[sym]
-                            data, X, y = data_manager.fetch_live(sym, feature_cfg, feature_cfg.min_pct_change)
-                            if data.empty:
-                                continue
-
-                            X_per_symbol[sym] = X
-                            # Use the second to last bar as the latest *closed* bar
-                            # The last bar in `data` is the currently forming bar from MT5
-                            latest_closed_bar_time = data.index[-2]
-                            if last_bar_time[sym] == latest_closed_bar_time:
-                                continue  # skip if no new *closed* bar
-                            last_bar_time[sym] = latest_closed_bar_time
-                            bar_counters[sym] += 1
-                            logger.info(f"[{sym}] New *closed* bar detected at {latest_closed_bar_time}")
-
-                            # --- Live Dashboard (throttled per-symbol) ---
-                            if bar_counters[sym] % cfg.dashboard_every_bars == 0:
-                                print_dashboard(
-                                    cfg,
-                                    risk,
-                                    ens_per_symbol_long.get(sym),  # Use long model for dashboard prob
-                                    X_per_symbol.get(sym),
-                                    sym,
-                                    bar_counters[sym],
-                                    is_first_symbol=(cfg.symbols.index(sym) == 0),
-                                    equity=equity,
-                                    balance=balance
-                                )
-
-                            # Delta append new bars to cache (atomic write)
-                            data_manager.append_new_bars(sym, data)
-
-                            # --- Conditional Retraining Logic ---
-                            should_retrain = False
-                            time_to_retrain_today = False
-                            
-                            # Get symbol-specific or global retrain time
-                            retrain_time_str = cfg.get_symbol_value(sym, 'retrain_time_utc', cfg.fetch.retrain_time_utc)
-
-                            if retrain_time_str:
-                                if last_retrain_date[sym] is None or last_retrain_date[sym] < mt5c.now_utc().date():
-                                    retrain_hour, retrain_minute = map(int, retrain_time_str.split(':'))
-                                    if now_utc.hour > retrain_hour or (now_utc.hour == retrain_hour and now_utc.minute >= retrain_minute):
-                                        time_to_retrain_today = True
-                                        last_retrain_date[sym] = now_utc.date()
-
-                            if time_to_retrain_today:
-                                should_retrain = True
-                            elif not retrain_time_str:  # Fallback to bar count if time-based is disabled for this symbol
-                                if bar_counters[sym] > 0 and bar_counters[sym] % cfg.retrain_every_bars == 0:
-                                    should_retrain = True
-
-                            if should_retrain:
-                                if cfg.fetch.retrain_in_background:
-                                    if sym not in retraining_processes:
-                                        logger.info(f"[{sym}] Triggering background retraining (time-based: {time_to_retrain_today}).")
-                                        if notifier: notifier.send_message(f"[{sym}] Background retraining started.", level="INFO")
-                                        p = Process(target=run_retraining_in_background, args=(cfg, sym, feature_cfg, dry_run, notifier, optuna_params_per_symbol))
-                                        p.start()
-                                        retraining_processes[sym] = p
-                                        retraining_status[sym] = True
-                                    else:
-                                        logger.info(f"[{sym}] Retraining already in progress. Skipping trigger.")
-                                else:
-                                    # Synchronous retraining
-                                    logger.info(f"[{sym}] Starting synchronous retraining. Trading loop will pause.")
-                                    if notifier: notifier.send_message(f"[{sym}] Synchronous retraining started. Bot is paused.", level="INFO")
-
-                                    run_retraining_in_background(cfg, sym, feature_cfg, dry_run, notifier, optuna_params_per_symbol)
-
-                                    logger.info(f"[{sym}] Synchronous retraining finished. Reloading models...")
-                                    _handle_model_acceptance(sym, cfg, ens_per_symbol_long, ens_per_symbol_short, active_model_auc, live_monitor, notifier, optuna_params_per_symbol)
-
-                                    logger.info(f"[{sym}] Models reloaded. Resuming trading loop.")
-                                    if notifier: notifier.send_message(f"[{sym}] Synchronous retraining finished. Resuming operations.", level="INFO")
-
-                            # --- Now handle trading decision for this symbol ---
-                            try:
-                                atr = float(X["atr_14"].iloc[-1]) if (X is not None and not X.empty) else 0.0
-                            except Exception:
-                                atr = 0.0
-
-                            risk.manage_open_positions(sym, atr)
-
-                            # --- Consecutive Loss Watchdog Check ---
-                            if cfg.watchdog.enabled:
-                                max_losses = getattr(cfg.watchdog, "max_consecutive_losses", 0)
-                                if max_losses > 0:
-                                    consecutive_losses = risk_controller.symbol_states[sym].consecutive_losses
-                                    if consecutive_losses >= max_losses:
-                                        if risk.cooldown_until is None:  # Only trigger if not already in cooldown
-                                            logger.warning(f"[{sym}] Watchdog triggered: {consecutive_losses} consecutive losses >= threshold ({max_losses}). Pausing trading.")
-                                            risk._trigger_cooldown(cooldown_hours=getattr(cfg.watchdog, "cooldown_hours", 1))
-                                            if notifier:
-                                                notifier.send_message(f"<b>RISK ALERT:</b> [{sym}] Watchdog triggered due to {consecutive_losses} consecutive losses. Trading paused.", level="WARNING")
-
-                            last_features = X.iloc[[-2]] if (X is not None and not X.empty and len(X) >= 2) else pd.DataFrame()
-
-                            # Permission checks (drawdown/session)
-                            if not risk.should_trade(pd.Timestamp(now_utc), drawdown):
-                                logger.info(f"[{sym}] Trade skipped due to drawdown/session rules")
-                                continue
-
-                            # Get ensembles for this symbol
-                            ens_long = ens_per_symbol_long[sym]
-                            ens_short = ens_per_symbol_short[sym]
-
-                            # Get symbol-specific thresholds using the new helper
-                            min_prob_long = cfg.get_symbol_value(sym, 'min_prob_long', 0.55)
-                            min_prob_short = cfg.get_symbol_value(sym, 'min_prob_short', 0.55)
-
-                            # Check ensemble confidence before trading
-                            min_required_auc = cfg.get_symbol_value(sym, 'min_ensemble_auc', 0.55)
-                            if ens_long.ensemble_cv_auc_ < min_required_auc and ens_short.ensemble_cv_auc_ < min_required_auc:
-                                logger.info(f"[{sym}] Trading blocked. Both models below min AUC. Long AUC: {ens_long.ensemble_cv_auc_:.4f}, Short AUC: {ens_short.ensemble_cv_auc_:.4f}")
-                                continue
-
-                            # Get dynamic risk params from RiskController
-                            context = {
-                                "vol": atr,
-                                "equity": equity,
-                                "peak_equity": risk.equity_peak,
-                                "ensemble_auc": (ens_long.ensemble_cv_auc_ + ens_short.ensemble_cv_auc_) / 2,  # Use average AUC for context
-                                "adx": float(last_features["adx"].iloc[0]) if "adx" in last_features.columns else 0.0,
-                                "macd_diff": float(last_features["macd_diff"].iloc[0]) if "macd_diff" in last_features.columns else 0.0,
-                                "volatility_10": float(last_features["volatility_10"].iloc[0]) if "volatility_10" in last_features.columns else 0.0,
-                                "dist_from_ema_200": float(last_features["dist_from_ema_200"].iloc[0]) if "dist_from_ema_200" in last_features.columns else 0.0,
-                            }
-                            dynamic_risk_params = risk_controller.get_params(sym, context)
-
-                            # The risk controller returns the correct thresholds, whether from the bandit or static config
-                            min_prob_long = dynamic_risk_params["min_prob_long"]
-                            min_prob_short = dynamic_risk_params["min_prob_short"]
-
-                            # Decision / trade
-                            if last_features.empty:
-                                logger.info(f"[{sym}] Skipping decision: no features for latest bar")
-                                continue
-
-                            prob_long = ens_long.predict_proba(last_features).iloc[0]
-                            prob_short = ens_short.predict_proba(last_features).iloc[0]
-
-                            direction = None
-                            auc_score = 0.5
-                            if prob_long >= min_prob_long and ens_long.ensemble_cv_auc_ >= min_required_auc:
-                                direction = "long"
-                                auc_score = ens_long.ensemble_cv_auc_
-                            elif prob_short >= min_prob_short and ens_short.ensemble_cv_auc_ >= min_required_auc:
-                                direction = "short"
-                                auc_score = ens_short.ensemble_cv_auc_
-
-                            if direction:
-                                total_open_risk = sum([pos.get('risk', 0.0) for pos in risk.open_positions_cache.values()])
-
-                                symbol_info = mt5c.symbol_info(sym)
-                                if not symbol_info:
-                                    logger.warning(f"[{sym}] Symbol info unavailable. Skipping position size calculation.")
-                                    continue
-
-                                pip_size = getattr(symbol_info, "point", 0.0001)
-                                contract_size = getattr(symbol_info, "trade_contract_size", 100000.0)
-                                pip_value = pip_size * contract_size
-
-                                spread_pips = getattr(cfg.trading_costs.defaults, 'spread_pips', 2.0)
-                                spread_value = spread_pips * pip_size
-
-                                lots, effective_risk = risk.position_size(equity, atr, pip_value, pip_size, auc_score, spread_value, total_open_risk, symbol=sym)
-
-                                if lots <= 0:
-                                    logger.info(f"[{sym}] Trade skipped due to risk limits or position size zero.")
-                                else:
-                                    price = float(mt5c.symbol_info_tick(sym).ask) if direction == "long" else float(mt5c.symbol_info_tick(sym).bid)
-                                    sl, tp = risk.stop_targets(price, atr, direction, auc_score, sym, sl_mult=dynamic_risk_params["atr_multiplier_sl"], tp_mult=dynamic_risk_params["atr_multiplier_tp"])
-
-                                    result = exe.trade(
-                                        symbol=sym,
-                                        direction=direction,
-                                        lots=lots,
-                                        price=price,
-                                        sl=sl,
-                                        tp=tp,
-                                        equity=equity,
-                                        pip_size=pip_size,
-                                        pip_value=pip_value,
-                                        now_utc=now_utc,
-                                        X=last_features,
-                                        atr=atr,
-                                        auc_score=auc_score,
-                                        total_open_risk=total_open_risk,
-                                        atr_idx=dynamic_risk_params["atr_idx"],
-                                        min_prob_long_idx=dynamic_risk_params.get("min_prob_long_idx") if direction == "long" else -1,
-                                        min_prob_short_idx=dynamic_risk_params.get("min_prob_short_idx") if direction == "short" else -1
-                                    )
-
-                                    if result.ok:
-                                        logger.info(f"[{sym}] Trade executed: {result.message}")
-                                    else:
-                                        logger.info(f"[{sym}] Trade skipped: {result.message}")
-                            else:
-                                logger.info(f"[{sym}] No trade signal. Probs: (Long: {prob_long:.3f}, Short: {prob_short:.3f})")
-                        except Exception:
-                            logger.exception(f"Per-symbol loop failed for {sym}")
-
-                        # Wait for the next bar
-                        logger.info(f"Waiting for the next bar...")
-                        mt5c.wait_for_new_bar(sym, timeframe=timeframe_to_mt5_timeframe(cfg.timeframe))
-
-
-
-                    
             except Exception as e:
                 logger.exception(f"MT5 connection lost or critical error in trading loop: {e}. Attempting to reconnect...")
                 notifier.send_message(f"<b>CRITICAL:</b> MT5 connection lost or critical error: {e}. Attempting to reconnect...", level="CRITICAL")
                 try:
-                    mt5c.shutdown()  # Ensure old connection is closed
+                    # Shutdown all symbol-specific MT5 clients before attempting main reconnection
+                    for symbol_data in symbol_threads:
+                        symbol_data["mt5_client"].shutdown()
                 except Exception:
-                    logger.exception("Failed to shutdown mt5 client after error.")
+                    logger.exception("Failed to shutdown symbol MT5 clients after error.")
+                try:
+                    mt5c.shutdown()  # Ensure old main connection is closed
+                except Exception:
+                    logger.exception("Failed to shutdown main mt5 client after error.")
                 time.sleep(RECONNECTION_RETRY_SECONDS)  # Wait before retrying connection
 
     except KeyboardInterrupt:
         logger.info("=== Stopping MT5 ML Bot ===")
         notifier.send_message("MT5 ML Bot stopped by user (KeyboardInterrupt).", level="WARNING")
-        # Optional: clean up any running child processes
-        for sym, p in retraining_processes.items():
-            if p.is_alive():
-                logger.warning(f"[{sym}] Terminating running retraining process due to bot shutdown.")
-                p.terminate()
-                p.join()
+        # Threads are daemon, so they will exit when main thread exits.
+        # No explicit join needed for graceful shutdown in this simple daemon setup.
     finally:
+        logger.info("Shutting down MT5 clients and saving final states...")
+        # Ensure symbol_threads is defined even if an error occurred before its initialization
+        if 'symbol_threads' in locals():
+            for symbol_data in symbol_threads:
+                try:
+                    symbol_data["mt5_client"].shutdown()
+                except Exception:
+                    logger.exception(f"Failed to shutdown MT5 client for {symbol_data['symbol']} cleanly.")
+
         if live_monitor:
             try:
                 live_monitor.save_state()  # Save state on shutdown
@@ -680,12 +443,12 @@ def run(dry_run: bool = False):
 
         if risk_controller:
             try:
-                open_pos_cache_to_save = risk.open_positions_cache if risk else {}
-                mt5c.shutdown()
+                # Use the latest open positions cache from the live monitor, as it's the aggregate from all threads
+                risk_controller.save_state(risk.open_positions_cache) # Save final state
             except Exception:
-                logger.exception("Failed to shutdown mt5 client cleanly.")
-            logger.info("MT5 shutdown complete.")
-            notifier.send_message("MT5 ML Bot shutdown complete.", level="INFO")
+                logger.exception("Failed to save RiskController state on shutdown.")
+        logger.info("MT5 ML Bot shutdown complete.")
+        notifier.send_message("MT5 ML Bot shutdown complete.", level="INFO")
 
 if __name__ == "__main__":
     # Default to dry-run to be safe; change to False when you are ready.
