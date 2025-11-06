@@ -1,6 +1,7 @@
 # src/mt5_client.py
 from __future__ import annotations
 import time
+import datetime
 from typing import Optional
 import MetaTrader5 as mt5  # type: ignore
 from loguru import logger
@@ -113,3 +114,69 @@ class MT5Client:
             return mt5.account_info()
         except Exception:
             return None
+
+    def now_utc(self):
+        """Returns the current UTC time from the MetaTrader 5 terminal."""
+        if not self._connected:
+            return datetime.datetime.now(datetime.timezone.utc)
+
+        try:
+            # We need a symbol to get the server time. Let's use the first one from the market watch.
+            symbols = mt5.symbols_get()
+            if symbols:
+                tick = mt5.symbol_info_tick(symbols[0].name)
+                if tick and tick.time > 0:
+                    return datetime.datetime.fromtimestamp(tick.time, tz=datetime.timezone.utc)
+        except Exception:
+            # Fallback to system time if we can't get server time from a tick
+            pass
+        
+        return datetime.datetime.now(datetime.timezone.utc)
+
+    def symbol_info_tick(self, symbol: str):
+        """Wrapper for mt5.symbol_info_tick()"""
+        if not self._connected: return None
+        try:
+            return mt5.symbol_info_tick(symbol)
+        except Exception:
+            return None
+
+    def symbol_info(self, symbol: str):
+        """Wrapper for mt5.symbol_info()"""
+        if not self._connected: return None
+        try:
+            return mt5.symbol_info(symbol)
+        except Exception:
+            return None
+
+    def history_deals_get(self, *args, **kwargs):
+        """Wrapper for mt5.history_deals_get()"""
+        if not self._connected: return None
+        try:
+            return mt5.history_deals_get(*args, **kwargs)
+        except Exception:
+            return None
+
+    def order_send(self, request: dict):
+        """Wrapper for mt5.order_send()"""
+        if not self._connected: return None
+        try:
+            return mt5.order_send(request)
+        except Exception:
+            return None
+        
+    def positions_get(self, *args, **kwargs):
+        """Wrapper for mt5.positions_get()"""
+        if not self._connected: return None
+        try:
+            return mt5.positions_get(*args, **kwargs)
+        except Exception:
+            return None
+
+    # --- MT5 Constants ---
+    ORDER_TYPE_BUY = mt5.ORDER_TYPE_BUY
+    ORDER_TYPE_SELL = mt5.ORDER_TYPE_SELL
+    TRADE_ACTION_DEAL = mt5.TRADE_ACTION_DEAL
+    ORDER_TIME_GTC = mt5.ORDER_TIME_GTC
+    ORDER_FILLING_IOC = mt5.ORDER_FILLING_IOC
+    TRADE_RETCODE_DONE = mt5.TRADE_RETCODE_DONE

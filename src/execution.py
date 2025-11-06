@@ -4,7 +4,6 @@ import os
 import copy
 import json
 from dataclasses import dataclass
-import MetaTrader5 as mt5  # type: ignore
 from loguru import logger # type: ignore
 import time
 from .ensemble import Ensemble
@@ -113,7 +112,7 @@ class Execution:
 
         try:
             # 1. Get all open positions from MT5 (ground truth)
-            mt5_open_positions = mt5.positions_get() or []
+            mt5_open_positions = self.mt5_client.positions_get() or []
             
             # 2. Identify positions that are on the broker but NOT in our internal cache
             for pos in mt5_open_positions:
@@ -158,9 +157,9 @@ class Execution:
         last = None
         for attempt in range(1, num_retries + 1):
             try:
-                result = mt5.order_send(request)
+                result = self.mt5_client.order_send(request)
                 last = result
-                if result is not None and getattr(result, "retcode", None) == getattr(mt5, "TRADE_RETCODE_DONE", 10009):
+                if result is not None and getattr(result, "retcode", None) == 10009:
                     return result
                 logger.warning(f"Order send failed attempt {attempt}/{retries}: {result}")
             except Exception as e:
@@ -288,7 +287,7 @@ class Execution:
         # --- LIVE MODE LOGIC (existing code) ---
         try:
             # Get the ground truth of open positions from the broker
-            open_positions_on_broker = mt5.positions_get() or []
+            open_positions_on_broker = self.mt5_client.positions_get() or []
             open_position_ids_on_broker = {pos.ticket for pos in open_positions_on_broker}
 
             # Get the list of positions we are tracking internally
@@ -303,7 +302,7 @@ class Execution:
                     continue
 
                 # Fetch the deal history for this specific closed position to find the PnL
-                deals = mt5.history_deals_get(position=pid)
+                deals = self.mt5_client.history_deals_get(position=pid)
                 if not deals:
                     logger.warning(f"Position {pid} is closed but no deal history found. Removing from cache.")
                     self.risk.open_positions_cache.pop(pid, None)
@@ -326,7 +325,7 @@ class Execution:
                     continue
 
                 # Get current equity for the ClosedTrade object
-                account_info = mt5.account_info()
+                account_info = self.mt5_client.account_info()
                 actual_equity = getattr(account_info, "equity", 0.0) if account_info else 0.0
                 exit_time_dt = datetime.datetime.fromtimestamp(last_exit_time, tz=datetime.timezone.utc)
 
@@ -368,13 +367,13 @@ class Execution:
         return closed_trades_list
 
     def trade(self, symbol: str, direction: str, lots: float, price: float, sl: float, tp: float, equity: float, pip_size: float, pip_value: float, now_utc: datetime.datetime, X: pd.DataFrame | None = None, atr: float | None = None, auc_score: float | None = 0.5, total_open_risk: float = 0.0, atr_idx: int = -1, min_prob_long_idx: int = -1, min_prob_short_idx: int = -1) -> OrderResult:
-        type_map = {"long": mt5.ORDER_TYPE_BUY, "short": mt5.ORDER_TYPE_SELL}
-        tick = mt5.symbol_info_tick(symbol)
+        type_map = {"long": self.mt5_client.ORDER_TYPE_BUY, "short": self.mt5_client.ORDER_TYPE_SELL}
+        tick = self.mt5_client.symbol_info_tick(symbol)
         deviation_ticks = (float(tick.ask) - float(tick.bid)) if hasattr(tick, "ask") and hasattr(tick, "bid") else 0.0
         deviation = max(10, int(2 * (deviation_ticks) / (pip_size or 1e-6)))
 
         request = {
-            "action": mt5.TRADE_ACTION_DEAL,
+            "action": self.mt5_client.TRADE_ACTION_DEAL,
             "symbol": symbol,
             "volume": float(lots),
             "type": type_map[direction],
@@ -384,8 +383,8 @@ class Execution:
             "deviation": deviation,
             "magic": self.risk.cfg.magic_number,
             "comment": "ml-bot",
-            "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
+            "type_time": self.mt5_client.ORDER_TIME_GTC,
+            "type_filling": self.mt5_client.ORDER_FILLING_IOC,
         }
 
         if self.dry_run:
@@ -417,7 +416,7 @@ class Execution:
 
         logger.debug(f"[{symbol}] Sending order request: {request}")
         res = self._send_order_with_retry(request)
-        if res is None or getattr(res, "retcode", None) != getattr(mt5, "TRADE_RETCODE_DONE", 10009):
+        if res is None or getattr(res, "retcode", None) != self.mt5_client.TRADE_RETCODE_DONE:
             error_msg = f"<b>CRITICAL:</b> Order failed for {symbol} after retries: {res}"
             logger.error(error_msg)
             if self.notifier: self.notifier.send_message(error_msg, level="CRITICAL")
@@ -429,7 +428,7 @@ class Execution:
             return OrderResult(False, None, "Order sent but no deal ticket.")
 
         # Fetch the deal to get the position_id, which is the reliable key
-        deals = mt5.history_deals_get(ticket=deal_ticket)
+        deals = self.mt5_client.history_deals_get(ticket=deal_ticket)
         if not deals:
             logger.error(f"Could not fetch deal info for deal {deal_ticket}. Cannot track position.")
             return OrderResult(False, None, "Failed to fetch deal info.")

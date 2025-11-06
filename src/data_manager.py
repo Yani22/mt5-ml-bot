@@ -46,7 +46,11 @@ class DataManager:
         path = self._local_csv_path(symbol, timeframe)
         if not os.path.exists(path):
             return pd.DataFrame()
-        df = pd.read_csv(path, index_col=0)
+        try:
+            df = pd.read_csv(path, index_col=0)
+        except (pd.errors.ParserError, UnicodeDecodeError):
+            logger.warning(f"Pandas C engine failed to parse {path}. Retrying with Python engine.")
+            df = pd.read_csv(path, index_col=0, engine='python')
         try:
             df.index = pd.to_datetime(df.index)
         except Exception:

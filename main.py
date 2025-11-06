@@ -8,11 +8,10 @@ from dotenv import load_dotenv
 from loguru import logger
 import pandas as pd
 from src.config import Cfg, FeatureCfg
-import MetaTrader5 as mt5  # type: ignore
 from src.mt5_client import MT5Client
 from src.risk import RiskManager
 from src.execution import Execution
-from src.utils import setup_logging, get_training_data, load_ensemble, save_ensemble, safe_retrain_ensemble, load_optuna_params, log_symbol_specific_configs, log_startup_summary
+from src.utils import setup_logging, get_training_data, load_ensemble, save_ensemble, safe_retrain_ensemble, load_optuna_params, log_symbol_specific_configs, log_startup_summary, timeframe_to_seconds
 from src.live_performance_monitor import LivePerformanceMonitor
 from src.notifier import TelegramNotifier
 from src.risk_controller import RiskController
@@ -26,6 +25,8 @@ import csv
 import yaml
 import numpy as np
 from typing import List
+
+max_wait_multiplier = 2.0
 
 def _ensure_min_grid_size(thresholds: List[float], best_thr: float, min_size: int = 5, spread: float = 0.02) -> List[float]:
     """Ensures a list of thresholds has at least min_size elements, expanding around best_thr if needed."""
@@ -74,37 +75,22 @@ def _initialize_metrics_csv():
 # Call initialization at startup
 _initialize_metrics_csv()
 
-def _now_utc():
-    # Get time from the broker for a reliable UTC timestamp
-    # Using a high-volume symbol to ensure frequent ticks.
-    # Fallback to system time if MT5 call fails.
-    try:
-        # Use a symbol from the config to ensure it's available
-        tick = mt5.symbol_info_tick("EURUSDm#")
-        if tick and tick.time > 0:
-            return datetime.datetime.fromtimestamp(tick.time, tz=datetime.timezone.utc)
-    except Exception as e:
-        logger.warning(f"Could not fetch time from MT5, falling back to system time: {e}")
-    
-    # Fallback to system clock if MT5 fails
-    return datetime.datetime.now(datetime.timezone.utc)
-
 def _expected_next_bar_time(last_bar_time: datetime.datetime, timeframe_seconds: int) -> datetime.datetime:
     """Return expected next closed-bar timestamp (timezone-aware)"""
     return last_bar_time + datetime.timedelta(seconds=timeframe_seconds)
 
-def _compute_sleep_until_next_pre_wakeup(last_bar_time_map: Dict[str, Any], timeframe_seconds: int, wake_margin: float = 5.0) -> float:
+def _compute_sleep_until_next_pre_wakeup(mt5c, last_bar_time, timeframe_sec, wake_margin):
     """
     Compute number of seconds to sleep until we should wake up *before* the earliest next expected closed bar.
     Returns a float >= 0 (seconds). If no valid last_bar_time entries, returns a small default (1.0).
     """
-    now = _now_utc()
+    now = mt5c.now_utc()
     sleeps = []
-    for sym, last_bt in last_bar_time_map.items():
+    for sym, last_bt in last_bar_time.items():
         if last_bt is None:
             continue
         try:
-            next_expected = _expected_next_bar_time(last_bt, timeframe_seconds)
+            next_expected = _expected_next_bar_time(last_bt, timeframe_sec)
             seconds_until_next = (next_expected - now).total_seconds() - wake_margin
             # If already past next_expected - wake_margin, we should wake immediately (0)
             sleeps.append(max(0.0, seconds_until_next))
@@ -117,16 +103,10 @@ def _compute_sleep_until_next_pre_wakeup(last_bar_time_map: Dict[str, Any], time
     # Wake before the earliest next-bar across symbols
     return max(0.0, min(sleeps))
 
-def wait_for_new_closed_bar(data_manager, cfg, last_bar_time, wake_margin: float = 5.0, poll_interval: float = 0.5, max_wait_multiplier: float = 1.5):
-    """
-    Sleep until just before the expected next closed bar across symbols, then poll frequently (poll_interval)
-    until at least one symbol's closed bar timestamp differs from last_bar_time for that symbol.
-    - data_manager.fetch_live is used by caller per-symbol; however here we just sleep/wait centrally.
-    - Returns when time is up to re-enter per-symbol fetching loop.
-    """
-    # Compute an initial coarse sleep
-    timeframe_sec = cfg.timeframe_seconds() or 60
-    coarse_sleep = _compute_sleep_until_next_pre_wakeup(last_bar_time, timeframe_sec, wake_margin=wake_margin)
+def wait_for_new_closed_bar(mt5c, data_manager, cfg, last_bar_time, wake_margin, poll_interval):
+    """Waits until a new bar is closed for all symbols."""
+    timeframe_sec = timeframe_to_seconds(cfg.timeframe)
+    coarse_sleep = _compute_sleep_until_next_pre_wakeup(mt5c, last_bar_time, timeframe_sec, wake_margin=wake_margin)
 
     # Cap coarse sleep to not exceed one timeframe (safety)
     coarse_sleep = min(coarse_sleep, timeframe_sec)
@@ -136,7 +116,7 @@ def wait_for_new_closed_bar(data_manager, cfg, last_bar_time, wake_margin: float
         time.sleep(coarse_sleep)
 
     # After waking, poll repeatedly until we detect a new closed bar timestamp change or timeout
-    now = _now_utc()
+    now = mt5c.now_utc()
     # Allow at most (timeframe * max_wait_multiplier) seconds for the new bar to appear (safety)
     timeout_seconds = timeframe_sec * max_wait_multiplier
     deadline = now + datetime.timedelta(seconds=timeout_seconds)
@@ -144,7 +124,7 @@ def wait_for_new_closed_bar(data_manager, cfg, last_bar_time, wake_margin: float
     # Start polling loop. We don't fetch data here (expensive / duplicate) — caller does fetch per-symbol.
     # So we just yield control back to the main loop which will call data_manager.fetch_live() per symbol again soon.
     # To keep CPU reasonable, sleep in short increments until deadline.
-    while _now_utc() < deadline:
+    while mt5c.now_utc() < deadline:
         # small sleep to avoid busy spin; caller will soon fetch data again
         time.sleep(poll_interval)
         # exit loop quickly; main loop will call fetch and detect bar changes
@@ -305,6 +285,8 @@ def run(dry_run: bool = False):
     last_diagnostics_log_time = 0.0  # For throttling diagnostics logging
     last_retrain_date = {sym: None for sym in cfg.symbols}  # Track last retraining date per symbol
 
+    live_monitor = None
+    risk_controller = None
     try:
         # Outer loop for MT5 reconnection attempts
         while True:
@@ -326,7 +308,7 @@ def run(dry_run: bool = False):
                 notifier.send_message("MT5 connection established.", level="INFO")
 
                 # Get initial equity from MT5 account info
-                account_info = mt5.account_info()
+                account_info = mt5c.account_info()
                 initial_equity = getattr(account_info, "equity", 100.0) if account_info else 100.0
                 cfg.initial_equity = initial_equity  # Set initial equity in Cfg for the monitor
 
@@ -375,7 +357,7 @@ def run(dry_run: bool = False):
                     logger.exception(f"Warmstart merge failed; continuing without warmstart.")
 
                 # Instantiate risk controller AFTER warmstart merge so it loads the merged state
-                risk = RiskManager(cfg, notifier=notifier)  # Pass notifier
+                risk = RiskManager(cfg, mt5c, notifier=notifier)  # Pass notifier
                 risk_controller = RiskController(cfg, notifier=notifier)  # Instantiate RiskController
                 loaded_open_positions = risk_controller.load_state()  # Load state again to get open_positions_cache
 
@@ -394,10 +376,10 @@ def run(dry_run: bool = False):
                 # Inner loop for trading operations
                 while True:
                     current_loop_time = time.time()  # Capture current time for throttling
-                    now_utc = _now_utc()
+                    now_utc = mt5c.now_utc()
 
                     # refresh account info once per loop
-                    account_info = mt5.account_info()
+                    account_info = mt5c.account_info()
                     equity = getattr(account_info, "equity", 0.0) if account_info else 0.0
                     live_monitor.update_equity(now_utc, equity)
                     balance = getattr(account_info, "balance", 0.0) if account_info else 0.0
@@ -410,7 +392,7 @@ def run(dry_run: bool = False):
                     # --- Process closed trades first so bandit gets rewards before opening new trades ---
                     latest_prices = {}
                     for sym in cfg.symbols:
-                        tick_info = mt5.symbol_info_tick(sym)
+                        tick_info = mt5c.symbol_info_tick(sym)
                         if tick_info is not None:
                             latest_prices[sym] = tick_info.ask
                         else:
@@ -523,7 +505,7 @@ def run(dry_run: bool = False):
                             retrain_time_str = cfg.get_symbol_value(sym, 'retrain_time_utc', cfg.fetch.retrain_time_utc)
 
                             if retrain_time_str:
-                                if last_retrain_date[sym] is None or last_retrain_date[sym] < now_utc.date():
+                                if last_retrain_date[sym] is None or last_retrain_date[sym] < mt5c.now_utc().date():
                                     retrain_hour, retrain_minute = map(int, retrain_time_str.split(':'))
                                     if now_utc.hour > retrain_hour or (now_utc.hour == retrain_hour and now_utc.minute >= retrain_minute):
                                         time_to_retrain_today = True
@@ -637,7 +619,7 @@ def run(dry_run: bool = False):
                             if direction:
                                 total_open_risk = sum([pos.get('risk', 0.0) for pos in risk.open_positions_cache.values()])
 
-                                symbol_info = mt5.symbol_info(sym)
+                                symbol_info = mt5c.symbol_info(sym)
                                 if not symbol_info:
                                     logger.warning(f"[{sym}] Symbol info unavailable. Skipping position size calculation.")
                                     continue
@@ -654,7 +636,7 @@ def run(dry_run: bool = False):
                                 if lots <= 0:
                                     logger.info(f"[{sym}] Trade skipped due to risk limits or position size zero.")
                                 else:
-                                    price = float(mt5.symbol_info_tick(sym).ask) if direction == "long" else float(mt5.symbol_info_tick(sym).bid)
+                                    price = float(mt5c.symbol_info_tick(sym).ask) if direction == "long" else float(mt5c.symbol_info_tick(sym).bid)
                                     sl, tp = risk.stop_targets(price, atr, direction, auc_score, sym, sl_mult=dynamic_risk_params["atr_multiplier_sl"], tp_mult=dynamic_risk_params["atr_multiplier_tp"])
 
                                     result = exe.trade(
@@ -706,7 +688,7 @@ def run(dry_run: bool = False):
                     POLL_INTERVAL_SECONDS = getattr(cfg, "bar_poll_interval_seconds", 0.5)
 
                     try:
-                        wait_for_new_closed_bar(data_manager, cfg, last_bar_time, wake_margin=WAKE_MARGIN_SECONDS, poll_interval=POLL_INTERVAL_SECONDS)
+                        wait_for_new_closed_bar(mt5c, data_manager, cfg, last_bar_time, wake_margin=WAKE_MARGIN_SECONDS, poll_interval=POLL_INTERVAL_SECONDS)
                     except Exception:
                         # If anything goes wrong with smart sleep, fallback to short sleep
                         logger.exception("Smart wait for new bar failed; falling back to safe short sleep.")
@@ -732,24 +714,17 @@ def run(dry_run: bool = False):
                 p.terminate()
                 p.join()
     finally:
-        try:
-            live_monitor.save_state()  # Save state on shutdown
-        except Exception:
-            logger.exception("Failed to save live monitor state on shutdown.")
-        # Save open positions state
-        try:
-            if 'exe' in locals() and exe is not None:
-                exe._save_open_positions_state()
-        except Exception:
-            logger.exception("Failed to save open positions state on shutdown.")
-        # save risk_controller state if present
-        try:
-            open_pos_cache_to_save = {}
-            if 'exe' in locals() and exe is not None and hasattr(exe, 'risk') and hasattr(exe.risk, 'open_positions_cache'):
-                open_pos_cache_to_save = exe.risk.open_positions_cache
-            risk_controller.save_state(open_positions_cache=open_pos_cache_to_save)
-        except Exception:
-            logger.exception("Failed to save risk_controller state on shutdown.")
+        if live_monitor:
+            try:
+                live_monitor.save_state()  # Save state on shutdown
+            except Exception:
+                logger.error("Failed to save live monitor state on shutdown.", exc_info=True)
+
+        if risk_controller:
+            try:
+                risk_controller.save_state(open_positions_cache=open_pos_cache_to_save)
+            except Exception:
+                logger.error("Failed to save risk_controller state on shutdown.", exc_info=True)
         try:
             mt5c.shutdown()
         except Exception:

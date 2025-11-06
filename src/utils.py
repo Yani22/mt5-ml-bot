@@ -259,3 +259,18 @@ def log_startup_summary(cfg: "Cfg"):
     logger.info(f"Dynamic Risk Enabled: {cfg.risk.dynamic_risk['enabled']}")
     logger.info("--- End of Summary ---")
 
+def timeframe_to_seconds(timeframe: str) -> int:
+    """Converts a timeframe string to seconds."""
+    if timeframe.startswith("M"):
+        return int(timeframe[1:]) * 60
+    elif timeframe.startswith("H"):
+        return int(timeframe[1:]) * 60 * 60
+    elif timeframe.startswith("D"):
+        return int(timeframe[1:]) * 24 * 60 * 60
+    elif timeframe.startswith("W"):
+        return int(timeframe[1:]) * 7 * 24 * 60 * 60
+    elif timeframe.startswith("MN"):
+        return int(timeframe[2:]) * 30 * 24 * 60 * 60  # Approximation
+    else:
+        raise ValueError(f"Unknown timeframe: {timeframe}")
+

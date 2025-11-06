@@ -18,7 +18,7 @@ class RiskManager:
     Callers: pass `cfg` (the Cfg object) to constructor so both risk and watchdog settings are available.
     """
 
-    def __init__(self, cfg: Cfg, notifier: Optional[TelegramNotifier] = None):
+    def __init__(self, cfg: Cfg, mt5_client, notifier: Optional[TelegramNotifier] = None):
         self.cfg = cfg
         self.risk_cfg = cfg.risk
         self.watchdog_cfg = cfg.watchdog
@@ -27,6 +27,7 @@ class RiskManager:
         self.cooldown_until: datetime.datetime | None = None
         self.recently_closed_trades: List[SimPosition] = [] # New: To store closed trades for monitoring
         self.notifier = notifier # NEW
+        self.mt5_client = mt5_client
 
     # ---------- Dynamic value helpers ----------
     def _get_dynamic_value(self, dynamic_cfg: dict | None, auc_score: float, default_val: float) -> float:
@@ -84,8 +85,7 @@ class RiskManager:
 
         # --- Context-aware volume limit enforcement ---
         if self.cfg.data_source == "mt5":
-            import MetaTrader5 as mt5
-            symbol_info = mt5.symbol_info(symbol)
+            symbol_info = self.mt5_client.symbol_info(symbol)
             if not symbol_info:
                 logger.warning(f"[{symbol}] Could not get symbol info for live run. Cannot verify volume limits.")
                 return 0.0, 0.0
@@ -137,8 +137,7 @@ class RiskManager:
             tp = price - _tp_mult * atr
 
         if self.cfg.data_source == "mt5":
-            import MetaTrader5 as mt5
-            symbol_info = mt5.symbol_info(symbol)
+            symbol_info = self.mt5_client.symbol_info(symbol)
             if not symbol_info:
                 logger.error(f"[{symbol}] Could not get symbol info for rounding SL/TP.")
                 return float(sl), float(tp) # Return unrounded, may fail
@@ -173,7 +172,6 @@ class RiskManager:
     def _count_consecutive_losses(self, now: datetime.datetime, lookback_hours: int = 48) -> int:
         if self.cfg.data_source != "mt5":
             return 0 # Not applicable for CSV backtesting
-        import MetaTrader5 as mt5  # type: ignore
         """
         Query MT5 deal history in the last `lookback_hours` and compute the number
         of most recent consecutive losing closed trades (profit < 0).
@@ -181,7 +179,7 @@ class RiskManager:
         try:
             since = now - timedelta(hours=lookback_hours)
             # fetch recent deals
-            deals = mt5.history_deals_get(since, now)
+            deals = self.mt5_client.history_deals_get(since, now)
             if not deals:
                 return 0
             # Convert to list sorted by time ascending
@@ -258,9 +256,8 @@ class RiskManager:
 
         # 2) Drawdown check (based on cfg.block_on_drawdown)
         if self.cfg.data_source == "mt5":
-            import MetaTrader5 as mt5  # type: ignore
             try:
-                acct = mt5.account_info()
+                acct = self.mt5_client.account_info()
                 if acct:
                     equity = float(getattr(acct, "equity", 0.0))
                     self._update_equity_peak(equity)
@@ -311,7 +308,6 @@ class RiskManager:
         Manages trailing stops for open positions of a given symbol.
         Includes breakeven and ATR trailing logic, adapted for live trading.
         """
-        import MetaTrader5 as mt5 # type: ignore
 
         breakeven_enabled = self.cfg.get_symbol_value(symbol, 'breakeven_at_1R', True)
         trailing_mult = self.cfg.get_symbol_value(symbol, 'trailing_atr_mult', 0.0)
@@ -324,7 +320,7 @@ class RiskManager:
         if not positions_to_manage:
             return
 
-        tick = mt5.symbol_info_tick(symbol)
+        tick = self.mt5_client.symbol_info_tick(symbol)
         if not tick:
             logger.warning(f"[{symbol}] Could not get tick for trailing stop management.")
             return
@@ -372,7 +368,7 @@ class RiskManager:
 
             if new_sl > 0 and abs(new_sl - current_sl) > 1e-9:
                 # --- Dynamic Freeze Level Check based on Spread ---
-                symbol_info = mt5.symbol_info(symbol)
+                symbol_info = self.mt5_client.symbol_info(symbol)
                 if not symbol_info:
                     logger.warning(f"[{symbol}] Could not get symbol info for dynamic freeze level check. Skipping SL modification.")
                     continue
@@ -411,7 +407,7 @@ class RiskManager:
                 }
                 
                 logger.info(f"[{symbol}] Attempting to modify SL for position {ticket} to {new_sl:.{price_digits}f}")
-                result = mt5.order_send(request)
+                result = self.mt5_client.order_send(request)
                 
                 if result and result.retcode == mt5.TRADE_RETCODE_DONE:
                     logger.info(f"[{symbol}] Successfully modified SL for position {ticket}.")
