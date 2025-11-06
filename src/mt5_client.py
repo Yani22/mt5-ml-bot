@@ -50,7 +50,7 @@ class MT5Client:
 
                 if self.login is not None and self.password and self.server:
                     logger.info("MT5Client: attempting explicit mt5.login()")
-                    authorized = mt5.login(self.login, password=self.password, server=self.server)
+                    authorized = mt5.login(login=self.login, password=self.password, server=self.server)
                     if not authorized:
                         last_err = mt5.last_error()
                         logger.error(f"MT5 login failed: {last_err}")
