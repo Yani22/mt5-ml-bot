@@ -110,6 +110,7 @@ class MT5Client:
             self._connected = False
 
     def account_info(self):
+        if not self._connected: return None
         try:
             return mt5.account_info()
         except Exception:
