@@ -156,7 +156,6 @@ def build_dynamic_features(df: pd.DataFrame, static_features: pd.DataFrame, cfg:
         nan_count = X.isna().sum().sum()
         inf_count = np.isinf(X.values).sum()
         X = X.replace([np.inf, -np.inf], np.nan).ffill().bfill()
-        logger.debug(f"[{symbol}] Dynamic features built. Shape={X.shape}, NaNs filled={nan_count}, Infs replaced={inf_count}")
 
     except Exception as e:
         logger.exception(f"[{symbol}] Error building dynamic features: {e}")
@@ -176,7 +175,7 @@ def build_features(df: pd.DataFrame, feature_cfg: FeatureCfg, main_cfg: Cfg, sym
     im_cfg = getattr(main_cfg.context_features, 'inter_market', None)
 
     static_X = build_static_features(df, symbol, pa_cfg=pa_cfg)
-    dynamic_X = build_dynamic_features(df, static_X, feature_cfg, symbol)
+    dynamic_X = build_dynamic_features(df, static_X, cfg=feature_cfg, symbol=symbol)
     
     # Add contextual features
     dynamic_X = add_contextual_features(dynamic_X, mta_df=mta_df, inter_market_df=inter_market_df, mta_cfg=mta_cfg, im_cfg=im_cfg)

@@ -140,7 +140,7 @@ if __name__ == "__main__":
             print("No symbols found in config.yaml. Exiting.")
             quit()
         print("Running retrain_all with dry_run=False (model files will be overwritten).")
-        res = retrain_all(cfg, symbols, dry_run=False, mt5_instance=mt5_client.mt5)
+        res = retrain_all(cfg, symbols, dry_run=False, mt5_instance=mt5_client)
         print(res)
     finally:
         # Shutdown MT5 connection

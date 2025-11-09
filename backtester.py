@@ -14,34 +14,25 @@ from src.risk import RiskManager
 from src.utils import get_training_data, load_ensemble, save_ensemble, setup_logging, safe_retrain_ensemble, load_optuna_params, log_symbol_specific_configs
 from src.trade import SimPosition
 from src.risk_controller import RiskController
+from src.trade_types import ClosedTrade # NEW: Import ClosedTrade for backtester
 
 class HybridBacktester:
     """Adaptive hybrid backtester mirroring main_hybrid_adaptive.py logic."""
-    def _count_consecutive_losses_backtest(self) -> int:
-        closed_trades = sorted([p for p in self.positions if p.status == "closed" and p.pnl is not None], key=lambda p: p.exit_time)
-        if not closed_trades:
-            return 0
-        
-        count = 0
-        for trade in reversed(closed_trades):
-            if trade.pnl < 0: # Assuming negative PnL means loss
-                count += 1
-            else:
-                break
-        return count
 
-    def __init__(self, cfg: Cfg):
+    def __init__(self, cfg: Cfg, broker_client=None):
         self.logged_low_confidence = set()
         self.logged_skips = set()
         self.cfg = cfg
         log_symbol_specific_configs(self.cfg) # NEW
         self.equity = cfg.backtesting.initial_equity
         self.initial_equity = cfg.backtesting.initial_equity # Store initial equity for drawdown pruning
+        self.consecutive_losses = 0 # NEW: Efficiently track consecutive losses
         self.positions: list[SimPosition] = []
         self.equity_curve = []
-        self.risk_manager = RiskManager(cfg)
+        self.risk_manager = RiskManager(cfg, broker_client)
         self.bar_counters = {sym: 0 for sym in cfg.symbols}
         self.risk_controller = RiskController(cfg) # Instantiate RiskController
+        self.risk_controller.load_state() # Load previous state if it exists
         self.ts_param_history = [] # To store Thompson Sampling parameter evolution
         self.save_state_every_bars = getattr(cfg, "save_ts_state_every_bars", 500)
         ts_ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -119,25 +110,61 @@ class HybridBacktester:
                 gross_pnl = ((price - pos.entry_price) * pos.lots * contract_size) if pos.direction == "long" else ((pos.entry_price - price) * pos.lots * contract_size)
                 transaction_cost = cost_per_lot * pos.lots
                 net_pnl = gross_pnl - transaction_cost
+
+                # Update consecutive losses counter
+                if net_pnl < 0:
+                    self.consecutive_losses += 1
+                else:
+                    self.consecutive_losses = 0
                 
                 # Update equity
                 self.equity += net_pnl
 
-                # Close the position object
-                pos.close(price, row.name, net_pnl, self.equity)
+                # Create ClosedTrade object from SimPosition
+                closed_trade = ClosedTrade(
+                    ticket=pos.ticket, # SimPosition already has a unique ticket-like ID
+                    symbol=pos.symbol,
+                    direction=pos.direction,
+                    lots=pos.lots,
+                    entry_price=pos.entry_price,
+                    exit_price=price,
+                    entry_time=pos.entry_time,
+                    exit_time=row.name, # Use bar timestamp as exit_time
+                    pnl=net_pnl,
+                    risk_fraction=pos.risk_fraction,
+                    atr=pos.atr, # ATR at entry
+                    atr_idx=pos.atr_idx,
+                    min_prob_long_idx=pos.min_prob_long_idx,
+                    min_prob_short_idx=pos.min_prob_short_idx,
+                    entry_auc=pos.entry_auc,
+                    entry_equity=pos.entry_equity,
+                    exit_equity=self.equity, # Current equity after this trade
+                    adx=getattr(pos, 'adx', 0.0),
+                    macd_diff=getattr(pos, 'macd_diff', 0.0),
+                    volatility_10=getattr(pos, 'volatility_10', 0.0),
+                    dist_from_ema_200=getattr(pos, 'dist_from_ema_200', 0.0),
+                    context_vector=getattr(pos, 'trade_context', None) # NEW: Pass stored context vector
+                )
 
-                # Update the bandit for this trade
-                self.risk_controller.update_after_trade(sym, pos)
+                # Update the bandit with the ClosedTrade object
+                self.risk_controller.update(closed_trade)
+
+                # Close the position object (SimPosition)
+                pos.close(price, row.name.to_pydatetime().replace(tzinfo=datetime.timezone.utc), net_pnl, self.equity)
 
                 logger.info(
-                    f"[{sym}] Closed {trade.direction} position at {trade.exit_price:.5f}. "
-                    f"Entry: {trade.entry_price:.5f}, PnL: {trade.pnl:.2f}, Final Equity: {self.equity:.2f}"
+                    f"[{sym}] Closed {pos.direction} position at {pos.exit_price:.5f}. "
+                    f"Entry: {pos.entry_price:.5f}, PnL: {pos.pnl:.2f}, Final Equity: {self.equity:.2f}"
                 )
     
-    def _perform_retraining(self, sym: str, bar_time: pd.Timestamp, i: int, data: pd.DataFrame, X: pd.DataFrame):
+    def _perform_retraining(self, sym: str, bar_time: pd.Timestamp, i: int, data: pd.DataFrame, X: pd.DataFrame, y_long: pd.Series, y_short: pd.Series):
         """
         Handles the logic for retraining the model.
         """
+        if not self.cfg.backtesting.enable_retraining:
+            logger.debug(f"[{sym}] Retraining disabled by configuration. Skipping.")
+            return self.ens_per_symbol_long[sym], self.ens_per_symbol_short[sym]
+
         if self.bar_counters[sym] > 0 and self.bar_counters[sym] % self.cfg.retrain_every_bars == 0:
             window_size = min(self.cfg.history_bars, i + 1)
 
@@ -159,8 +186,8 @@ class HybridBacktester:
             
             # Use the shared safe_retrain_ensemble function
             # IMPORTANT: A dry_run=True flag should be added here to prevent overwriting prod models.
-            ens_new_long = safe_retrain_ensemble(self.cfg, sym, ens_old_long, train_data[X.columns], train_data["y_long"], train_data["close"] if "close" in train_data.columns else None, dry_run=True, model_type="long")
-            ens_new_short = safe_retrain_ensemble(self.cfg, sym, ens_old_short, train_data[X.columns], train_data["y_short"], train_data["close"] if "close" in train_data.columns else None, dry_run=True, model_type="short")
+            ens_new_long = safe_retrain_ensemble(self.cfg, sym, ens_old_long, train_data[X.columns], y_long.loc[train_data.index], train_data["close"] if "close" in train_data.columns else None, dry_run=True, model_type="long")
+            ens_new_short = safe_retrain_ensemble(self.cfg, sym, ens_old_short, train_data[X.columns], y_short.loc[train_data.index], train_data["close"] if "close" in train_data.columns else None, dry_run=True, model_type="short")
             
             # Update the ensemble in the backtester's state
             self.ens_per_symbol_long[sym] = ens_new_long
@@ -182,7 +209,7 @@ class HybridBacktester:
             if trial.should_prune():
                 raise optuna.TrialPruned()
 
-    def _process_bar(self, sym: str, data: pd.DataFrame, X: pd.DataFrame, y: pd.DataFrame, trial: optuna.Trial | None = None, pruning_interval: int = 0):
+    def _process_bar(self, sym: str, data: pd.DataFrame, X: pd.DataFrame, y_long: pd.Series, y_short: pd.Series, trial: optuna.Trial | None = None, pruning_interval: int = 0):
         """Processes each bar of data for a given symbol."""
         ens_long = self.ens_per_symbol_long[sym]
         ens_short = self.ens_per_symbol_short[sym]
@@ -213,8 +240,7 @@ class HybridBacktester:
             if risk_mgr.watchdog_cfg.enabled:
                 max_losses = getattr(risk_mgr.watchdog_cfg, "max_consecutive_losses", None)
                 if max_losses is not None and max_losses > 0:
-                    consecutive_losses = self._count_consecutive_losses_backtest()
-                    if consecutive_losses >= max_losses:
+                    if self.consecutive_losses >= max_losses:
                         if risk_mgr.cooldown_until is None:
                             logger.warning(f"[{sym}][{bar_time}] Watchdog: consecutive losses {consecutive_losses} >= threshold {max_losses}. Triggering cooldown.")
                             now_utc = bar_time.to_pydatetime().replace(tzinfo=datetime.timezone.utc)
@@ -240,7 +266,7 @@ class HybridBacktester:
                 continue
 
             # Retrain if needed
-            ens_long, ens_short = self._perform_retraining(sym, bar_time, i, data, X)
+            ens_long, ens_short = self._perform_retraining(sym, bar_time, i, data, X, y_long, y_short)
 
             # Decide on new trades
             prob_long = ens_long.predict_proba(last_features).iloc[0]
@@ -293,20 +319,21 @@ class HybridBacktester:
                 spread_pips = getattr(self.cfg.trading_costs.defaults, 'spread_pips', 2.0)
                 spread_value = spread_pips * pip_size
 
-                lots, effective_risk = risk_mgr.position_size(
+                lots, effective_risk = self.risk_manager.position_size(
                     self.equity, atr, auc_score, spread_value, total_open_risk, symbol=sym, exploration_mult=dynamic_risk_params.get("exploration_risk_mult", 1.0)
                 )
 
                 if lots > 0:
                     price = current_row["close"]
                     # Use dynamic SL/TP multipliers
-                    sl, tp = risk_mgr.stop_targets(price, atr, direction, auc_score, sym, sl_mult=atr_multiplier_sl, tp_mult=atr_multiplier_tp)
+                    sl, tp = self.risk_manager.stop_targets(price, atr, direction, auc_score, sym, sl_mult=atr_multiplier_sl, tp_mult=atr_multiplier_tp)
                     pos = SimPosition(
                         sym, direction, lots, price, sl, tp, bar_time, atr, auc_score, effective_risk,
                         entry_equity=self.equity,
                         atr_idx=atr_idx,
                         min_prob_long_idx=min_prob_long_idx,
-                        min_prob_short_idx=min_prob_short_idx # Store discrete choices
+                        min_prob_short_idx=min_prob_short_idx, # Store discrete choices
+                        trade_context=dynamic_risk_params.get("context_vector") # NEW: Store the context vector
                     )
                     self.positions.append(pos)
                     logger.info(
@@ -431,12 +458,12 @@ class HybridBacktester:
                     im_sym = self.cfg.context_features.inter_market.symbol
                     inter_market_df = dm.load_local_history(im_sym, self.cfg.timeframe)
 
-                data, X, y = get_training_data(self.cfg, sym, feature_cfg=feature_cfg, source=self.cfg.data_source, min_pct_change=feature_cfg.min_pct_change, mta_df=mta_df, inter_market_df=inter_market_df)
+                data, X, y_long, y_short = get_training_data(self.cfg, sym, feature_cfg=feature_cfg, source=self.cfg.data_source, min_pct_change=feature_cfg.min_pct_change, mta_df=mta_df, inter_market_df=inter_market_df, return_long_short_labels=True)
                 if data.empty:
                     logger.warning(f"No data for {sym}, skipping.")
                     continue
 
-                self._process_bar(sym, data, X, y, trial, pruning_interval)
+                self._process_bar(sym, data, X, y_long, y_short, trial, pruning_interval)
 
                 logger.info(f"--- Completed Backtest for Symbol: {sym} ---")
 
@@ -468,7 +495,6 @@ if __name__ == "__main__":
     import numpy as np  # type: ignore
     import random
     import sys
-    from src.mt5_client import MT5Client
 
     np.random.seed(42)
     random.seed(42)
@@ -477,6 +503,7 @@ if __name__ == "__main__":
     
     mt5_client = None
     if cfg.data_source == "mt5":
+        from src.mt5_client import MT5Client
         mt5_client = MT5Client(
             login=os.getenv("MT5_LOGIN"),
             password=os.getenv("MT5_PASSWORD"),
@@ -491,7 +518,7 @@ if __name__ == "__main__":
     cfg.thompson_sampling.state_file = f"ts_risk_controller_state_backtest_{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
 
     
-    bt = HybridBacktester(cfg)
+    bt = HybridBacktester(cfg, mt5_client)
     try:
         trades_df, eq_df = bt.run()
         print("\n--- Trades Summary ---")

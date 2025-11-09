@@ -5,6 +5,7 @@ import datetime
 from typing import Optional
 import MetaTrader5 as mt5  # type: ignore
 from loguru import logger
+from src.utils import timeframe_to_seconds
 
 class MT5Client:
     """ Safe wrapper around MetaTrader5 initialization and login. """
@@ -39,7 +40,7 @@ class MT5Client:
         last_err = None
         for attempt in range(1, self.max_retries + 1):
             try:
-                logger.info(f"MT5Client: initialize() attempt {attempt}/{self.max_retries} (path={self.path})")
+                logger.debug(f"MT5Client: initialize() attempt {attempt}/{self.max_retries} (path={self.path})")
                 ok = mt5.initialize(path=self.path) if self.path else mt5.initialize()
                 if not ok:
                     last_err = mt5.last_error()
@@ -49,7 +50,7 @@ class MT5Client:
                     continue
 
                 if self.login is not None and self.password and self.server:
-                    logger.info("MT5Client: attempting explicit mt5.login()")
+                    logger.debug("MT5Client: attempting explicit mt5.login()")
                     authorized = mt5.login(login=self.login, password=self.password, server=self.server)
                     if not authorized:
                         last_err = mt5.last_error()
@@ -57,7 +58,7 @@ class MT5Client:
                         mt5.shutdown()
                         time.sleep(self.retry_delay)
                         continue
-                    logger.info("MT5 login OK")
+                    logger.debug("MT5 login OK")
                 else:
                     # No creds: validate terminal login
                     acct = mt5.account_info()
@@ -184,11 +185,16 @@ class MT5Client:
         except Exception:
             return None
 
-    def wait_for_new_bar(self, symbol: str, timeframe: int = mt5.TIMEFRAME_M1, timeout: int = 60):
+    def wait_for_new_bar(self, symbol: str, timeframe: int = mt5.TIMEFRAME_M1, timeout_multiplier: float = 1.5):
         """Waits for a new bar to appear for a given symbol and timeframe."""
         if not self._connected:
             logger.warning("wait_for_new_bar: Not connected to MT5.")
             return False
+
+        timeframe_seconds = timeframe_to_seconds(timeframe) # Convert MT5 timeframe to seconds
+        dynamic_timeout = int(timeframe_seconds * timeout_multiplier) # Calculate dynamic timeout
+        if dynamic_timeout < 60: # Ensure a minimum timeout of 60 seconds
+            dynamic_timeout = 60
 
         last_bar = self.get_rates(symbol, timeframe, 1)
         if last_bar is None or len(last_bar) == 0:
@@ -196,16 +202,16 @@ class MT5Client:
             return False
 
         last_bar_time = last_bar[0][0]
-        logger.info(f"wait_for_new_bar: Waiting for new bar for {symbol}. Last bar time: {datetime.datetime.fromtimestamp(last_bar_time)}")
+        logger.info(f"wait_for_new_bar: Waiting for new bar for {symbol}. Last bar time: {datetime.datetime.fromtimestamp(last_bar_time, tz=datetime.timezone.utc)}. Timeout: {dynamic_timeout}s")
         start_time = time.time()
 
-        while time.time() - start_time < 120: # Increased timeout to 120 seconds
+        while time.time() - start_time < dynamic_timeout:
             new_bar = self.get_rates(symbol, timeframe, 1)
             if new_bar is not None and len(new_bar) > 0 and new_bar[0][0] > last_bar_time:
                 return True
             time.sleep(1)
 
-        logger.warning(f"wait_for_new_bar: Timeout waiting for new bar for {symbol}.")
+        logger.warning(f"wait_for_new_bar: Timeout waiting for new bar for {symbol} after {dynamic_timeout}s.")
         return False
 
     # --- MT5 Constants ---

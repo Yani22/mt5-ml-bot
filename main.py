@@ -14,6 +14,7 @@ from src.execution import Execution
 from src.utils import setup_logging, get_training_data, load_ensemble, save_ensemble, safe_retrain_ensemble, load_optuna_params, log_symbol_specific_configs, log_startup_summary, timeframe_to_seconds, ensure_min_grid_size, timeframe_to_mt5_timeframe
 from src.live_performance_monitor import LivePerformanceMonitor
 from src.notifier import TelegramNotifier
+
 from src.risk_controller import RiskController
 import datetime
 import json
@@ -259,7 +260,8 @@ def run(dry_run: bool = False):
 
     live_monitor = None
     risk_controller = None
-    risk = None
+    risk_manager = None # Declare risk_manager here
+    exe = None # Declare exe here
     mt5c = None
     try:
         # Outer loop for MT5 reconnection attempts
@@ -330,13 +332,13 @@ def run(dry_run: bool = False):
                 except Exception:
                     logger.exception(f"Warmstart merge failed; continuing without warmstart.")
 
-                # Instantiate risk controller AFTER warmstart merge so it loads the merged state
-                risk = RiskManager(cfg, mt5c, notifier=notifier)  # Pass notifier
-                risk_controller = RiskController(cfg, notifier=notifier)  # Instantiate RiskController
-                loaded_open_positions = risk_controller.load_state()  # Load state again to get open_positions_cache
+                # Instantiate risk manager and risk controller AFTER warmstart merge so they load the merged state
+                risk_manager = RiskManager(cfg, mt5c, notifier=notifier) # Pass notifier
+                risk_controller = RiskController(cfg, notifier=notifier) # Instantiate RiskController
+                loaded_open_positions = risk_controller.load_state() # Load state again to get open_positions_cache
 
                 # Execution object (single instance)
-                exe = Execution(ens_per_symbol_long, ens_per_symbol_short, risk, mt5c, data_manager, dry_run=dry_run, notifier=notifier)
+                exe = Execution(ens_per_symbol_long, ens_per_symbol_short, risk_manager, mt5c, data_manager, dry_run=dry_run, notifier=notifier, monitor=live_monitor)
                 exe.risk.open_positions_cache.update(loaded_open_positions)  # Initialize exe's cache with loaded data
 
                 # Reconcile open positions with MT5 to ensure accuracy
@@ -349,7 +351,7 @@ def run(dry_run: bool = False):
                 last_retrain_date = risk_controller.last_daily_retrain_date
 
                 # --- Start Symbol Processors ---
-                symbol_threads = []
+                symbol_threads = [] # Initialize here to prevent UnboundLocalError
                 for sym in cfg.symbols:
                     # Each MT5Client instance needs to be independent for thread safety
                     # Initialize a new MT5Client for each SymbolProcessor
@@ -363,7 +365,7 @@ def run(dry_run: bool = False):
                         logger.error(f"Failed to connect MT5 client for symbol {sym}. This symbol will not be processed.")
                         continue
 
-                    processor = SymbolProcessor(cfg, sym, mt5_client_per_symbol, risk_controller, live_monitor, exe, dry_run)
+                    processor = SymbolProcessor(cfg, sym, mt5_client_per_symbol, risk_controller, risk_manager, live_monitor, exe, dry_run)
                     thread = threading.Thread(target=processor.run_loop, daemon=True)
                     symbol_threads.append({"symbol": sym, "thread": thread, "processor": processor, "mt5_client": mt5_client_per_symbol})
                     thread.start()
@@ -373,7 +375,7 @@ def run(dry_run: bool = False):
                 while True:
                     # Periodically save global states and check thread health
                     live_monitor.save_state()
-                    risk_controller.save_state(risk.open_positions_cache)
+                    risk_controller.save_state(exe.risk.open_positions_cache)
 
                     for i, symbol_data in enumerate(symbol_threads):
                         if not symbol_data["thread"].is_alive():
@@ -441,10 +443,10 @@ def run(dry_run: bool = False):
             except Exception:
                 logger.error("Failed to save live monitor state on shutdown.", exc_info=True)
 
-        if risk_controller:
+        if risk_controller and exe: # Check if exe is also defined
             try:
                 # Use the latest open positions cache from the live monitor, as it's the aggregate from all threads
-                risk_controller.save_state(risk.open_positions_cache) # Save final state
+                risk_controller.save_state(exe.risk.open_positions_cache) # Save final state
             except Exception:
                 logger.exception("Failed to save RiskController state on shutdown.")
         logger.info("MT5 ML Bot shutdown complete.")

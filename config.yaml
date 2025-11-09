@@ -12,6 +12,7 @@ optuna_n_trials: 100  # 150
 backtesting:
   initial_equity: 8.75
   simulation_volume_min: 0.1 # NEW: Force backtester to use this minimum lot size
+  enable_retraining: False # New field to control retraining in backtester.py
 
 optuna_pruning_interval: 100 # New: Interval for Optuna pruning checks
 n_jobs: -1 # Number of parallel jobs for tuning. -1 means all available CPU cores.
@@ -39,10 +40,11 @@ ensemble_training:
 
 # --- Symbols & timeframe ---
 # historical_data symbols for .csv needed: M5-EURUSD#, H1-EURUSD#, and M5-USDX-DEC25
-symbols: ["EURUSDm#", "GBPUSDm#"] #, "GBPUSDm#"
-# symbols: ["EURUSDm#", "GOLDm#", "GBPUSDm#", "USDJPYm#", "AUDUSDm#"] 
+symbols: ["USDCADm#"]
+# symbols: ["AUDUSDm#", "GBPUSDm#", "EURUSDm#"]
+# symbols: ["USDJPYm#", "GBPJPYm#", "EURJPYm", "USDCADm", "EURGBPm"] 
 timeframe: "M5"            # One of: M1, M5, M15, M30, H1, H4
-history_bars: 45000          #6048 18000 36000 45000 #12000-for-tuner.py #5000-for-backtesting
+history_bars: 3000          #22500 18000 36000 45000 #12000-for-tuner.py #5000-for-backtesting
 retrain_every_bars: 1000     # ~3.5 days at M5
 prediction_horizon: 12       # 6 Bars ahead for label (~30 min on M5)
 retraining_window_bars: 45000         # Number of recent bars for rolling window retraining. null for expanding window.
@@ -123,7 +125,7 @@ thompson_sampling:
   state_file: "results/ts_risk_controller_state.json" # File to save RiskController state
 
   # Adaptive Grid Configuration (for Dynamic Grid Adaptation)
-  adaptive_grids_enabled: true
+  adaptive_grids_enabled: false
   adaptation_interval_updates: 500   # Number of updates to an arm before considering adaptation
   adaptation_refinement_factor: 0.3  # How much to narrow the search space (e.g., 0.3 means 30% of current interval)
   min_grid_size: 5                   # Minimum number of arms in a grid
@@ -153,8 +155,8 @@ risk:
     auc_floor: 0.55        # Same AUC floor as risk
     auc_ceiling: 0.65      # Same AUC ceiling as risk
 
-  max_positions: 3               # Max concurrent positions
-  max_portfolio_risk: 0.05       #0.05 5% Total equity risk cap  0.03
+  max_positions: 1            # Max concurrent positions 1-backtest 3-main
+  max_portfolio_risk: 0.15       #Total equity risk cap  0.05-backtest 0.15-main
   atr_multiplier_sl: 1.0
   atr_multiplier_tp: 2.0
   breakeven_at_1R: true
@@ -162,7 +164,7 @@ risk:
   min_prob_long: 0.55 #0.65-max #0.51-0.55|low #0.56-0.65|high
   min_prob_short: 0.55 #0.65-max #0.51-0.55|low #0.56-0.65|high
   block_on_drawdown: 1.0      # 0.20         # 0.1 pause if drawdown from equity peak exceeds 10%     #disable 1.0
-  min_auc_improvement: 0.005     # 0.005 default # minimum improvement in AUC to accept a new model
+  min_auc_improvement: 0.0025     # 0.005 default # minimum improvement in AUC to accept a new model
   max_drawdown_for_pruning: 1.0 # New: Max drawdown allowed before Optuna trial pruning  #disable 1.0
   session_filter:
     start: "00:00"
@@ -171,7 +173,7 @@ risk:
 # --- Logging ---
 logging:
   level: INFO  #INFO #DEBUG
-  to_file: true
+  to_file: false
   rotate: 10 MB
   retention: 7 days
 
@@ -194,20 +196,20 @@ startup_logging: true             # log key settings at bot launch for transpare
 # --- Symbol Specific Overrides ---
 # Use this section to override settings for specific symbols, like pip_value for non-forex instruments.
 symbol_overrides:
-  "EURUSDm#":
-    retrain_time_utc: "23:55" # Staggered retraining time
-    # --- Thompson Sampling Grid Overrides ---
-    atr_grid: [1.0, 1.5, 2.0, 2.5]
-    min_prob_grid_long: [0.53, 0.55, 0.57, 0.60, 0.63]
-    min_prob_grid_short: [0.53, 0.55, 0.57, 0.60, 0.63]
   "GBPUSDm#":
-    retrain_time_utc: "23:55" # Staggered retraining time
+    retrain_time_utc: "01:02" #"23:55" Staggered retraining time  "01:00"
     # --- Thompson Sampling Grid Overrides ---
     atr_grid: [1.0, 1.5, 2.0, 2.5]
     min_prob_grid_long: [0.53, 0.55, 0.57, 0.60, 0.63]
     min_prob_grid_short: [0.53, 0.55, 0.57, 0.60, 0.63]
   "AUDUSDm#":
-    retrain_time_utc: "23:55" # Staggered retraining time
+    retrain_time_utc: "01:12" #"23:55" Staggered retraining time  "01:15"
+    # --- Thompson Sampling Grid Overrides ---
+    atr_grid: [1.0, 1.5, 2.0, 2.5]
+    min_prob_grid_long: [0.53, 0.55, 0.57, 0.60, 0.63]
+    min_prob_grid_short: [0.53, 0.55, 0.57, 0.60, 0.63]
+  "EURUSDm#": 
+    retrain_time_utc: "01:22" #"23:55" Staggered retraining time  "01:30"
     # --- Thompson Sampling Grid Overrides ---
     atr_grid: [1.0, 1.5, 2.0, 2.5]
     min_prob_grid_long: [0.53, 0.55, 0.57, 0.60, 0.63]

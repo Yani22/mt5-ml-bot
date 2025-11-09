@@ -82,7 +82,6 @@ class DataManager:
             combined = nb.sort_index()
 
         self._atomic_write_df(combined, path, fmt="csv")
-        logger.debug(f"[{symbol}] Appended {len(nb)} bars to {path} (total {len(combined)})")
 
     def _fetch_bars_from_mt5_chunked(self, symbol: str, timeframe: str, count: int) -> pd.DataFrame:
         import MetaTrader5 as mt5  # type: ignore
@@ -103,14 +102,11 @@ class DataManager:
         if count is None:
             count = 36000
         try:
-            logger.debug(f"[{symbol}] Fetching {count} bars from MT5 for timeframe {timeframe}...") # New log
             rates = mt5.copy_rates_from_pos(symbol, tf, 0, int(count))
             if rates is None or len(rates) == 0:
                 logger.warning(f"[{symbol}] MT5 returned no bars.")
                 return pd.DataFrame()
             
-            logger.debug(f"[{symbol}] Fetched {len(rates)} bars from MT5.") # New log
-
             df = pd.DataFrame(rates)
             if "time" not in df.columns:
                 logger.warning(f"[{symbol}] fetched data missing 'time' column — returning empty DataFrame")
@@ -137,7 +133,7 @@ class DataManager:
         else:
             logger.debug(f"[{symbol}] Local history OK ({len(current)} rows).")
 
-    def fetch_live(self, symbol: str, feature_cfg: "FeatureCfg", min_pct_change: float) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    def fetch_live(self, symbol: str, feature_cfg: FeatureCfg) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         # 1. Load the bulk of the history from the local cache first.
         data = self.load_local_history(symbol, self.cfg.timeframe, count=self.cfg.history_bars)
 
@@ -162,7 +158,6 @@ class DataManager:
         # 4. Fetch context features, if enabled
         mta_df = None
         if self.cfg.context_features.mta.enabled:
-            logger.debug(f"[{symbol}] Fetching live MTA data...")
             # Fetching the full history for MTA is okay as it's a different timeframe and less frequent.
             mta_df = self._fetch_bars_from_mt5_chunked(symbol, self.cfg.context_features.mta.timeframe, self.cfg.history_bars)
             if mta_df.empty:
@@ -175,7 +170,6 @@ class DataManager:
         inter_market_df = None
         if self.cfg.context_features.inter_market.enabled:
             im_sym = self.cfg.context_features.inter_market.symbol
-            logger.debug(f"[{symbol}] Fetching live Inter-Market data for {im_sym}...")
             inter_market_df = self._fetch_bars_from_mt5_chunked(im_sym, self.cfg.timeframe, self.cfg.history_bars)
             if inter_market_df.empty:
                 logger.warning(f"[{symbol}] No live Inter-Market data loaded for symbol {im_sym}. Disabling for this tick.")

@@ -9,6 +9,7 @@ from typing import List, Dict, Tuple, Optional, Any
 
 from src.config import Cfg
 from src.trade import SimPosition # For reward normalization
+from src.trade_types import ClosedTrade # Import ClosedTrade
 from src.linear_thompson import LinearThompson  # new
 
 def _json_serial(obj):
@@ -287,6 +288,51 @@ class RiskController:
 
         logger.debug(f"[{symbol}] Rule Scale: {rule_scale:.2f} (Vol:{vol:.5f}, DD:{max_drawdown:.2%}, CL:{consecutive_losses})")
         return float(rule_scale)
+        """
+        Computes a rule-based scaling factor (between 0 and 1, inclusive) based on
+        various performance and market context variables such as volatility, drawdown,
+        and consecutive losses. This scale is applied to certain risk parameters
+        to dynamically adjust risk exposure.
+
+        Args:
+            symbol: The trading symbol for which to calculate the rule scale.
+            context: A dictionary containing current market and performance context.
+
+        Returns:
+            A float representing the calculated rule scale, typically between 0.01 and 1.0.
+        """
+        sym_state = self.symbol_states[symbol]
+        ts_cfg = self.cfg.thompson_sampling
+
+        # Extract context variables
+        vol = context.get("vol", sym_state.last_atr) # Use last_atr if current vol not provided
+        equity = context.get("equity", sym_state.current_equity)
+        peak_equity = context.get("peak_equity", sym_state.peak_equity)
+        max_drawdown = 1.0 - (equity / peak_equity) if peak_equity is not None and peak_equity > 0 else 0.0
+        consecutive_losses = sym_state.consecutive_losses
+
+        rule_scale = 1.0
+
+        # 1. Inverse Volatility Scale
+        if vol > 0 and ts_cfg.vol_threshold > 0: # Avoid division by zero
+            inverse_vol_scale = min(1.0, ts_cfg.vol_threshold / vol + 0.5) # Example scaling
+            rule_scale *= inverse_vol_scale
+
+        # 2. Drawdown Scale
+        if max_drawdown > 0 and ts_cfg.dd_cut_multiplier > 0:
+            drawdown_scale = max(0.1, 1.0 - ts_cfg.dd_cut_multiplier * max_drawdown)
+            rule_scale *= drawdown_scale
+
+        # 3. Consecutive Loss Scale
+        if consecutive_losses > 0 and ts_cfg.consec_loss_cut > 0:
+            consec_scale = max(0.1, 1.0 - ts_cfg.consec_loss_cut * consecutive_losses / 5.0) # Divide by 5 for example
+            rule_scale *= consec_scale
+        
+        # Ensure rule_scale is within (0, 1]
+        rule_scale = np.clip(rule_scale, 0.01, 1.0) # Min scale of 0.01 to avoid zeroing out
+
+        logger.debug(f"[{symbol}] Rule Scale: {rule_scale:.2f} (Vol:{vol:.5f}, DD:{max_drawdown:.2%}, CL:{consecutive_losses})")
+        return float(rule_scale)
 
     def get_params(self, symbol: str, context: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -404,199 +450,65 @@ class RiskController:
             "rule_scale": rule_scale,
             "is_exploratory": is_exploratory,
             "exploration_risk_mult": exploration_risk_mult,
+            "context_vector": x.tolist() if 'x' in locals() else None,
         }
 
-    def update_after_trade(self, symbol: str, trade: SimPosition):
-        """
-        Updates the Thompson Sampling bandit statistics and the rule-based state
-        for a given symbol after a trade has been closed.
-        This function calculates a normalized reward from the trade and uses it
-        to update the relevant bandits (ATR, min_prob_long, min_prob_short, and contextual if enabled).
-        It also checks for and triggers dynamic grid adaptation if conditions are met.
-
-        Args:
-            symbol: The trading symbol associated with the closed trade.
-            trade: The SimPosition object representing the closed trade, containing
-                   details like PnL, chosen parameters, and entry/exit equity.
-        """
+    def update(self, trade: ClosedTrade):
         if not self.cfg.thompson_sampling.enabled:
             return
 
+        symbol = trade.symbol
+        if symbol not in self.symbol_states:
+            logger.warning(f"[{symbol}] Attempted to update non-existent symbol state. Skipping update.")
+            return
+
         sym_state = self.symbol_states[symbol]
-        ts_cfg = self.cfg.thompson_sampling
+        reward = trade.pnl / self.cfg.thompson_sampling.reward_normalization_factor # Normalize PnL
 
-        # 1. Compute normalized reward (Sharpe-like: return per unit of risk)
-        reward = 0.0
-        if trade.pnl is not None and trade.risk_fraction is not None and trade.risk_fraction > 0 and trade.exit_equity is not None and trade.exit_equity > 0:
-            # Calculate return per unit of risk
-            raw_reward = trade.pnl / (trade.exit_equity * trade.risk_fraction)
-            # Apply log utility and normalize
-            shaped = np.sign(raw_reward) * np.log1p(abs(raw_reward))
-            reward = float(np.clip(shaped / ts_cfg.reward_normalization_factor, -5.0, 5.0))
-        elif trade.pnl is not None and trade.entry_equity is not None and trade.entry_equity > 0: # Fallback to simple PnL/Equity if risk_fraction is not available or zero
-            raw_reward = trade.pnl / trade.entry_equity
-            shaped = np.sign(raw_reward) * np.log1p(abs(raw_reward))
-            reward = float(np.clip(shaped / ts_cfg.reward_normalization_factor, -5.0, 5.0))
-        
-        # Ensure reward is not NaN or Inf
-        if not np.isfinite(reward):
-            reward = 0.0
-
-        logger.debug(f"[{symbol}] Trade closed. Reward: {reward:.4f}. Updating bandits.")
-        # 2. Update bandits
-        if trade.atr_idx is not None and trade.atr_idx != -1:
-            if trade.atr_idx < sym_state.atr_bandit.num_arms:
-                sym_state.atr_bandit.update(trade.atr_idx, reward, ts_cfg.decay)
-                sym_state.atr_updates_since_last_adaptation += 1
-                logger.debug(f"[{symbol}] ATR bandit updated for arm {trade.atr_idx}.")
-            else:
-                logger.warning(f"[{symbol}] atr_idx {trade.atr_idx} from a stale trade is out of bounds for the current atr_bandit with {sym_state.atr_bandit.num_arms} arms. Skipping bandit update for this trade.")
-        # 2b. Update the correct min_prob bandit based on trade direction
-        if trade.direction == "long":
-            if trade.min_prob_long_idx is not None and trade.min_prob_long_idx != -1:
-                if trade.min_prob_long_idx < sym_state.min_prob_bandit_long.num_arms:
-                    sym_state.min_prob_bandit_long.update(trade.min_prob_long_idx, reward, ts_cfg.decay)
-                    sym_state.min_prob_updates_since_last_adaptation += 1 # Note: this adaptation counter is now shared
-                    logger.debug(f"[{symbol}] MinProb Long bandit updated for arm {trade.min_prob_long_idx}.")
-                else:
-                    logger.warning(f"[{symbol}] min_prob_long_idx {trade.min_prob_long_idx} out of bounds for min_prob_bandit_long with {sym_state.min_prob_bandit_long.num_arms} arms. Skipping.")
-        elif trade.direction == "short":
-            if trade.min_prob_short_idx is not None and trade.min_prob_short_idx != -1:
-                if trade.min_prob_short_idx < sym_state.min_prob_bandit_short.num_arms:
-                    sym_state.min_prob_bandit_short.update(trade.min_prob_short_idx, reward, ts_cfg.decay)
-                    sym_state.min_prob_updates_since_last_adaptation += 1 # Note: this adaptation counter is now shared
-                    logger.debug(f"[{symbol}] MinProb Short bandit updated for arm {trade.min_prob_short_idx}.")
-                else:
-                    logger.warning(f"[{symbol}] min_prob_short_idx {trade.min_prob_short_idx} out of bounds for min_prob_bandit_short with {sym_state.min_prob_bandit_short.num_arms} arms. Skipping.")
-
-        # contextual update (if enabled)
-        if getattr(ts_cfg, "contextual_enabled", False) and sym_state.contextual_bandit is not None:
-            # reconstruct context from trade
-            try:
-                entry_time_raw = getattr(trade, "entry_time", None)
-                if entry_time_raw is None:
-                    entry_time = datetime.datetime.utcnow()
-                elif isinstance(entry_time_raw, str):
-                    entry_time = datetime.datetime.fromisoformat(entry_time_raw)
-                else:
-                    entry_time = entry_time_raw
-                hour = entry_time.hour + entry_time.minute / 60.0
-                hour_sin = np.sin(2 * np.pi * hour / 24.0)
-                hour_cos = np.cos(2 * np.pi * hour / 24.0)
-                vol = float(getattr(trade, "atr", sym_state.last_atr or 0.0))
-                auc = float(getattr(trade, "entry_auc", 0.5))
-                equity_exit = float(getattr(trade, "exit_equity", sym_state.current_equity or self.cfg.initial_equity))
-                drawdown = 1.0 - (equity_exit / max(sym_state.peak_equity or self.cfg.initial_equity, 1e-9))
-                vol_scale = float(ts_cfg.vol_threshold or 1e-6)
-
-                # New context features from trade object
-                adx = float(getattr(trade, "adx", 0.0))
-                macd_diff = float(getattr(trade, "macd_diff", 0.0))
-                volatility_10 = float(getattr(trade, "volatility_10", 0.0))
-                dist_from_ema_200 = float(getattr(trade, "dist_from_ema_200", 0.0))
-
-                x = np.array([
-                    vol / max(vol_scale, 1e-9),
-                    auc,
-                    drawdown,
-                    hour_sin,
-                    hour_cos,
-                    adx / 100.0, # Normalize ADX (typically 0-100)
-                    macd_diff * 1000.0, # Scale macd_diff for better feature representation
-                    volatility_10 * 100.0, # Scale volatility
-                    dist_from_ema_200 * 100.0, # Scale distance
-                ], dtype=float)
-                ctx_dim = sym_state.contextual_bandit.dim
-                if len(x) < ctx_dim:
-                    x = np.concatenate([x, np.zeros(ctx_dim - len(x))])
-                elif len(x) > ctx_dim:
-                    x = x[:ctx_dim]
-                if trade.atr_idx is not None and trade.atr_idx != -1:
-                    if trade.atr_idx < sym_state.contextual_bandit.num_arms:
-                        sym_state.contextual_bandit.update(int(trade.atr_idx), x, reward)
+        # Update ATR bandit
+        if trade.atr_idx is not None and trade.atr_idx != -1: # -1 indicates no TS choice for this parameter
+            if sym_state.contextual_bandit is not None and getattr(self.cfg.thompson_sampling, "contextual_enabled", False):
+                if trade.context_vector is not None:
+                    context_vector = np.array(trade.context_vector)
+                    if context_vector.shape[0] == sym_state.contextual_bandit.dim:
+                        sym_state.contextual_bandit.update(trade.atr_idx, context_vector, reward)
                     else:
-                        logger.warning(f"[{symbol}] atr_idx {trade.atr_idx} from a stale trade is out of bounds for the current contextual_bandit with {sym_state.contextual_bandit.num_arms} arms. Skipping contextual bandit update for this trade.")
-            except Exception:
-                logger.exception("Contextual bandit update failed")
+                        logger.warning(f"[{symbol}] Context vector dimension mismatch. Bandit dim: {sym_state.contextual_bandit.dim}, trade context dim: {context_vector.shape[0]}.")
+                else:
+                    logger.warning(f"[{symbol}] Context vector not found in ClosedTrade. Cannot update contextual bandit.")
+            else:
+                if trade.atr_idx < sym_state.atr_bandit.num_arms:
+                    sym_state.atr_bandit.update(trade.atr_idx, reward)
+                else:
+                    logger.warning(f"[{symbol}] Invalid atr_idx {trade.atr_idx} for atr_bandit with {sym_state.atr_bandit.num_arms} arms.")
 
-        # 3. Dynamic Grid Adaptation Check
-        if ts_cfg.adaptive_grids_enabled:
-            # Check ATR grid adaptation
-            if sym_state.atr_updates_since_last_adaptation >= ts_cfg.adaptation_interval_updates:
-                best_atr_arm_idx = int(np.argmax(sym_state.atr_bandit.sum_rewards / np.maximum(1.0, sym_state.atr_bandit.counts)))
-                new_atr_grid = self._refine_grid(
-                    sym_state.atr_grid_values, best_atr_arm_idx, ts_cfg.adaptation_refinement_factor,
-                    ts_cfg.min_grid_size, ts_cfg.max_grid_size
-                )
-                if new_atr_grid != sym_state.atr_grid_values:
-                    logger.info(f"[{symbol}] Adapting ATR grid. Old: {sym_state.atr_grid_values} -> New: {new_atr_grid}")
-                    old_atr_bandit = sym_state.atr_bandit
-                    old_atr_grid = sym_state.atr_grid_values
-                    sym_state.atr_grid_values = new_atr_grid
-                    sym_state.atr_bandit = ThompsonBandit(
-                        num_arms=len(new_atr_grid), prior_mean=ts_cfg.prior_mean,
-                        prior_var=ts_cfg.prior_var, min_var=1e-6
-                    )
-                    self._transfer_bandit_state(old_atr_bandit, old_atr_grid, sym_state.atr_bandit, new_atr_grid)
-                    if sym_state.contextual_bandit is not None:
-                        # Re-initialize contextual bandit with new num_arms
-                        ctx_dim = int(getattr(ts_cfg, "context_dim", 5))
-                        old_contextual_bandit = sym_state.contextual_bandit
-                        sym_state.contextual_bandit = LinearThompson(num_arms=len(new_atr_grid), dim=ctx_dim, lambda_prior=1.0, noise_var=float(ts_cfg.obs_var or 1.0))
-                        self._transfer_contextual_bandit_state(old_contextual_bandit, old_atr_grid, sym_state.contextual_bandit, new_atr_grid)
-                        logger.debug(f"[{symbol}] Transferred state for contextual bandit.")
-                sym_state.atr_updates_since_last_adaptation = 0            # Check MinProb grid adaptation (Long)
-            if sym_state.min_prob_updates_since_last_adaptation >= ts_cfg.adaptation_interval_updates:
-                best_min_prob_long_arm_idx = int(np.argmax(sym_state.min_prob_bandit_long.sum_rewards / np.maximum(1.0, sym_state.min_prob_bandit_long.counts)))
-                new_min_prob_long_grid = self._refine_grid(
-                    sym_state.min_prob_grid_long_values, best_min_prob_long_arm_idx, ts_cfg.adaptation_refinement_factor,
-                    ts_cfg.min_grid_size, ts_cfg.max_grid_size
-                )
-                if new_min_prob_long_grid != sym_state.min_prob_grid_long_values:
-                    logger.info(f"[{symbol}] Adapting MinProb Long grid. Old: {sym_state.min_prob_grid_long_values} -> New: {new_min_prob_long_grid}")
-                    old_min_prob_bandit_long = sym_state.min_prob_bandit_long
-                    old_min_prob_long_grid = sym_state.min_prob_grid_long_values
-                    sym_state.min_prob_grid_long_values = new_min_prob_long_grid
-                    sym_state.min_prob_bandit_long = ThompsonBandit(
-                        num_arms=len(new_min_prob_long_grid), prior_mean=ts_cfg.prior_mean,
-                        prior_var=ts_cfg.prior_var, min_var=1e-6
-                    )
-                    self._transfer_bandit_state(old_min_prob_bandit_long, old_min_prob_long_grid, sym_state.min_prob_bandit_long, new_min_prob_long_grid)
-                    logger.debug(f"[{symbol}] Transferred state for MinProb Long bandit.")
-                
-                # Check MinProb grid adaptation (Short)
-                best_min_prob_short_arm_idx = int(np.argmax(sym_state.min_prob_bandit_short.sum_rewards / np.maximum(1.0, sym_state.min_prob_bandit_short.counts)))
-                new_min_prob_short_grid = self._refine_grid(
-                    sym_state.min_prob_grid_short_values, best_min_prob_short_arm_idx, ts_cfg.adaptation_refinement_factor,
-                    ts_cfg.min_grid_size, ts_cfg.max_grid_size
-                )
-                if new_min_prob_short_grid != sym_state.min_prob_grid_short_values:
-                    logger.info(f"[{symbol}] Adapting MinProb Short grid. Old: {sym_state.min_prob_grid_short_values} -> New: {new_min_prob_short_grid}")
-                    old_min_prob_bandit_short = sym_state.min_prob_bandit_short
-                    old_min_prob_short_grid = sym_state.min_prob_grid_short_values
-                    sym_state.min_prob_grid_short_values = new_min_prob_short_grid
-                    sym_state.min_prob_bandit_short = ThompsonBandit(
-                        num_arms=len(new_min_prob_short_grid), prior_mean=ts_cfg.prior_mean,
-                        prior_var=ts_cfg.prior_var, min_var=1e-6
-                    )
-                    self._transfer_bandit_state(old_min_prob_bandit_short, old_min_prob_short_grid, sym_state.min_prob_bandit_short, new_min_prob_short_grid)
-                    logger.debug(f"[{symbol}] Transferred state for MinProb Short bandit.")
-                
-                sym_state.min_prob_updates_since_last_adaptation = 0
+        # Update min_prob_long bandit
+        if trade.min_prob_long_idx is not None and trade.min_prob_long_idx != -1:
+            if trade.min_prob_long_idx < sym_state.min_prob_bandit_long.num_arms:
+                sym_state.min_prob_bandit_long.update(trade.min_prob_long_idx, reward)
+            else:
+                logger.warning(f"[{symbol}] Invalid min_prob_long_idx {trade.min_prob_long_idx} for min_prob_bandit_long with {sym_state.min_prob_bandit_long.num_arms} arms.")
 
-        # 4. Update rule state
-        sym_state.current_equity = trade.exit_equity # Assuming SimPosition now tracks exit_equity
-        sym_state.peak_equity = max(sym_state.peak_equity, sym_state.current_equity)
-        sym_state.recent_returns.append(reward) # Append normalized reward
-        sym_state.last_atr = trade.atr # Update last ATR for rule scaling context
-
-        if reward < 0:
-            sym_state.consecutive_losses += 1
-        else:
-            sym_state.consecutive_losses = 0
+        # Update min_prob_short bandit
+        if trade.min_prob_short_idx is not None and trade.min_prob_short_idx != -1:
+            if trade.min_prob_short_idx < sym_state.min_prob_bandit_short.num_arms:
+                sym_state.min_prob_bandit_short.update(trade.min_prob_short_idx, reward)
+            else:
+                logger.warning(f"[{symbol}] Invalid min_prob_short_idx {trade.min_prob_short_idx} for min_prob_bandit_short with {sym_state.min_prob_bandit_short.num_arms} arms.")
+                    
+        # Increment adaptation counters
+        if trade.atr_idx is not None and trade.atr_idx != -1:
+            sym_state.atr_updates_since_last_adaptation += 1
+        if trade.min_prob_long_idx is not None and trade.min_prob_long_idx != -1:
+            sym_state.min_prob_updates_since_last_adaptation += 1
+        if trade.min_prob_short_idx is not None and trade.min_prob_short_idx != -1:
+            sym_state.min_prob_updates_since_last_adaptation += 1
         
-        logger.debug(f"[{symbol}] Trade closed. Reward: {reward:.4f}. CL: {sym_state.consecutive_losses}")
-
+        logger.debug(f"[{symbol}] Thompson Sampling bandits updated for trade {trade.ticket} with reward {reward:.4f}.")
+                    
+        # Check and trigger grid adaptation after updating bandits
+        self._check_and_trigger_adaptation(symbol)        
+        
     def save_state(self, open_positions_cache: dict | None = None):
         state_path = self.cfg.thompson_sampling.state_file
         try:
@@ -616,7 +528,6 @@ class RiskController:
         except Exception as e:
             logger.error(f"Failed to save RiskController state: {e}")
             if self.notifier: self.notifier.send_message(f"<b>ERROR:</b> Failed to save RiskController state: {e}", level="ERROR")
-
     def load_state(self) -> dict:
         state_path = self.cfg.thompson_sampling.state_file
         if not os.path.exists(state_path):
@@ -785,6 +696,128 @@ class RiskController:
             logger.warning(f"[{symbol}] Bandit reset triggered: {trigger_reason}")
             self._reset_bandit_state(symbol, current_time)
 
+    def _check_and_trigger_adaptation(self, symbol: str):
+        """
+        Checks if adaptive grid conditions are met for a given symbol and triggers
+        grid refinement and bandit state transfer if necessary.
+        """
+        sym_state = self.symbol_states[symbol]
+        ts_cfg = self.cfg.thompson_sampling
+
+        if not ts_cfg.adaptive_grids_enabled:
+            return
+
+        # --- ATR Grid Adaptation ---
+        if sym_state.atr_updates_since_last_adaptation >= ts_cfg.adaptation_interval_updates:
+            logger.info(f"[{symbol}] Triggering ATR grid adaptation.")
+            # Determine the best arm for ATR
+            if sym_state.contextual_bandit is not None:
+                # For contextual bandit, we need to find the arm with the highest estimated value
+                # This is a simplification; a more robust approach might involve simulating contexts
+                # For now, we'll use the arm with the highest mean reward from the underlying LinearThompson
+                best_arm_index = np.argmax(sym_state.contextual_bandit.b[:, 0] / np.diag(sym_state.contextual_bandit.A[:, :, 0])) # Simplified
+            else:
+                best_arm_index = np.argmax(sym_state.atr_bandit.sum_rewards / (sym_state.atr_bandit.counts + 1e-6)) # Avoid div by zero
+
+            old_atr_grid = sym_state.atr_grid_values
+            new_atr_grid = self._refine_grid(
+                current_grid=old_atr_grid,
+                best_arm_index=int(best_arm_index),
+                refinement_factor=ts_cfg.adaptation_refinement_factor,
+                min_grid_size=ts_cfg.min_grid_size,
+                max_grid_size=ts_cfg.max_grid_size
+            )
+
+            if new_atr_grid != old_atr_grid:
+                logger.info(f"[{symbol}] ATR grid adapted. Old: {old_atr_grid}, New: {new_atr_grid}")
+                if sym_state.contextual_bandit is not None:
+                    old_bandit = sym_state.contextual_bandit
+                    new_bandit = LinearThompson(
+                        num_arms=len(new_atr_grid),
+                        dim=old_bandit.dim,
+                        lambda_prior=old_bandit.lambda_prior,
+                        noise_var=old_bandit.noise_var
+                    )
+                    self._transfer_contextual_bandit_state(old_bandit, old_atr_grid, new_bandit, new_atr_grid)
+                    sym_state.contextual_bandit = new_bandit
+                else:
+                    old_bandit = sym_state.atr_bandit
+                    new_bandit = ThompsonBandit(
+                        num_arms=len(new_atr_grid),
+                        prior_mean=old_bandit.prior_mean,
+                        prior_var=old_bandit.prior_var,
+                        min_var=old_bandit.min_var
+                    )
+                    self._transfer_bandit_state(old_bandit, old_atr_grid, new_bandit, new_atr_grid)
+                    sym_state.atr_bandit = new_bandit
+                sym_state.atr_grid_values = new_atr_grid
+                sym_state.atr_updates_since_last_adaptation = 0 # Reset counter
+            else:
+                logger.debug(f"[{symbol}] ATR grid adaptation resulted in no change.")
+                sym_state.atr_updates_since_last_adaptation = 0 # Reset counter even if no change
+
+        # --- Min Prob Long Grid Adaptation ---
+        if sym_state.min_prob_updates_since_last_adaptation >= ts_cfg.adaptation_interval_updates:
+            logger.info(f"[{symbol}] Triggering Min Prob Long grid adaptation.")
+            best_arm_index = np.argmax(sym_state.min_prob_bandit_long.sum_rewards / (sym_state.min_prob_bandit_long.counts + 1e-6))
+
+            old_min_prob_grid_long = sym_state.min_prob_grid_long_values
+            new_min_prob_grid_long = self._refine_grid(
+                current_grid=old_min_prob_grid_long,
+                best_arm_index=int(best_arm_index),
+                refinement_factor=ts_cfg.adaptation_refinement_factor,
+                min_grid_size=ts_cfg.min_grid_size,
+                max_grid_size=ts_cfg.max_grid_size
+            )
+
+            if new_min_prob_grid_long != old_min_prob_grid_long:
+                logger.info(f"[{symbol}] Min Prob Long grid adapted. Old: {old_min_prob_grid_long}, New: {new_min_prob_grid_long}")
+                old_bandit = sym_state.min_prob_bandit_long
+                new_bandit = ThompsonBandit(
+                    num_arms=len(new_min_prob_grid_long),
+                    prior_mean=old_bandit.prior_mean,
+                    prior_var=old_bandit.prior_var,
+                    min_var=old_bandit.min_var
+                )
+                self._transfer_bandit_state(old_bandit, old_min_prob_grid_long, new_bandit, new_min_prob_grid_long)
+                sym_state.min_prob_bandit_long = new_bandit
+                sym_state.min_prob_grid_long_values = new_min_prob_grid_long
+                sym_state.min_prob_updates_since_last_adaptation = 0
+            else:
+                logger.debug(f"[{symbol}] Min Prob Long grid adaptation resulted in no change.")
+                sym_state.min_prob_updates_since_last_adaptation = 0
+
+        # --- Min Prob Short Grid Adaptation ---
+        if sym_state.min_prob_updates_since_last_adaptation >= ts_cfg.adaptation_interval_updates:
+            logger.info(f"[{symbol}] Triggering Min Prob Short grid adaptation.")
+            best_arm_index = np.argmax(sym_state.min_prob_bandit_short.sum_rewards / (sym_state.min_prob_bandit_short.counts + 1e-6))
+
+            old_min_prob_grid_short = sym_state.min_prob_grid_short_values
+            new_min_prob_grid_short = self._refine_grid(
+                current_grid=old_min_prob_grid_short,
+                best_arm_index=int(best_arm_index),
+                refinement_factor=ts_cfg.adaptation_refinement_factor,
+                min_grid_size=ts_cfg.min_grid_size,
+                max_grid_size=ts_cfg.max_grid_size
+            )
+
+            if new_min_prob_grid_short != old_min_prob_grid_short:
+                logger.info(f"[{symbol}] Min Prob Short grid adapted. Old: {old_min_prob_grid_short}, New: {new_min_prob_grid_short}")
+                old_bandit = sym_state.min_prob_bandit_short
+                new_bandit = ThompsonBandit(
+                    num_arms=len(new_min_prob_grid_short),
+                    prior_mean=old_bandit.prior_mean,
+                    prior_var=old_bandit.prior_var,
+                    min_var=old_bandit.min_var
+                )
+                self._transfer_bandit_state(old_bandit, old_min_prob_grid_short, new_bandit, new_min_prob_grid_short)
+                sym_state.min_prob_bandit_short = new_bandit
+                sym_state.min_prob_grid_short_values = new_min_prob_grid_short
+                sym_state.min_prob_updates_since_last_adaptation = 0
+            else:
+                logger.debug(f"[{symbol}] Min Prob Short grid adaptation resulted in no change.")
+                sym_state.min_prob_updates_since_last_adaptation = 0
+
     @staticmethod
     def _transfer_bandit_state(old_bandit: ThompsonBandit, old_grid: List[float], new_bandit: ThompsonBandit, new_grid: List[float]):
         """
@@ -829,7 +862,6 @@ class RiskController:
         for old_idx, old_val in enumerate(old_grid):
             # Find the index of the closest value in the new grid
             new_idx = int(np.argmin(np.abs(np.array(new_grid) - old_val)))
-
             # Transfer A and b matrices. If multiple old arms map to the same new arm,
             # their statistics will be summed up.
             new_bandit.A[new_idx] += old_bandit.A[old_idx]

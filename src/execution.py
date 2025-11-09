@@ -6,11 +6,12 @@ import json
 from dataclasses import dataclass
 from loguru import logger # type: ignore
 import time
+from typing import List, Dict, Optional, Any
 from .ensemble import Ensemble
 from .risk import RiskManager
 import pandas as pd # type: ignore
-from typing import List, Optional, Dict, Any # Import Dict
-# from backtester import SimPosition # Import SimPosition - REMOVED as not used
+import pandas as pd
+from loguru import logger
 import datetime
 from .notifier import TelegramNotifier
 
@@ -20,38 +21,12 @@ class OrderResult:
     ticket: int | None
     message: str
 
-@dataclass
-class ClosedTrade:
-    """A comprehensive closed trade object for all post-trade processing."""
-    ticket: int
-    symbol: str
-    direction: str
-    lots: float
-    entry_price: float
-    exit_price: float
-    entry_time: datetime
-    exit_time: datetime
-    pnl: float
-    risk_fraction: float
-    atr: float
-    atr_idx: int
-    min_prob_long_idx: int
-    min_prob_short_idx: int
-    entry_auc: float
-    entry_equity: Optional[float] = None
-    exit_equity: Optional[float] = None
-    adx: float = 0.0
-    macd_diff: float = 0.0
-    volatility_10: float = 0.0
-    dist_from_ema_200: float = 0.0
-
-    def __repr__(self):
-        return f"<ClosedTrade ticket={self.ticket}, pnl={self.pnl:.2f}>"
+from src.trade_types import ClosedTrade # Import ClosedTrade from dedicated module
 
 class Execution:
     """ Handles trade decision & order sending with retries + dry-run. """
 
-    def __init__(self, ens_per_symbol_long: Dict[str, Ensemble], ens_per_symbol_short: Dict[str, Ensemble], risk_manager: RiskManager, mt5_client, data_manager, dry_run: bool = False, notifier: Optional[TelegramNotifier] = None):
+    def __init__(self, ens_per_symbol_long: Dict[str, Ensemble], ens_per_symbol_short: Dict[str, Ensemble], risk_manager: RiskManager, mt5_client, data_manager, dry_run: bool = False, notifier: Optional[TelegramNotifier] = None, monitor: LivePerformanceMonitor | None = None):
         self.ens_per_symbol_long = ens_per_symbol_long
         self.ens_per_symbol_short = ens_per_symbol_short
         self.risk = risk_manager
@@ -59,6 +34,7 @@ class Execution:
         self.data_manager = data_manager # Store DataManager instance
         self.dry_run = dry_run
         self.notifier = notifier
+        self.monitor = monitor # Store monitor instance
         self._open_tickets = {}   # ticket -> dict of trade details from risk.open_positions_cache
         self._seen_closed = set() # to avoid reporting the same trade twice
         self._last_deal_time = 0  # Timestamp of the last deal processed
@@ -99,59 +75,140 @@ class Execution:
             return {}
 
 
-    def reconcile_open_positions_with_mt5(self):
+    def reconcile_open_positions_with_mt5(self) -> List[ClosedTrade]:
+        import MetaTrader5 as mt5 # Temporary import to resolve NameError
         """
         Enhances the internal position cache by adding any new positions
         that were opened on the broker (e.g., manually) while the bot was offline.
-        This function no longer handles the detection of closed trades.
+        Also detects positions closed on the broker and removes them from cache,
+        processing their PnL for learning.
+        Returns a list of ClosedTrade objects for newly detected closed trades.
         """
-        logger.info("Checking for new externally-opened positions on MT5...")
+        logger.info("Checking for open positions and reconciling cache with MT5...")
         if self.dry_run:
-            logger.info("[DRY-RUN] Skipping reconciliation of new external positions.")
-            return
-
+            logger.info("[DRY-RUN] Skipping reconciliation process.")
+            return [] # Return empty list in dry-run
+        
+        closed_trades_list = [] # List to store detected closed trades
         try:
             # 1. Get all open positions from MT5 (ground truth)
             mt5_open_positions = self.mt5_client.positions_get() or []
-            
-            # 2. Identify positions that are on the broker but NOT in our internal cache
+            mt5_open_tickets = {pos.ticket for pos in mt5_open_positions}
+
+            # 2. Identify and add positions that are on the broker but NOT in our internal cache
             for pos in mt5_open_positions:
                 if pos.ticket not in self.risk.open_positions_cache:
-                    # This is a new position that the bot was not tracking.
+                    # This is a new position that the bot was not tracking (opened manually or while bot was off)
                     direction = "long" if pos.type == mt5.POSITION_TYPE_BUY else "short"
                     entry_time_dt = datetime.datetime.fromtimestamp(pos.time, tz=datetime.timezone.utc)
                     
-                    # Add it to the cache with placeholder data.
+                    # Add it to the cache with comprehensive placeholder data.
                     self.risk.open_positions_cache[pos.ticket] = {
-                        "risk": 0.0,
+                        "risk": 0.0, # Placeholder, will be updated if managed by strategy
                         "ticket": pos.ticket,
                         "symbol": pos.symbol,
                         "entry_price": pos.price_open,
                         "direction": direction,
                         "lots": pos.volume,
                         "entry_time": entry_time_dt,
-                        "atr": 0.0,
-                        "entry_auc": 0.5,
-                        "risk_fraction": 0.0,
-                        "entry_equity": 0.0,
+                        "atr": 0.0, # Placeholder for ATR at entry
+                        "entry_auc": 0.5, # Placeholder for AUC at entry
+                        "risk_fraction": 0.0, # Placeholder for risk_per_trade
+                        "entry_equity": 0.0, # Placeholder for equity at entry
                         "sl": pos.sl,
                         "tp": pos.tp,
-                        "atr_idx": -1,
-                        "min_prob_long_idx": -1,
-                        "min_prob_short_idx": -1,
-                        "adx": 0.0,
-                        "macd_diff": 0.0,
-                        "volatility_10": 0.0,
-                        "dist_from_ema_200": 0.0,
+                        "pip_size": self.risk.get_pip_size(pos.symbol), # Attempt to get actual pip_size
+                        "pip_value": self.risk.get_pip_value(pos.symbol), # Attempt to get actual pip_value
+                        "atr_idx": -1, # Placeholder for atr_idx
+                        "min_prob_long_idx": -1, # Placeholder for min_prob_long_idx
+                        "min_prob_short_idx": -1, # Placeholder for min_prob_short_idx
+                        # Add context features as placeholders if not available
+                        "adx": 0.0, "macd_diff": 0.0, "volatility_10": 0.0, "dist_from_ema_200": 0.0,
+                        "inter_market_feature": 0.0, "mta_feature": 0.0
                     }
                     logger.info(f'Discovered new external position: Ticket={pos.ticket}, Symbol={pos.symbol}, Direction={direction}, Lots={pos.volume}')
             
-            logger.info("Reconciliation of new positions complete.")
+            # 3. Find positions that are in our internal cache but no longer open on the broker
+            tickets_to_remove = []
+            for ticket, pos_details in self.risk.open_positions_cache.items():
+                if ticket not in mt5_open_tickets:
+                    # This position was closed externally (by TP/SL or manually)
+                    symbol = pos_details['symbol']
+                    direction = pos_details['direction']
+                    entry_price = pos_details['entry_price']
+                    lots = pos_details['lots']
+                    entry_time = pos_details.get("entry_time", datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc))
+                    
+                    # Fetch deal history for this ticket to get PnL
+                    deals = self.mt5_client.history_deals_get(position=ticket) # Use position=ticket to get all deals for that position
+                    pnl = 0.0
+                    exit_price = 0.0
+                    exit_time_dt = datetime.datetime.now(datetime.timezone.utc) # Default to now if no deal found
+
+                    if deals:
+                        final_profit_sum = 0.0
+                        latest_exit_time = 0
+                        latest_exit_price = 0.0
+                        
+                        # Iterate through deals to get the last exit price and total PnL
+                        for deal in sorted(deals, key=lambda d: d.time): # Sort to get latest exit
+                            # We only care about DEAL_ENTRY_OUT deals for closure and PnL
+                            if deal.entry == mt5.DEAL_ENTRY_OUT:
+                                final_profit_sum += deal.profit # MT5 profit already includes commission/swap for a closed deal
+                                latest_exit_time = deal.time
+                                latest_exit_price = deal.price
+                        
+                        pnl = final_profit_sum
+
+                        if latest_exit_time > 0:
+                            exit_time_dt = datetime.datetime.fromtimestamp(latest_exit_time, tz=datetime.timezone.utc)
+                            exit_price = latest_exit_price
+
+                    else:
+                        logger.warning(f"[{symbol}] Position {ticket} closed, but no deal found in history for PnL calculation. Removing from cache.")
+
+                    # Create the comprehensive ClosedTrade object
+                    closed_trade = ClosedTrade(
+                            ticket=ticket,
+                            symbol=symbol,
+                            direction=direction,
+                            lots=lots,
+                            entry_price=entry_price, # From cache (pos_details)
+                            exit_price=exit_price, # From deal or default
+                            entry_time=entry_time, # From cache (pos_details)
+                            exit_time=exit_time_dt,
+                            pnl=pnl,
+                            risk_fraction=pos_details.get("risk_fraction", 0.0),
+                            atr=pos_details.get("atr", 0.0),
+                            atr_idx=pos_details.get("atr_idx", -1),
+                            min_prob_long_idx=pos_details.get("min_prob_long_idx", -1),
+                            min_prob_short_idx=pos_details.get("min_prob_short_idx", -1),
+                            entry_auc=pos_details.get("entry_auc", 0.5),
+                            entry_equity=pos_details.get("entry_equity", 0.0),
+                            exit_equity=self.monitor.current_equity, # Use current global equity
+                            adx=pos_details.get("adx", 0.0),
+                            macd_diff=pos_details.get("macd_diff", 0.0),
+                            volatility_10=pos_details.get("volatility_10", 0.0),
+                            dist_from_ema_200=pos_details.get("dist_from_ema_200", 0.0),
+                            context_vector=pos_details.get("context_vector") # NEW: Pass stored context vector
+                    )
+                    closed_trades_list.append(closed_trade) # Add to list to be returned
+                    logger.info(f"[{symbol}] Detected closed trade via reconciliation: {closed_trade}")
+
+                    tickets_to_remove.append(ticket) # Mark for removal from cache
+
+            for ticket in tickets_to_remove: # Remove after iterating to avoid dictionary modification during iteration
+                if ticket in self.risk.open_positions_cache:
+                    del self.risk.open_positions_cache[ticket]
+            
+            logger.info("Reconciliation complete. Internal cache synchronized with MT5.")
+            return closed_trades_list # Return the list of closed trades
 
         except Exception as e:
             logger.exception(f"Failed to reconcile new external positions with MT5: {e}")
-            if self.notifier: self.notifier.send_message(f"<b>ERROR:</b> Failed to reconcile new external positions with MT5: {e}", level="ERROR")
-
+            if self.notifier: self.notifier.send_message(f"<b>ERROR:</b> Failed to reconcile cache with MT5: {e}", level="ERROR")
+            return [] # Return empty list on error
+        
     def _send_order_with_retry(self, request: dict, retries: int = -1, delay: float = 1.0):
         num_retries = self.risk.cfg.trading_costs.defaults.retry_order_send if retries == -1 else retries
         last = None
@@ -274,7 +331,8 @@ class Execution:
                         adx=trade_details.get("adx", 0.0),
                         macd_diff=trade_details.get("macd_diff", 0.0),
                         volatility_10=trade_details.get("volatility_10", 0.0),
-                        dist_from_ema_200=trade_details.get("dist_from_ema_200", 0.0)
+                        dist_from_ema_200=trade_details.get("dist_from_ema_200", 0.0),
+                        context_vector=trade_details.get("context_vector") # NEW: Pass stored context vector
                     )
                     closed_trades_list.append(closed_trade)
                     logger.info(f"[DRY-RUN] Simulated closed trade: {closed_trade} ({closure_reason})")
@@ -366,7 +424,7 @@ class Execution:
         closed_trades_list.sort(key=lambda trade: trade.exit_time)
         return closed_trades_list
 
-    def trade(self, symbol: str, direction: str, lots: float, price: float, sl: float, tp: float, equity: float, pip_size: float, pip_value: float, now_utc: datetime.datetime, X: pd.DataFrame | None = None, atr: float | None = None, auc_score: float | None = 0.5, total_open_risk: float = 0.0, atr_idx: int = -1, min_prob_long_idx: int = -1, min_prob_short_idx: int = -1) -> OrderResult:
+    def trade(self, symbol: str, direction: str, lots: float, price: float, sl: float, tp: float, equity: float, pip_size: float, pip_value: float, now_utc: datetime.datetime, X: pd.DataFrame | None = None, atr: float | None = None, auc_score: float | None = 0.5, total_open_risk: float = 0.0, atr_idx: int = -1, min_prob_long_idx: int = -1, min_prob_short_idx: int = -1, context_vector: Optional[list[float]] = None) -> OrderResult:
         type_map = {"long": self.mt5_client.ORDER_TYPE_BUY, "short": self.mt5_client.ORDER_TYPE_SELL}
         tick = self.mt5_client.symbol_info_tick(symbol)
         deviation_ticks = (float(tick.ask) - float(tick.bid)) if hasattr(tick, "ask") and hasattr(tick, "bid") else 0.0
@@ -411,6 +469,7 @@ class Execution:
                 "macd_diff": float(X["macd_diff"].iloc[-1]) if X is not None and "macd_diff" in X.columns else 0.0,
                 "volatility_10": float(X["volatility_10"].iloc[-1]) if X is not None and "volatility_10" in X.columns else 0.0,
                 "dist_from_ema_200": float(X["dist_from_ema_200"].iloc[-1]) if X is not None and "dist_from_ema_200" in X.columns else 0.0,
+                "context_vector": trade_context # NEW: Store the context vector
             }
             return OrderResult(True, simulated_ticket, "Dry-run prepared")
 
@@ -472,6 +531,7 @@ class Execution:
                 # Add inter_market_feature and mta_feature to open_positions_cache
                 "inter_market_feature": float(X["inter_market_feature"].iloc[-1]) if "inter_market_feature" in X.columns else 0.0,
                 "mta_feature": float(X["mta_feature"].iloc[-1]) if "mta_feature" in X.columns else 0.0,
+                "trade_context": trade_context # NEW: Store the context dictionary
             }
         except Exception as e:
             logger.warning(f"Could not record open position in cache: {e}")

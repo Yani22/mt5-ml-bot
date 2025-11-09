@@ -8,12 +8,12 @@ import json # NEW
 import os # NEW
 
 from src.config import Cfg
-from backtester import SimPosition # Assuming SimPosition is accessible or copied
+from src.trade_types import ClosedTrade # Import the new ClosedTrade dataclass
 
 class LivePerformanceMonitor:
     def __init__(self, cfg: Cfg):
         self.cfg = cfg
-        self.closed_trades: deque[SimPosition] = deque() # Use deque for efficient appending/popping
+        self.closed_trades: deque[ClosedTrade] = deque() # Use deque for efficient appending/popping
         self.equity_curve: deque[Tuple[datetime.datetime, float]] = deque()
         self.peak_equity: float = cfg.initial_equity # Assuming initial_equity is set in Cfg or passed
         self.current_equity: float = cfg.initial_equity
@@ -39,7 +39,7 @@ class LivePerformanceMonitor:
         while self.equity_curve and self.equity_curve[0][0] < min_timestamp:
             self.equity_curve.popleft()
 
-    def add_closed_trade(self, trade: SimPosition):
+    def add_closed_trade(self, trade: ClosedTrade):
         self.closed_trades.append(trade)
 
         # Trim closed_trades to lookback_days
@@ -57,7 +57,7 @@ class LivePerformanceMonitor:
             closed_trades_data = []
             for trade in self.closed_trades:
                 trade_data = trade.__dict__.copy()
-                # Convert datetime objects to ISO format strings
+                # Convert datetime objects to ISO format strings for JSON serialization
                 if 'entry_time' in trade_data and isinstance(trade_data['entry_time'], datetime.datetime):
                     trade_data['entry_time'] = trade_data['entry_time'].isoformat()
                 if 'exit_time' in trade_data and isinstance(trade_data['exit_time'], datetime.datetime):
@@ -76,7 +76,7 @@ class LivePerformanceMonitor:
             }
             with open(state_path, 'w') as f:
                 json.dump(state, f, indent=4)
-            logger.info(f"LivePerformanceMonitor state saved to {state_path}")
+            logger.debug(f"LivePerformanceMonitor state saved to {state_path}")
         except Exception as e:
             logger.error(f"Failed to save LivePerformanceMonitor state: {e}")
 
@@ -90,27 +90,32 @@ class LivePerformanceMonitor:
             with open(state_path, 'r') as f:
                 state = json.load(f)
 
-            # Reconstruct deque and SimPosition objects
+            # Reconstruct deque and ClosedTrade objects
             self.closed_trades.clear()
             for trade_data in state.get("closed_trades", []):
-                # SimPosition needs specific fields, ensure they are present or handle defaults
-                trade = SimPosition(
+                trade = ClosedTrade(
+                    ticket=trade_data.get("ticket"),
                     symbol=trade_data.get("symbol"),
                     direction=trade_data.get("direction"),
                     lots=trade_data.get("lots"),
                     entry_price=trade_data.get("entry_price"),
-                    sl=trade_data.get("sl"),
-                    tp=trade_data.get("tp"),
+                    exit_price=trade_data.get("exit_price"),
                     entry_time=datetime.datetime.fromisoformat(trade_data["entry_time"]) if trade_data.get("entry_time") else None,
-                    atr=trade_data.get("atr"),
-                    entry_auc=trade_data.get("entry_auc"),
+                    exit_time=datetime.datetime.fromisoformat(trade_data["exit_time"]) if trade_data.get("exit_time") else None,
+                    pnl=trade_data.get("pnl"),
                     risk_fraction=trade_data.get("risk_fraction"),
+                    atr=trade_data.get("atr"),
+                    atr_idx=trade_data.get("atr_idx"),
+                    min_prob_long_idx=trade_data.get("min_prob_long_idx"),
+                    min_prob_short_idx=trade_data.get("min_prob_short_idx"),
+                    entry_auc=trade_data.get("entry_auc"),
+                    entry_equity=trade_data.get("entry_equity"),
+                    exit_equity=trade_data.get("exit_equity"),
+                    adx=trade_data.get("adx"),
+                    macd_diff=trade_data.get("macd_diff"),
+                    volatility_10=trade_data.get("volatility_10"),
+                    dist_from_ema_200=trade_data.get("dist_from_ema_200")
                 )
-                # Manually set exit details as close() method is not called during load
-                trade.exit_price = trade_data.get("exit_price")
-                trade.exit_time = datetime.datetime.fromisoformat(trade_data["exit_time"]) if trade_data.get("exit_time") else None
-                trade.pnl = trade_data.get("pnl")
-                trade.status = trade_data.get("status")
                 self.closed_trades.append(trade)
 
             self.equity_curve.clear()
@@ -122,7 +127,7 @@ class LivePerformanceMonitor:
             self.last_check_time = datetime.datetime.fromisoformat(state["last_check_time"]) if state.get("last_check_time") else None
             self.last_ensemble_auc = state.get("last_ensemble_auc", 0.0)
 
-            logger.info(f"LivePerformanceMonitor state loaded from {state_path}")
+            logger.debug(f"LivePerformanceMonitor state loaded from {state_path}")
         except Exception as e:
             logger.error(f"Failed to load LivePerformanceMonitor state from {state_path}: {e}")
             # Optionally, re-initialize to a clean state if loading fails

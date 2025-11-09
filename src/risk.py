@@ -80,6 +80,7 @@ class RiskManager:
         pip_size = symbol_info.point
         contract_size = symbol_info.trade_contract_size
         pip_value = pip_size * contract_size
+        logger.info(f"[{symbol}] position_size: pip_size={pip_size}, contract_size={contract_size}, calculated pip_value={pip_value}")
 
         # Get symbol-specific or default risk per trade
         risk_per_trade_base = self.cfg.get_symbol_value(symbol, 'risk_per_trade', 0.005)
@@ -120,7 +121,14 @@ class RiskManager:
         volume_max = symbol_info.volume_max
 
         if units < volume_min:
-            logger.info(f"Live run: Calculated lot size {units:.4f} is below broker's minimum of {volume_min}. Skipping trade.")
+            logger.info(f"Live run: Calculated lot size {units:.4f} is below broker's minimum of {volume_min}. Skipping trade.") 
+        # # If units is less than volume_min, but not zero, force it to volume_min
+        # # This ensures we always trade the minimum if a signal is present and risk allows.
+        # if 0 < units < volume_min:
+        #     logger.info(f"Live run: Calculated lot size {units:.4f} is below broker's minimum of {volume_min}. Forcing to {volume_min}.")
+        #     units = volume_min
+        # elif units <= 0: # If units is zero or negative, skip the trade
+        #     logger.info(f"Live run: Calculated lot size {units:.4f} is zero or negative. Skipping trade.")
             return 0.0, 0.0
 
         # Adjust lots to the nearest valid step and clip to bounds
