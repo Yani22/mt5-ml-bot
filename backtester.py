@@ -87,8 +87,11 @@ class HybridBacktester:
 
         contract_size = self.risk_manager.get_contract_size(sym)
         pip_value = self.risk_manager.get_pip_value(sym)
-        cost_pips_per_lot = getattr(self.cfg.risk, 'transaction_cost_pips', 0.0)
-        cost_per_lot = cost_pips_per_lot * pip_value
+        
+        # Get commission and slippage from config for backtesting PnL calculation
+        commission_per_trade = self.cfg.trading_costs.defaults.commission_per_trade
+        slippage_pips = self.cfg.trading_costs.defaults.slippage_pips
+        adaptive_slippage_multiplier = self.cfg.trading_costs.defaults.adaptive_slippage_multiplier
 
         # This loop identifies trades that close on the current bar
         for pos in [p for p in self.positions if p.symbol==sym and p.status=="open"]:
@@ -108,7 +111,17 @@ class HybridBacktester:
 
             if exit_reason:
                 gross_pnl = ((price - pos.entry_price) * pos.lots * contract_size) if pos.direction == "long" else ((pos.entry_price - price) * pos.lots * contract_size)
-                transaction_cost = cost_per_lot * pos.lots
+                
+                # Calculate slippage cost for backtesting
+                backtest_slippage_cost_value = 0.0
+                if self.cfg.trading_costs.defaults.adaptive_slippage:
+                    # In backtesting, we use slippage_pips as a base for adaptive calculation
+                    backtest_slippage_cost_value = (slippage_pips * pip_value * pos.lots) * adaptive_slippage_multiplier
+                else:
+                    backtest_slippage_cost_value = slippage_pips * pip_value * pos.lots
+
+                # Calculate total transaction cost for backtesting
+                transaction_cost = (commission_per_trade * pos.lots) + backtest_slippage_cost_value
                 net_pnl = gross_pnl - transaction_cost
 
                 # Update consecutive losses counter
@@ -316,11 +329,10 @@ class HybridBacktester:
                 pip_value = self.risk_manager.get_pip_value(sym)
                 pip_size = self.risk_manager.get_pip_size(sym)
 
-                spread_pips = getattr(self.cfg.trading_costs.defaults, 'spread_pips', 2.0)
-                spread_value = spread_pips * pip_size
-
                 lots, effective_risk = self.risk_manager.position_size(
-                    self.equity, atr, auc_score, spread_value, total_open_risk, symbol=sym, exploration_mult=dynamic_risk_params.get("exploration_risk_mult", 1.0)
+                    self.equity, atr, auc_score, total_open_risk=total_open_risk, symbol=sym,
+                    exploration_mult=dynamic_risk_params.get("exploration_risk_mult", 1.0),
+                    ac_multiplier=dynamic_risk_params.get("ac_multiplier", 1.0)
                 )
 
                 if lots > 0:

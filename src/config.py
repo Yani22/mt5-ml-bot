@@ -107,13 +107,11 @@ class MonitoringCfg:
 
 @dataclass
 class TradingCostsDefaultsCfg:
-    spread_pips: float = 0.8
     slippage_pips: float = 0.5
     commission_per_trade: float = 0.0
-    lot_size: float = 0.1
-    pip_value: float = 0.0001
     adaptive_slippage: bool = True
     retry_order_send: int = 3
+    adaptive_slippage_multiplier: float = 1.0
 
 @dataclass
 class TradingCostsCfg:
@@ -167,6 +165,15 @@ class ThompsonSamplingCfg:
     reset_cooldown_hours: float = 24.0
 
 @dataclass
+class AsymmetricCompoundingCfg:
+    enabled: bool = False
+    win_streak_multiplier: float = 1.2 # Multiplier for risk after a winning trade
+    loss_streak_divisor: float = 0.8   # Divisor for risk after a losing trade
+    max_streak_effect: float = 2.0     # Max multiplier/divisor effect (e.g., 2.0 means risk can be 2x or 0.5x)
+    reset_on_opposite_outcome: bool = True # Reset streak counter if outcome changes
+    lookback_trades: int = 5           # Number of recent trades to consider for streak
+
+@dataclass
 class Cfg:
     symbols: List[str] = field(default_factory=lambda: ["EURUSD#"])
     timeframe: str = "M5"
@@ -198,6 +205,7 @@ class Cfg:
     magic_number: int = 424242
     symbol_overrides: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     backtesting: BacktestingCfg = field(default_factory=BacktestingCfg)
+    asymmetric_compounding: AsymmetricCompoundingCfg = field(default_factory=AsymmetricCompoundingCfg)
 
     def __post_init__(self):
         # Dynamically calculate context_dim for Thompson Sampling
@@ -381,6 +389,14 @@ class Cfg:
             logger.warning(f"Invalid backtesting config in YAML: {e}; using defaults.")
             bt_obj = BacktestingCfg()
 
+        # parse asymmetric_compounding block if present
+        try:
+            ac_raw = raw.get("asymmetric_compounding", {}) or {}
+            ac_obj = AsymmetricCompoundingCfg(**ac_raw) if ac_raw else AsymmetricCompoundingCfg()
+        except Exception as e:
+            logger.warning(f"Invalid asymmetric_compounding config in YAML: {e}; using defaults.")
+            ac_obj = AsymmetricCompoundingCfg()
+
         return Cfg(
             symbols=raw.get("symbols", ["EURUSD"]),
             timeframe=raw.get("timeframe", "M5"),
@@ -412,4 +428,5 @@ class Cfg:
             magic_number=int(raw.get("magic_number", 424242)),
             symbol_overrides=raw.get("symbol_overrides", {}),
             backtesting=bt_obj,
+            asymmetric_compounding=ac_obj,
         )

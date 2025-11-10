@@ -16,9 +16,14 @@ def _json_serial(obj):
     """
     JSON serializer for objects not serializable by default json code.
     Handles datetime objects by converting them to ISO format strings.
+    Handles numpy numerical types by converting them to standard Python types.
     """
     if isinstance(obj, (datetime.datetime, datetime.date)):
         return obj.isoformat()
+    if isinstance(obj, (np.integer, np.floating, np.bool_)):
+        return obj.item() # Convert numpy types to native Python types
+    if isinstance(obj, bool): # Redundant if np.bool_ is handled, but safe for pure Python bools
+        return str(obj)
     raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
 
 
@@ -145,6 +150,12 @@ class SymbolRiskState:
         self.min_prob_updates_since_last_adaptation: int = 0
         self.last_reset_time: Optional[datetime.datetime] = None # NEW: To track last reset for cooldown
 
+        # Asymmetric Compounding
+        self.win_streak: int = 0
+        self.loss_streak: int = 0
+        self.current_ac_multiplier: float = 1.0
+        self.last_trade_was_win: Optional[bool] = None
+
     def _get_bandit_and_grid(self, param_type: str) -> Tuple[ThompsonBandit | LinearThompson, List[float]]:
         if param_type == "atr":
             if self.contextual_bandit is not None:
@@ -170,6 +181,10 @@ class SymbolRiskState:
             "atr_updates_since_last_adaptation": self.atr_updates_since_last_adaptation,
             "min_prob_updates_since_last_adaptation": self.min_prob_updates_since_last_adaptation,
             "last_reset_time": self.last_reset_time.isoformat() if self.last_reset_time else None,
+            "win_streak": self.win_streak,
+            "loss_streak": self.loss_streak,
+            "current_ac_multiplier": self.current_ac_multiplier,
+            "last_trade_was_win": self.last_trade_was_win,
         }
         if self.contextual_bandit is not None:
             d["contextual_bandit"] = self.contextual_bandit.get_state()
@@ -206,6 +221,12 @@ class SymbolRiskState:
         inst.min_prob_updates_since_last_adaptation = state.get("min_prob_updates_since_last_adaptation", 0)
         last_reset_time_str = state.get("last_reset_time")
         inst.last_reset_time = datetime.datetime.fromisoformat(last_reset_time_str) if last_reset_time_str else None
+        
+        # Asymmetric Compounding
+        inst.win_streak = state.get("win_streak", 0)
+        inst.loss_streak = state.get("loss_streak", 0)
+        inst.current_ac_multiplier = state.get("current_ac_multiplier", 1.0)
+        inst.last_trade_was_win = state.get("last_trade_was_win")
         
         if "contextual_bandit" in state and getattr(cfg.thompson_sampling, "contextual_enabled", False):
             # Re-initialize contextual bandit with the correct number of arms from the loaded grid
@@ -451,6 +472,7 @@ class RiskController:
             "is_exploratory": is_exploratory,
             "exploration_risk_mult": exploration_risk_mult,
             "context_vector": x.tolist() if 'x' in locals() else None,
+            "ac_multiplier": sym_state.current_ac_multiplier, # NEW: Asymmetric Compounding Multiplier
         }
 
     def update(self, trade: ClosedTrade):
@@ -508,6 +530,40 @@ class RiskController:
                     
         # Check and trigger grid adaptation after updating bandits
         self._check_and_trigger_adaptation(symbol)        
+
+        # --- Asymmetric Compounding Logic ---
+        ac_cfg = self.cfg.asymmetric_compounding
+        if ac_cfg.enabled:
+            is_win = trade.pnl > 0
+            
+            if sym_state.last_trade_was_win is not None and sym_state.last_trade_was_win != is_win and ac_cfg.reset_on_opposite_outcome:
+                # Outcome changed, reset streaks
+                sym_state.win_streak = 0
+                sym_state.loss_streak = 0
+                logger.debug(f"[{symbol}] Asymmetric Compounding: Streak reset due to opposite outcome.")
+            
+            if is_win:
+                sym_state.win_streak += 1
+                sym_state.loss_streak = 0
+            else:
+                sym_state.loss_streak += 1
+                sym_state.win_streak = 0
+            
+            sym_state.last_trade_was_win = is_win
+
+            # Calculate multiplier
+            multiplier = 1.0
+            if sym_state.win_streak > 0:
+                multiplier = ac_cfg.win_streak_multiplier ** sym_state.win_streak
+            elif sym_state.loss_streak > 0:
+                multiplier = ac_cfg.loss_streak_divisor ** sym_state.loss_streak
+            
+            # Apply max_streak_effect
+            multiplier = np.clip(multiplier, 1.0 / ac_cfg.max_streak_effect, ac_cfg.max_streak_effect)
+            
+            sym_state.current_ac_multiplier = float(multiplier)
+            logger.debug(f"[{symbol}] Asymmetric Compounding: Win Streak={sym_state.win_streak}, Loss Streak={sym_state.loss_streak}, AC Multiplier={sym_state.current_ac_multiplier:.2f}")
+
         
     def save_state(self, open_positions_cache: dict | None = None):
         state_path = self.cfg.thompson_sampling.state_file

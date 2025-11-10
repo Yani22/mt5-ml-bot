@@ -65,7 +65,7 @@ class RiskManager:
         return float(val)
 
     # ---------- Position sizing ----------
-    def position_size(self, equity: float, atr: float, auc_score: float, spread_value: float, total_open_risk: float = 0.0, symbol: str | None = None, exploration_mult: float = 1.0) -> tuple[float, float]:
+    def position_size(self, equity: float, atr: float, auc_score: float, total_open_risk: float = 0.0, symbol: str | None = None, exploration_mult: float = 1.0, ac_multiplier: float = 1.0) -> tuple[float, float]:
         # CRITICAL SAFETY CHECK: Do not open a new position if one already exists for this symbol.
         if any(pos.get('symbol') == symbol for pos in self.open_positions_cache.values()):
             logger.warning(f"[{symbol}] Blocking new trade: A position is already open for this symbol.")
@@ -77,10 +77,31 @@ class RiskManager:
             logger.warning(f"[{symbol}] Could not get symbol info. Cannot calculate position size.")
             return 0.0, 0.0
 
+        # Get current tick for live spread
+        tick = self.mt5_client.symbol_info_tick(symbol)
+        if not tick:
+            logger.warning(f"[{symbol}] Could not get tick info for live spread. Cannot calculate position size.")
+            return 0.0, 0.0
+        
+        live_spread_value = abs(tick.ask - tick.bid)
+        
+        # Commission cannot be fetched dynamically from MT5 SymbolInfo before trade.
+        # Use static value from config for calculation.
+        commission_per_trade = self.cfg.trading_costs.defaults.commission_per_trade 
+
         pip_size = symbol_info.point
         contract_size = symbol_info.trade_contract_size
         pip_value = pip_size * contract_size
-        logger.info(f"[{symbol}] position_size: pip_size={pip_size}, contract_size={contract_size}, calculated pip_value={pip_value}")
+        logger.info(f"[{symbol}] position_size: pip_size={pip_size}, contract_size={contract_size}, calculated pip_value={pip_value}, live_spread_value={live_spread_value:.5f}, commission_per_trade={commission_per_trade:.2f}")
+
+        # Calculate slippage cost
+        slippage_cost_value = 0.0
+        if self.cfg.trading_costs.defaults.adaptive_slippage:
+            slippage_cost_value = live_spread_value * self.cfg.trading_costs.defaults.adaptive_slippage_multiplier
+            logger.info(f"[{symbol}] Adaptive slippage enabled. Slippage cost: {slippage_cost_value:.5f} (Spread: {live_spread_value:.5f} * Multiplier: {self.cfg.trading_costs.defaults.adaptive_slippage_multiplier})")
+        else:
+            slippage_cost_value = self.cfg.trading_costs.defaults.slippage_pips * pip_size
+            logger.info(f"[{symbol}] Static slippage enabled. Slippage cost: {slippage_cost_value:.5f} (Pips: {self.cfg.trading_costs.defaults.slippage_pips} * Pip Size: {pip_size})")
 
         # Get symbol-specific or default risk per trade
         risk_per_trade_base = self.cfg.get_symbol_value(symbol, 'risk_per_trade', 0.005)
@@ -91,12 +112,17 @@ class RiskManager:
         
         # Apply exploration multiplier
         effective_risk *= exploration_mult
+        
+        # Apply Asymmetric Compounding multiplier
+        effective_risk *= ac_multiplier
 
         risk_amt = float(equity) * float(effective_risk)
 
         atr_mult_sl = self.cfg.get_symbol_value(symbol, 'atr_multiplier_sl', 1.0)
         sl_distance_atr = float(atr_mult_sl) * float(atr)
-        sl_distance = sl_distance_atr + spread_value
+        
+        # Adjust SL distance to include live spread
+        sl_distance = sl_distance_atr + live_spread_value
 
         if sl_distance <= 0 or (pip_value is None) or pip_value <= 0:
             logger.warning("Invalid SL distance or pip_value when computing position size")
@@ -107,7 +133,9 @@ class RiskManager:
             return 0.0, 0.0
         
         sl_in_pips = sl_distance / pip_size
-        risk_per_lot = sl_in_pips * pip_value
+        
+        # Adjust risk per lot to include commission and slippage cost
+        risk_per_lot = sl_in_pips * pip_value + commission_per_trade + slippage_cost_value
 
         if risk_per_lot <= 0:
             logger.warning(f"Calculated risk per lot is not positive: {risk_per_lot}")

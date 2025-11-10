@@ -10,6 +10,9 @@ from src.config import Cfg
 from src.features import FeatureCfg, build_features
 from src.labels import generate_labels
 
+import time
+from src.mt5_client import MT5Client
+
 def ensure_dir(path: str):
     if path is None:
         return
@@ -20,6 +23,26 @@ class DataManager:
         self.cfg = cfg
         self.raw_data_dir = cfg.fetch.raw_data_dir
         ensure_dir(self.raw_data_dir)
+
+        # Initialize MT5Client and add retry logic for connection
+        self.mt5_client = MT5Client(
+            os.getenv("MT5_LOGIN"),
+            os.getenv("MT5_PASSWORD"),
+            os.getenv("MT5_SERVER"),
+            os.getenv("MT5_PATH"),
+        )
+        max_retries = 3
+        for i in range(max_retries):
+            if self.mt5_client.connect():
+                logger.info("MT5Client connected successfully in DataManager.")
+                break
+            else:
+                logger.warning(f"MT5Client connection attempt {i+1}/{max_retries} failed in DataManager. Retrying in 5 seconds...")
+                time.sleep(5)
+        if not self.mt5_client.is_connected():
+            logger.error("Failed to connect MT5Client in DataManager after multiple retries.")
+            # Optionally, raise an exception or handle this failure more gracefully
+
 
     def _local_csv_path(self, symbol: str, timeframe: str) -> str:
         fname = f"{symbol.replace('#','')}_{timeframe}.csv"

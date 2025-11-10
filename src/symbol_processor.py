@@ -147,9 +147,10 @@ class SymbolProcessor:
 
             # Determine position size and stop/take-profit targets
             lots, effective_risk = self.risk_manager.position_size(
-                self.monitor.current_equity, atr, auc_score, spread_value,
+                self.monitor.current_equity, atr, auc_score,
                 total_open_risk=total_open_risk, symbol=self.symbol,
-                exploration_mult=dynamic_risk_params.get("exploration_risk_mult", 1.0)
+                exploration_mult=dynamic_risk_params.get("exploration_risk_mult", 1.0),
+                ac_multiplier=dynamic_risk_params.get("ac_multiplier", 1.0)
             )
 
             # CRITICAL: If position_size returned 0 lots (e.g., due to existing open position for symbol), skip trade execution.

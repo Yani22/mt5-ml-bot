@@ -52,8 +52,16 @@ def suggest_params(trial, prefix: str, param_ranges: dict):
             params[k] = v
     return params
 
-def objective(trial, df: pd.DataFrame, y: pd.Series, static_features: pd.DataFrame, symbol: str):
+from src.labels import generate_labels # NEW IMPORT
+
+# ... (rest of imports) ...
+
+def objective(trial, df: pd.DataFrame, static_features: pd.DataFrame, symbol: str):
     try:
+        # --- 0. Suggest Label Parameters ---
+        prediction_horizon = trial.suggest_categorical("prediction_horizon", [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15])
+        min_pct_change = trial.suggest_categorical("min_pct_change", [0.00005, 0.00006, 0.00007, 0.00008, 0.00009, 0.0001, 0.0002])
+
         # --- 1. Suggest Feature Parameters ---
         feature_params_raw = suggest_params(trial, "feature", yaml_cfg.get("features", {}))
 
@@ -71,6 +79,15 @@ def objective(trial, df: pd.DataFrame, y: pd.Series, static_features: pd.DataFra
 
         # --- 2. Build Features for this Trial (using cached static features) ---
         X = build_dynamic_features(df, static_features, feature_cfg, symbol)
+        
+        # --- Generate Labels for this Trial ---
+        y = generate_labels(df, prediction_horizon, min_pct_change)
+
+        # Align X and y by index
+        common_idx = X.index.intersection(y.index)
+        X = X.loc[common_idx]
+        y = y.loc[common_idx]
+
         data = merge_features_labels(df, X, y)
         
         X_train = data.drop(columns=["y", "close", "high", "low", "volume"])
@@ -120,12 +137,13 @@ def run_tuning_for_symbol(sym: str):
     # --- 1. Get all data and static features from the centralized pipeline ---
     # For tuning, we pass a default FeatureConfig and set build_dynamic=False.
     # The dynamic features will be built inside the objective function for each trial.
-    static_features, y, df = get_training_data(
+    static_features, _, df = get_training_data( # Unpack X, discard y, get df
         cfg, 
         sym, 
         feature_cfg=FeatureCfg(), # Pass a default/dummy config
         source=cfg.data_source if hasattr(cfg, "data_source") else "csv",
-        build_dynamic=False # Instruct the pipeline to return intermediate artifacts for tuner
+        build_dynamic=False, # Instruct the pipeline to return intermediate artifacts for tuner
+        return_long_short_labels=False # We will generate labels inside the objective
     )
 
     if df.empty:
@@ -133,7 +151,7 @@ def run_tuning_for_symbol(sym: str):
         return
 
     # --- 2. Run Optuna Study ---
-    objective_partial = partial(objective, df=df, y=y, static_features=static_features, symbol=sym)
+    objective_partial = partial(objective, df=df, static_features=static_features, symbol=sym)
 
     study_name = f"feature_model_tuning_{sym.replace('#','_')}_history_{cfg.history_bars}"
     storage_path = f"sqlite:///{os.path.join(PARAMS_DIR, study_name)}.db"
@@ -146,7 +164,12 @@ def run_tuning_for_symbol(sym: str):
 
     # --- 5. Process and Save Best Parameters ---
     best_params_flat = study.best_params
-    best_params_structured = {"features": {}, "models": {}}
+    best_params_structured = {
+        "features": {},
+        "models": {},
+        "prediction_horizon": best_params_flat.get("prediction_horizon", cfg.prediction_horizon),
+        "min_pct_change": best_params_flat.get("min_pct_change", cfg.features.min_pct_change),
+    }
 
     for key, value in best_params_flat.items():
         if key.startswith("feature_"):

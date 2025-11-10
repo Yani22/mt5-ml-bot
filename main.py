@@ -105,7 +105,10 @@ def run_retraining_in_background(cfg, sym, feature_cfg, dry_run, notifier, optun
             if notifier: notifier.send_message(message, level="WARNING")
             return
 
-        y_long, y_short = generate_long_short_labels(full_data, cfg.prediction_horizon, feature_cfg.min_pct_change)
+        # Retrieve tuned prediction_horizon for this symbol
+        tuned_prediction_horizon = optuna_params_per_symbol[sym].get('prediction_horizon', cfg.prediction_horizon)
+
+        y_long, y_short = generate_long_short_labels(full_data, tuned_prediction_horizon, feature_cfg.min_pct_change)
 
         logger.info(f"[{sym}] Retraining LONG model...")
         ens_old_long = load_ensemble(cfg, sym, "long", model_params=optuna_params_per_symbol[sym])

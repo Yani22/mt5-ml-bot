@@ -6,7 +6,7 @@ magic_number: 424242 # Unique ID for this bot's trades
 data_source: mt5 # "mt5" or "csv". Automatically switches to csv on non-windows
 
 # --- Optuna Tuning Specifics ---
-optuna_n_trials: 100  # 150
+optuna_n_trials: 150  # 150
 
 # --- Backtesting Settings ---
 backtesting:
@@ -40,12 +40,12 @@ ensemble_training:
 
 # --- Symbols & timeframe ---
 # historical_data symbols for .csv needed: M5-EURUSD#, H1-EURUSD#, and M5-USDX-DEC25
-symbols: ["USDCADm#"]
-# symbols: ["AUDUSDm#", "GBPUSDm#", "EURUSDm#"]
+symbols: ["AUDUSDm#", "EURUSDm#", "GBPUSDm#"]
+# symbols: ["AUDUSDm#", "EURUSDm#", "GBPUSDm#"]
 # symbols: ["USDJPYm#", "GBPJPYm#", "EURJPYm", "USDCADm", "EURGBPm"] 
 timeframe: "M5"            # One of: M1, M5, M15, M30, H1, H4
-history_bars: 3000          #22500 18000 36000 45000 #12000-for-tuner.py #5000-for-backtesting
-retrain_every_bars: 1000     # ~3.5 days at M5
+history_bars: 45000          #22500 18000 36000 45000 #12000-for-tuner.py #5000-for-backtesting
+retrain_every_bars: 10000     # ~3.5 days at M5
 prediction_horizon: 12       # 6 Bars ahead for label (~30 min on M5)
 retraining_window_bars: 45000         # Number of recent bars for rolling window retraining. null for expanding window.
 
@@ -94,13 +94,11 @@ ensemble:
 trading_costs:
   source: static
   defaults:
-    spread_pips: 1.5
     slippage_pips: 0.1
     commission_per_trade: 0.0
-    lot_size: 0.1
-    pip_value: 0.0001
     adaptive_slippage: true        # dynamically calculate slippage based on recent spread
     retry_order_send: 3            # number of retries for failed order sends
+    adaptive_slippage_multiplier: 1.0
 
 # --- Thompson Sampling Configuration ---
 thompson_sampling:
@@ -140,11 +138,11 @@ thompson_sampling:
 
 # --- Risk management ---
 risk:
-  risk_per_trade: 0.02
+  risk_per_trade: 0.035
   dynamic_risk:
     enabled: true
-    base_risk: 0.02      #0.02 Risk 2% of equity on the least confident trades 0.01
-    max_risk: 0.035         #0.035 Risk up to 3% of equity on the most confident trades  0.015
+    base_risk: 0.035      #0.02 Risk 2% of equity on the least confident trades 0.01
+    max_risk: 0.05         #0.035 Risk up to 3% of equity on the most confident trades  0.015
     auc_floor: 0.55        # The AUC score that corresponds to base_risk
     auc_ceiling: 0.65      # The AUC score that corresponds to max_risk
 
@@ -155,7 +153,7 @@ risk:
     auc_floor: 0.55        # Same AUC floor as risk
     auc_ceiling: 0.65      # Same AUC ceiling as risk
 
-  max_positions: 1            # Max concurrent positions 1-backtest 3-main
+  max_positions: 3            # Max concurrent positions 1-backtest 3-main
   max_portfolio_risk: 0.15       #Total equity risk cap  0.05-backtest 0.15-main
   atr_multiplier_sl: 1.0
   atr_multiplier_tp: 2.0
@@ -189,6 +187,15 @@ monitoring:
   monitor_state_file: "results/monitor_state.json" # File to save LivePerformanceMonitor state
   telegram_bot_token: "" # Your Telegram Bot Token
   telegram_chat_id: "" # Your Telegram Chat ID (can be negative for groups)
+
+# --- Asymmetric Compounding ---
+asymmetric_compounding:
+  enabled: true
+  win_streak_multiplier: 1.2
+  loss_streak_divisor: 0.8
+  max_streak_effect: 2.0
+  reset_on_opposite_outcome: true
+  lookback_trades: 5
 
 # --- Misc / Transparency ---
 startup_logging: true             # log key settings at bot launch for transparency

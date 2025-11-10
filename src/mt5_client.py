@@ -5,7 +5,7 @@ import datetime
 from typing import Optional
 import MetaTrader5 as mt5  # type: ignore
 from loguru import logger
-from src.utils import timeframe_to_seconds
+from src.time_utils import timeframe_to_seconds
 
 class MT5Client:
     """ Safe wrapper around MetaTrader5 initialization and login. """

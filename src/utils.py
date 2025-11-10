@@ -11,6 +11,7 @@ from src.ensemble import Ensemble
 from src.config import Cfg
 from src import data_manager
 from src.data import merge_features_labels
+from src.time_utils import timeframe_to_seconds, timeframe_to_mt5_timeframe # NEW IMPORT
 import glob
 import numpy as np
 
@@ -56,7 +57,7 @@ def load_optuna_params(symbol: str, cfg: Cfg) -> dict | None:
     logger.debug(f"[{symbol}] Loaded Optuna best params from {file_path}")
     return loaded_params
 
-def get_training_data(cfg: Cfg, symbol: str, feature_cfg: FeatureCfg, count: int | None = None, source: str = "csv", load_all_data: bool = False, build_dynamic: bool = True, min_pct_change: float = 0.0, mta_df: pd.DataFrame | None = None, inter_market_df: pd.DataFrame | None = None, return_long_short_labels: bool = False):
+def get_training_data(cfg: Cfg, symbol: str, feature_cfg: FeatureCfg, count: int | None = None, source: str = "csv", load_all_data: bool = False, build_dynamic: bool = True, min_pct_change: float = 0.0, prediction_horizon: int = 0, mta_df: pd.DataFrame | None = None, inter_market_df: pd.DataFrame | None = None, return_long_short_labels: bool = False):
     """
     New centralized data pipeline.
     - If build_dynamic is True, returns (data, X, y) or (data, X, y_long, y_short) for trainers/backtesters.
@@ -113,14 +114,14 @@ def get_training_data(cfg: Cfg, symbol: str, feature_cfg: FeatureCfg, count: int
     X = build_features(df.copy(), feature_cfg, cfg, symbol=symbol, mta_df=mta_df, inter_market_df=inter_market_df)
     
     if return_long_short_labels:
-        y_long, y_short = generate_long_short_labels(df, cfg.prediction_horizon, min_pct_change)
+        y_long, y_short = generate_long_short_labels(df, prediction_horizon, min_pct_change)
         # Align X and y by index
         aligned_idx = X.index.intersection(y_long.index)
         X = X.loc[aligned_idx]
         y_long = y_long.loc[aligned_idx]
         y_short = y_short.loc[aligned_idx]
     else:
-        y = generate_labels(df, cfg.prediction_horizon, min_pct_change)
+        y = generate_labels(df, prediction_horizon, min_pct_change)
         # Align X and y by index
         aligned_idx = X.index.intersection(y.index)
         X = X.loc[aligned_idx]
@@ -279,52 +280,6 @@ def log_startup_summary(cfg: "Cfg"):
     logger.info(f"Max Portfolio Risk: {cfg.risk.max_portfolio_risk}")
     logger.info(f"Dynamic Risk Enabled: {cfg.risk.dynamic_risk['enabled']}")
     logger.info("--- End of Summary ---")
-
-def timeframe_to_mt5_timeframe(timeframe_str: str):
-    """Converts a timeframe string (e.g., 'M5') to a MetaTrader 5 timeframe constant."""
-    import MetaTrader5 as mt5
-    timeframe_map = {
-        "M1": mt5.TIMEFRAME_M1,
-        "M5": mt5.TIMEFRAME_M5,
-        "M15": mt5.TIMEFRAME_M15,
-        "M30": mt5.TIMEFRAME_M30,
-        "H1": mt5.TIMEFRAME_H1,
-        "H4": mt5.TIMEFRAME_H4,
-        "D1": mt5.TIMEFRAME_D1,
-    }
-    return timeframe_map.get(timeframe_str, mt5.TIMEFRAME_M1)
-
-def timeframe_to_seconds(timeframe: int | str) -> int:
-    """Converts a MetaTrader 5 timeframe constant (e.g., mt5.TIMEFRAME_M5) or string ('M5') to seconds."""
-    import MetaTrader5 as mt5
-    if isinstance(timeframe, int):
-        # Handle MT5 integer constants
-        if timeframe == mt5.TIMEFRAME_M1: return 60
-        if timeframe == mt5.TIMEFRAME_M5: return 300
-        if timeframe == mt5.TIMEFRAME_M15: return 900
-        if timeframe == mt5.TIMEFRAME_M30: return 1800
-        if timeframe == mt5.TIMEFRAME_H1: return 3600
-        if timeframe == mt5.TIMEFRAME_H4: return 14400
-        if timeframe == mt5.TIMEFRAME_D1: return 86400
-        if timeframe == mt5.TIMEFRAME_W1: return 604800
-        if timeframe == mt5.TIMEFRAME_MN1: return 2592000 # Approximate for 30 days
-        raise ValueError(f"Unsupported MT5 integer timeframe: {timeframe}")
-    elif isinstance(timeframe, str):
-        if timeframe.startswith('M'):
-            minutes = int(timeframe[1:])
-            return minutes * 60
-        elif timeframe.startswith('H'):
-            hours = int(timeframe[1:])
-            return hours * 60 * 60
-        elif timeframe.startswith('D'):
-            return 24 * 60 * 60 # D1
-        elif timeframe.startswith('W'):
-            return 7 * 24 * 60 * 60 # W1
-        elif timeframe.startswith('MN'):
-            return 30 * 24 * 60 * 60 # MN1 (approx)
-        raise ValueError(f"Unsupported string timeframe: {timeframe}")
-    else:
-        raise TypeError(f"timeframe must be int or str, got {type(timeframe)}")
 
 def ensure_min_grid_size(thresholds: list[float], best_thr: float, min_size: int = 5, spread: float = 0.02) -> list[float]:
     """Ensures a list of thresholds has at least min_size elements, expanding around best_thr if needed."""
