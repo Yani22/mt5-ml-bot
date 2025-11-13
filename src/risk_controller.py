@@ -260,6 +260,13 @@ class RiskController:
         self.last_daily_retrain_date: Dict[str, Optional[datetime.date]] = {sym: None for sym in cfg.symbols}
         self.bar_counters: Dict[str, int] = {sym: 0 for sym in cfg.symbols}
 
+    def increment_bar_counter(self, symbol: str):
+        """Increments the bar counter for a given symbol."""
+        if symbol in self.bar_counters:
+            self.bar_counters[symbol] += 1
+        else:
+            logger.warning(f"[{symbol}] Attempted to increment bar counter for an untracked symbol.")
+
     def update_last_daily_retrain_date(self, symbol: str, date: datetime.date):
         self.last_daily_retrain_date[symbol] = date
 
@@ -487,6 +494,19 @@ class RiskController:
         sym_state = self.symbol_states[symbol]
         reward = trade.pnl / self.cfg.thompson_sampling.reward_normalization_factor # Normalize PnL
 
+        # --- Update Core Performance Metrics ---
+        if trade.exit_equity is not None:
+            sym_state.current_equity = trade.exit_equity
+            sym_state.peak_equity = max(sym_state.peak_equity, trade.exit_equity)
+        
+        sym_state.recent_returns.append(reward)
+
+        if trade.pnl <= 0:
+            sym_state.consecutive_losses += 1
+        else:
+            sym_state.consecutive_losses = 0
+        
+        # --- Update Bandits ---
         # Update ATR bandit
         if trade.atr_idx is not None and trade.atr_idx != -1: # -1 indicates no TS choice for this parameter
             if sym_state.contextual_bandit is not None and getattr(self.cfg.thompson_sampling, "contextual_enabled", False):
@@ -609,8 +629,8 @@ class RiskController:
             self.bar_counters = state.get("bar_counters", {sym: 0 for sym in self.cfg.symbols})
 
             logger.info(f"RiskController state loaded from {state_path}")
-            # Return the open positions cache if it exists
-            return state.get("open_positions_cache", {})
+            # Return the open positions cache, ensuring keys are integers
+            return {int(k): v for k, v in state.get("open_positions_cache", {}).items()}
         except Exception as e:
             logger.error(f"Failed to load RiskController state from {state_path}: {e}")
             if self.notifier: self.notifier.send_message(f"<b>ERROR:</b> Failed to load RiskController state from {state_path}: {e}", level="ERROR")

@@ -39,6 +39,15 @@ class LivePerformanceMonitor:
         while self.equity_curve and self.equity_curve[0][0] < min_timestamp:
             self.equity_curve.popleft()
 
+    def sync_equity(self, new_equity: float):
+        """
+        For startup synchronization. Sets the current equity and updates the peak
+        without adding a point to the historical equity curve.
+        """
+        self.current_equity = new_equity
+        self.peak_equity = max(self.peak_equity, new_equity)
+        logger.info(f"Live monitor equity synchronized to: {new_equity}")
+
     def add_closed_trade(self, trade: ClosedTrade):
         self.closed_trades.append(trade)
 
@@ -65,6 +74,8 @@ class LivePerformanceMonitor:
                 closed_trades_data.append(trade_data)
 
             equity_curve_data = [(ts.isoformat(), eq) for ts, eq in self.equity_curve]
+
+            self.last_check_time = datetime.datetime.now(datetime.timezone.utc) # Update last_check_time before saving
 
             state = {
                 "closed_trades": closed_trades_data,

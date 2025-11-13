@@ -1,5 +1,5 @@
-# src/risk.py
-from __future__ import annotations
+from loguru import logger # type: ignore
+from .config import Cfg
 import pandas as pd # type: ignore
 import numpy as np # type: ignore
 from loguru import logger # type: ignore
@@ -9,6 +9,7 @@ from datetime import timezone, timedelta
 from typing import List, Optional # Import Optional
 from .trade import SimPosition # Import SimPosition
 from .notifier import TelegramNotifier # NEW import
+import threading
 
 class RiskManager:
     """
@@ -18,7 +19,7 @@ class RiskManager:
     Callers: pass `cfg` (the Cfg object) to constructor so both risk and watchdog settings are available.
     """
 
-    def __init__(self, cfg: Cfg, mt5_client, notifier: Optional[TelegramNotifier] = None):
+    def __init__(self, cfg: Cfg, mt5_client, lock: threading.Lock, notifier: Optional[TelegramNotifier] = None):
         self.cfg = cfg
         self.risk_cfg = cfg.risk
         self.watchdog_cfg = cfg.watchdog
@@ -28,6 +29,7 @@ class RiskManager:
         self.recently_closed_trades: List[SimPosition] = [] # New: To store closed trades for monitoring
         self.notifier = notifier # NEW
         self.mt5_client = mt5_client
+        self.cache_lock = lock
 
     def get_contract_size(self, symbol: str) -> float:
         symbol_info = self.mt5_client.symbol_info(symbol)
@@ -66,42 +68,25 @@ class RiskManager:
 
     # ---------- Position sizing ----------
     def position_size(self, equity: float, atr: float, auc_score: float, total_open_risk: float = 0.0, symbol: str | None = None, exploration_mult: float = 1.0, ac_multiplier: float = 1.0) -> tuple[float, float]:
-        # CRITICAL SAFETY CHECK: Do not open a new position if one already exists for this symbol.
-        if any(pos.get('symbol') == symbol for pos in self.open_positions_cache.values()):
-            logger.warning(f"[{symbol}] Blocking new trade: A position is already open for this symbol.")
-            return 0.0, 0.0
+        """
+        Calculates position size based on the simpler, backtester-aligned logic.
+        Lot size is determined by ATR-based stop distance and configured risk,
+        ignoring live spread/slippage in the calculation to match the profitable model.
+        """
+        with self.cache_lock:
+            # CRITICAL SAFETY CHECK: Do not open a new position if one already exists for this symbol.
+            if any(pos.get('symbol') == symbol for pos in self.open_positions_cache.values()):
+                logger.warning(f"[{symbol}] Blocking new trade: A position is already open for this symbol.")
+                return 0.0, 0.0
 
-        # Fetch symbol info dynamically
         symbol_info = self.mt5_client.symbol_info(symbol)
         if not symbol_info:
             logger.warning(f"[{symbol}] Could not get symbol info. Cannot calculate position size.")
             return 0.0, 0.0
 
-        # Get current tick for live spread
-        tick = self.mt5_client.symbol_info_tick(symbol)
-        if not tick:
-            logger.warning(f"[{symbol}] Could not get tick info for live spread. Cannot calculate position size.")
-            return 0.0, 0.0
-        
-        live_spread_value = abs(tick.ask - tick.bid)
-        
-        # Commission cannot be fetched dynamically from MT5 SymbolInfo before trade.
-        # Use static value from config for calculation.
-        commission_per_trade = self.cfg.trading_costs.defaults.commission_per_trade 
-
         pip_size = symbol_info.point
         contract_size = symbol_info.trade_contract_size
-        pip_value = pip_size * contract_size
-        logger.info(f"[{symbol}] position_size: pip_size={pip_size}, contract_size={contract_size}, calculated pip_value={pip_value}, live_spread_value={live_spread_value:.5f}, commission_per_trade={commission_per_trade:.2f}")
-
-        # Calculate slippage cost
-        slippage_cost_value = 0.0
-        if self.cfg.trading_costs.defaults.adaptive_slippage:
-            slippage_cost_value = live_spread_value * self.cfg.trading_costs.defaults.adaptive_slippage_multiplier
-            logger.info(f"[{symbol}] Adaptive slippage enabled. Slippage cost: {slippage_cost_value:.5f} (Spread: {live_spread_value:.5f} * Multiplier: {self.cfg.trading_costs.defaults.adaptive_slippage_multiplier})")
-        else:
-            slippage_cost_value = self.cfg.trading_costs.defaults.slippage_pips * pip_size
-            logger.info(f"[{symbol}] Static slippage enabled. Slippage cost: {slippage_cost_value:.5f} (Pips: {self.cfg.trading_costs.defaults.slippage_pips} * Pip Size: {pip_size})")
+        pip_value = self.get_pip_value(symbol) # Use helper to get value of 1 pip move per lot
 
         # Get symbol-specific or default risk per trade
         risk_per_trade_base = self.cfg.get_symbol_value(symbol, 'risk_per_trade', 0.005)
@@ -110,32 +95,23 @@ class RiskManager:
         max_risk_allowed = max(0.0, float(self.risk_cfg.max_portfolio_risk) - float(total_open_risk))
         effective_risk = min(risk_per_trade, max_risk_allowed)
         
-        # Apply exploration multiplier
         effective_risk *= exploration_mult
-        
-        # Apply Asymmetric Compounding multiplier
         effective_risk *= ac_multiplier
 
         risk_amt = float(equity) * float(effective_risk)
 
+        # SL distance is based purely on ATR, just like in the backtester's conceptual model
         atr_mult_sl = self.cfg.get_symbol_value(symbol, 'atr_multiplier_sl', 1.0)
-        sl_distance_atr = float(atr_mult_sl) * float(atr)
-        
-        # Adjust SL distance to include live spread
-        sl_distance = sl_distance_atr + live_spread_value
+        sl_distance = float(atr_mult_sl) * float(atr)
 
-        if sl_distance <= 0 or (pip_value is None) or pip_value <= 0:
-            logger.warning("Invalid SL distance or pip_value when computing position size")
+        if sl_distance <= 0 or pip_value <= 0 or pip_size <= 0:
+            logger.warning(f"Invalid SL distance ({sl_distance}), pip_value ({pip_value}), or pip_size ({pip_size})")
             return 0.0, 0.0
 
-        if pip_size <= 0:
-            logger.warning(f"Invalid pip_size for position sizing: {pip_size}")
-            return 0.0, 0.0
-        
+        # The value at risk per lot is purely the stop distance in currency terms.
+        # This matches the simpler, successful backtest model.
         sl_in_pips = sl_distance / pip_size
-        
-        # Adjust risk per lot to include commission and slippage cost
-        risk_per_lot = sl_in_pips * pip_value + commission_per_trade + slippage_cost_value
+        risk_per_lot = sl_in_pips * pip_value
 
         if risk_per_lot <= 0:
             logger.warning(f"Calculated risk per lot is not positive: {risk_per_lot}")
@@ -143,27 +119,18 @@ class RiskManager:
 
         units = risk_amt / risk_per_lot
 
-        # --- Context-aware volume limit enforcement ---
         volume_min = symbol_info.volume_min
         volume_step = symbol_info.volume_step
         volume_max = symbol_info.volume_max
 
         if units < volume_min:
-            logger.info(f"Live run: Calculated lot size {units:.4f} is below broker's minimum of {volume_min}. Skipping trade.") 
-        # # If units is less than volume_min, but not zero, force it to volume_min
-        # # This ensures we always trade the minimum if a signal is present and risk allows.
-        # if 0 < units < volume_min:
-        #     logger.info(f"Live run: Calculated lot size {units:.4f} is below broker's minimum of {volume_min}. Forcing to {volume_min}.")
-        #     units = volume_min
-        # elif units <= 0: # If units is zero or negative, skip the trade
-        #     logger.info(f"Live run: Calculated lot size {units:.4f} is zero or negative. Skipping trade.")
+            logger.info(f"Calculated lot size {units:.4f} is below broker's minimum of {volume_min}. Skipping trade.")
             return 0.0, 0.0
 
-        # Adjust lots to the nearest valid step and clip to bounds
         lots = round(units / volume_step) * volume_step
         lots = float(np.clip(lots, volume_min, volume_max))
 
-        logger.info(f"Position sizing: equity={equity:.2f}, ATR={atr:.6f}, lots={lots:.4f}, effective_risk={effective_risk:.6f}")
+        logger.info(f"Position sizing (backtest logic): equity={equity:.2f}, ATR={atr:.6f}, lots={lots:.4f}, effective_risk={effective_risk:.6f}")
         return round(lots, 2), effective_risk
 
     # ---------- SL / TP ----------
@@ -186,6 +153,11 @@ class RiskManager:
 
         _tp_mult = max(base_tp_mult, required_tp_mult)
 
+        # --- CRITICAL: Ensure multipliers are positive ---
+        # The TS bandit can sample negative values, which must be clamped.
+        _sl_mult = max(0.1, _sl_mult)
+        _tp_mult = max(0.1, _tp_mult)
+
         price = float(price)
         atr = float(atr)
         if direction == "long":
@@ -196,6 +168,17 @@ class RiskManager:
             tp = price - _tp_mult * atr
 
         price_digits = symbol_info.digits
+        stops_level = symbol_info.trade_stops_level
+        pip_size = symbol_info.point
+
+        # Adjust for stops_level
+        if direction == "long":
+            sl = min(sl, price - stops_level * pip_size)
+            tp = max(tp, price + stops_level * pip_size)
+        else: # short
+            sl = max(sl, price + stops_level * pip_size)
+            tp = min(tp, price - stops_level * pip_size)
+
         sl = round(sl, price_digits)
         tp = round(tp, price_digits)
 
@@ -364,7 +347,8 @@ class RiskManager:
         if not (breakeven_enabled or trailing_mult > 0):
             return # No trailing logic enabled for this symbol
 
-        positions_to_manage = [p for p in self.open_positions_cache.values() if p.get("symbol") == symbol]
+        with self.cache_lock:
+            positions_to_manage = [p for p in self.open_positions_cache.values() if p.get("symbol") == symbol]
 
         if not positions_to_manage:
             return
@@ -460,7 +444,8 @@ class RiskManager:
                 
                 if result and result.retcode == mt5.TRADE_RETCODE_DONE:
                     logger.info(f"[{symbol}] Successfully modified SL for position {ticket}.")
-                    self.open_positions_cache[ticket]['sl'] = new_sl
+                    with self.cache_lock:
+                        self.open_positions_cache[ticket]['sl'] = new_sl
                 else:
                     retcode = result.retcode if result else 'N/A'
                     comment = result.comment if result else 'N/A'

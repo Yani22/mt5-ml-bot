@@ -13,7 +13,7 @@ from src.ensemble import Ensemble
 from src.risk_controller import RiskController
 from src.live_performance_monitor import LivePerformanceMonitor
 from src.execution import Execution
-from src.utils import load_ensemble, load_optuna_params, timeframe_to_mt5_timeframe, log_symbol_specific_configs
+from src.utils import load_ensemble, load_optuna_params, timeframe_to_mt5_timeframe, log_symbol_specific_configs, log_metrics_to_csv
 from src.risk import RiskManager # NEW
 
 class SymbolProcessor:
@@ -82,13 +82,16 @@ class SymbolProcessor:
             logger.warning(f"[{self.symbol}] Ensembles not loaded. Skipping trade decision.")
             return
 
-        last_features = X.iloc[[-2]] if (X is not None and not X.empty and len(X) >= 2) else pd.DataFrame() # Use last CLOSED bar for features
-        current_bar_time = X.index[-1] # Time of the latest bar (potentially forming)
-        current_close_price = data["close"].iloc[-1] # Close price of the latest bar (potentially forming)
-        atr = X["atr_14"].iloc[-1] if (X is not None and not X.empty) else 0.0 # ATR of the latest bar (potentially forming)
+        if len(X) < 2 or len(data) < 2:
+            logger.warning(f"[{self.symbol}] Not enough data for trade decision (need at least 2 bars). Skipping.")
+            return
 
-        prob_long = self.ens_long.predict_proba(last_features).iloc[0]
-        prob_short = self.ens_short.predict_proba(last_features).iloc[0]
+        last_closed_features = X.iloc[[-2]]
+        last_closed_price = data["close"].iloc[-2]
+        atr = X["atr_14"].iloc[-2]
+
+        prob_long = self.ens_long.predict_proba(last_closed_features).iloc[0]
+        prob_short = self.ens_short.predict_proba(last_closed_features).iloc[0]
 
         # Get dynamic risk parameters from RiskController
         context = {
@@ -96,10 +99,10 @@ class SymbolProcessor:
             "equity": self.monitor.current_equity,
             "peak_equity": self.monitor.peak_equity,
             "ensemble_auc": (self.ens_long.ensemble_cv_auc_ + self.ens_short.ensemble_cv_auc_) / 2,
-            "adx": float(last_features["adx"].iloc[0]) if "adx" in last_features.columns else 0.0,
-            "macd_diff": float(last_features["macd_diff"].iloc[0]) if "macd_diff" in last_features.columns else 0.0,
-            "volatility_10": float(last_features["volatility_10"].iloc[0]) if "volatility_10" in last_features.columns else 0.0,
-            "dist_from_ema_200": float(last_features["dist_from_ema_200"].iloc[0]) if "dist_from_ema_200" in last_features.columns else 0.0,
+            "adx": float(last_closed_features["adx"].iloc[0]) if "adx" in last_closed_features.columns else 0.0,
+            "macd_diff": float(last_closed_features["macd_diff"].iloc[0]) if "macd_diff" in last_closed_features.columns else 0.0,
+            "volatility_10": float(last_closed_features["volatility_10"].iloc[0]) if "volatility_10" in last_closed_features.columns else 0.0,
+            "dist_from_ema_200": float(last_closed_features["dist_from_ema_200"].iloc[0]) if "dist_from_ema_200" in last_closed_features.columns else 0.0,
         }
         dynamic_risk_params = self.risk_controller.get_params(self.symbol, context)
 
@@ -170,7 +173,7 @@ class SymbolProcessor:
             price = float(tick.ask) if direction == "long" else float(tick.bid) # Define price here
 
             sl, tp = self.risk_manager.stop_targets(
-                current_close_price, atr, direction, auc_score, self.symbol,
+                price, atr, direction, auc_score, self.symbol,
                 sl_mult=atr_multiplier_sl, tp_mult=atr_multiplier_tp
             )
             # Execute trade
@@ -209,6 +212,7 @@ class SymbolProcessor:
                     continue
 
                 logger.info(f"[{self.symbol}] New *closed* bar detected.")
+                self.risk_controller.increment_bar_counter(self.symbol) # Increment bar counter
 
                 # Fetch and prepare data
                 data, X, y = self._fetch_and_prepare_data()
@@ -216,23 +220,8 @@ class SymbolProcessor:
                     time.sleep(self.cfg.timeframe_minutes() * 60) # Wait a full bar duration before retrying
                     continue
 
-                # Reconcile open positions with MT5 (e.g., if closed externally)
-                # This now returns a list of ClosedTrade objects
-                closed_trades = self.execution.reconcile_open_positions_with_mt5()
-                for trade in closed_trades:
-                    # Add to monitor for metrics
-                    self.monitor.add_closed_trade(trade)
-                    # Update RiskController for learning
-                    self.risk_controller.update(trade) # Assuming RiskController.update takes a ClosedTrade object
-
                 # Make trade decisions
                 self._make_trade_decision(data, X)
-
-                # Save monitor state periodically
-                self.monitor.save_state()
-
-                # Save RiskController state periodically
-                self.risk_controller.save_state(self.execution.risk.open_positions_cache)
 
             except Exception as e:
                 logger.exception(f"[{self.symbol}] Error in processing loop: {e}")

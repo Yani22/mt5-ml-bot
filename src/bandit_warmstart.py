@@ -31,10 +31,9 @@ def _save_json(obj: Dict[str, Any], path: str) -> None:
         logger.exception(f"Failed to save JSON to {path}")
 
 
-def find_latest_backtest_state(symbol: str, results_dir: str = "results") -> str | None:
-    """Find newest matching backtest state file for a specific symbol."""
-    symbol_str = symbol.replace('#', '')
-    pattern = f"ts_risk_controller_state_backtest_{symbol_str}_*.json"
+def find_latest_backtest_state(results_dir: str = "results") -> str | None:
+    """Find newest backtest state file."""
+    pattern = f"ts_risk_controller_state_backtest_*.json"
     search_path = os.path.join(results_dir, pattern)
     matches = glob.glob(search_path)
     if not matches:

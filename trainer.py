@@ -59,6 +59,7 @@ def retrain_symbol(cfg: Cfg, symbol: str, dry_run: bool = True, mt5_instance=Non
     feature_params = optuna_params.get('features', {}) if optuna_params else {}
     feature_cfg = FeatureCfg(**feature_params)
     tuned_prediction_horizon = optuna_params.get('prediction_horizon', cfg.prediction_horizon) # Get tuned prediction_horizon
+    tuned_min_pct_change = optuna_params.get('min_pct_change', cfg.features.min_pct_change) # Get tuned min_pct_change
 
     logger.info(f"[{symbol}] Loading full history via DataManager...")
     dm = DataManager(cfg)
@@ -69,7 +70,7 @@ def retrain_symbol(cfg: Cfg, symbol: str, dry_run: bool = True, mt5_instance=Non
         symbol=symbol,
         feature_cfg=feature_cfg,
         count=cfg.retraining_window_bars,
-        min_pct_change=feature_cfg.min_pct_change,
+        min_pct_change=tuned_min_pct_change, # Pass tuned min_pct_change
         prediction_horizon=tuned_prediction_horizon, # Pass tuned prediction_horizon
         build_dynamic=False, # We need raw data (df) and features (X), will generate labels (y) later
         return_long_short_labels=True

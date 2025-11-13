@@ -15,6 +15,7 @@ from src.utils import get_training_data, load_ensemble, save_ensemble, setup_log
 from src.trade import SimPosition
 from src.risk_controller import RiskController
 from src.trade_types import ClosedTrade # NEW: Import ClosedTrade for backtester
+import threading
 
 class HybridBacktester:
     """Adaptive hybrid backtester mirroring main_hybrid_adaptive.py logic."""
@@ -29,7 +30,8 @@ class HybridBacktester:
         self.consecutive_losses = 0 # NEW: Efficiently track consecutive losses
         self.positions: list[SimPosition] = []
         self.equity_curve = []
-        self.risk_manager = RiskManager(cfg, broker_client)
+        lock = threading.Lock()
+        self.risk_manager = RiskManager(cfg, broker_client, lock)
         self.bar_counters = {sym: 0 for sym in cfg.symbols}
         self.risk_controller = RiskController(cfg) # Instantiate RiskController
         self.risk_controller.load_state() # Load previous state if it exists
@@ -124,14 +126,8 @@ class HybridBacktester:
                 transaction_cost = (commission_per_trade * pos.lots) + backtest_slippage_cost_value
                 net_pnl = gross_pnl - transaction_cost
 
-                # Update consecutive losses counter
-                if net_pnl < 0:
-                    self.consecutive_losses += 1
-                else:
-                    self.consecutive_losses = 0
-                
-                # Update equity
-                self.equity += net_pnl
+                # Determine the exit equity for this specific trade
+                exit_equity = self.equity + net_pnl
 
                 # Create ClosedTrade object from SimPosition
                 closed_trade = ClosedTrade(
@@ -151,7 +147,7 @@ class HybridBacktester:
                     min_prob_short_idx=pos.min_prob_short_idx,
                     entry_auc=pos.entry_auc,
                     entry_equity=pos.entry_equity,
-                    exit_equity=self.equity, # Current equity after this trade
+                    exit_equity=exit_equity, # Pass the correct exit equity
                     adx=getattr(pos, 'adx', 0.0),
                     macd_diff=getattr(pos, 'macd_diff', 0.0),
                     volatility_10=getattr(pos, 'volatility_10', 0.0),
@@ -159,8 +155,11 @@ class HybridBacktester:
                     context_vector=getattr(pos, 'trade_context', None) # NEW: Pass stored context vector
                 )
 
-                # Update the bandit with the ClosedTrade object
+                # Update the bandit and the symbol's state with the ClosedTrade object
                 self.risk_controller.update(closed_trade)
+
+                # Now, update the backtester's main equity
+                self.equity += net_pnl
 
                 # Close the position object (SimPosition)
                 pos.close(price, row.name.to_pydatetime().replace(tzinfo=datetime.timezone.utc), net_pnl, self.equity)
@@ -253,7 +252,9 @@ class HybridBacktester:
             if risk_mgr.watchdog_cfg.enabled:
                 max_losses = getattr(risk_mgr.watchdog_cfg, "max_consecutive_losses", None)
                 if max_losses is not None and max_losses > 0:
-                    if self.consecutive_losses >= max_losses:
+                    # Get consecutive losses from the symbol's state within RiskController
+                    consecutive_losses = self.risk_controller.symbol_states[sym].consecutive_losses
+                    if consecutive_losses >= max_losses:
                         if risk_mgr.cooldown_until is None:
                             logger.warning(f"[{sym}][{bar_time}] Watchdog: consecutive losses {consecutive_losses} >= threshold {max_losses}. Triggering cooldown.")
                             now_utc = bar_time.to_pydatetime().replace(tzinfo=datetime.timezone.utc)
@@ -459,6 +460,10 @@ class HybridBacktester:
                 feature_params = optuna_params.get('features', {}) if optuna_params else {}
                 feature_cfg = FeatureCfg(**feature_params)
 
+                # NEW: Get tuned prediction_horizon and min_pct_change, falling back to global defaults
+                tuned_prediction_horizon = optuna_params.get('prediction_horizon', self.cfg.prediction_horizon)
+                tuned_min_pct_change = optuna_params.get('min_pct_change', self.cfg.features.min_pct_change)
+
                 # Load context data
                 from src.data_manager import DataManager
                 dm = DataManager(self.cfg)
@@ -470,7 +475,17 @@ class HybridBacktester:
                     im_sym = self.cfg.context_features.inter_market.symbol
                     inter_market_df = dm.load_local_history(im_sym, self.cfg.timeframe)
 
-                data, X, y_long, y_short = get_training_data(self.cfg, sym, feature_cfg=feature_cfg, source=self.cfg.data_source, min_pct_change=feature_cfg.min_pct_change, mta_df=mta_df, inter_market_df=inter_market_df, return_long_short_labels=True)
+                data, X, y_long, y_short = get_training_data(
+                    self.cfg,
+                    sym,
+                    feature_cfg=feature_cfg,
+                    source=self.cfg.data_source,
+                    min_pct_change=tuned_min_pct_change, # Use tuned min_pct_change
+                    mta_df=mta_df,
+                    inter_market_df=inter_market_df,
+                    return_long_short_labels=True,
+                    prediction_horizon=tuned_prediction_horizon
+                )
                 if data.empty:
                     logger.warning(f"No data for {sym}, skipping.")
                     continue

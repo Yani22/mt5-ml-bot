@@ -76,138 +76,116 @@ class Execution:
 
 
     def reconcile_open_positions_with_mt5(self) -> List[ClosedTrade]:
-        import MetaTrader5 as mt5 # Temporary import to resolve NameError
+        import MetaTrader5 as mt5
         """
-        Enhances the internal position cache by adding any new positions
-        that were opened on the broker (e.g., manually) while the bot was offline.
-        Also detects positions closed on the broker and removes them from cache,
-        processing their PnL for learning.
+        Robustly reconciles the internal position cache with the broker's state.
+        This function uses a simple procedural approach to avoid race conditions and logical errors.
+        1. It processes closed trades by checking which cached trades are no longer on the broker.
+        2. It discovers new trades by checking which broker trades are not in the cache.
         Returns a list of ClosedTrade objects for newly detected closed trades.
         """
-        logger.info("Checking for open positions and reconciling cache with MT5...")
-        if self.dry_run:
-            logger.info("[DRY-RUN] Skipping reconciliation process.")
-            return [] # Return empty list in dry-run
-        
-        closed_trades_list = [] # List to store detected closed trades
-        try:
-            # 1. Get all open positions from MT5 (ground truth)
-            mt5_open_positions = self.mt5_client.positions_get() or []
-            mt5_open_tickets = {pos.ticket for pos in mt5_open_positions}
+        with self.risk.cache_lock:
+            logger.info("Checking for open positions and reconciling cache with MT5...")
+            if self.dry_run:
+                logger.info("[DRY-RUN] Skipping reconciliation process.")
+                return []
 
-            # 2. Identify and add positions that are on the broker but NOT in our internal cache
-            for pos in mt5_open_positions:
-                if pos.ticket not in self.risk.open_positions_cache:
-                    # This is a new position that the bot was not tracking (opened manually or while bot was off)
-                    direction = "long" if pos.type == mt5.POSITION_TYPE_BUY else "short"
-                    entry_time_dt = datetime.datetime.fromtimestamp(pos.time, tz=datetime.timezone.utc)
-                    
-                    # Add it to the cache with comprehensive placeholder data.
-                    self.risk.open_positions_cache[pos.ticket] = {
-                        "risk": 0.0, # Placeholder, will be updated if managed by strategy
-                        "ticket": pos.ticket,
-                        "symbol": pos.symbol,
-                        "entry_price": pos.price_open,
-                        "direction": direction,
-                        "lots": pos.volume,
-                        "entry_time": entry_time_dt,
-                        "atr": 0.0, # Placeholder for ATR at entry
-                        "entry_auc": 0.5, # Placeholder for AUC at entry
-                        "risk_fraction": 0.0, # Placeholder for risk_per_trade
-                        "entry_equity": 0.0, # Placeholder for equity at entry
-                        "sl": pos.sl,
-                        "tp": pos.tp,
-                        "pip_size": self.risk.get_pip_size(pos.symbol), # Attempt to get actual pip_size
-                        "pip_value": self.risk.get_pip_value(pos.symbol), # Attempt to get actual pip_value
-                        "atr_idx": -1, # Placeholder for atr_idx
-                        "min_prob_long_idx": -1, # Placeholder for min_prob_long_idx
-                        "min_prob_short_idx": -1, # Placeholder for min_prob_short_idx
-                        # Add context features as placeholders if not available
-                        "adx": 0.0, "macd_diff": 0.0, "volatility_10": 0.0, "dist_from_ema_200": 0.0,
-                        "inter_market_feature": 0.0, "mta_feature": 0.0
-                    }
-                    logger.info(f'Discovered new external position: Ticket={pos.ticket}, Symbol={pos.symbol}, Direction={direction}, Lots={pos.volume}')
-            
-            # 3. Find positions that are in our internal cache but no longer open on the broker
-            tickets_to_remove = []
-            for ticket, pos_details in self.risk.open_positions_cache.items():
-                if ticket not in mt5_open_tickets:
-                    # This position was closed externally (by TP/SL or manually)
-                    symbol = pos_details['symbol']
-                    direction = pos_details['direction']
-                    entry_price = pos_details['entry_price']
-                    lots = pos_details['lots']
-                    entry_time = pos_details.get("entry_time", datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc))
-                    
-                    # Fetch deal history for this ticket to get PnL
-                    deals = self.mt5_client.history_deals_get(position=ticket) # Use position=ticket to get all deals for that position
-                    pnl = 0.0
-                    exit_price = 0.0
-                    exit_time_dt = datetime.datetime.now(datetime.timezone.utc) # Default to now if no deal found
-
-                    if deals:
-                        final_profit_sum = 0.0
-                        latest_exit_time = 0
-                        latest_exit_price = 0.0
+            closed_trades_list = []
+            try:
+                # Get the ground truth of open positions from the broker
+                mt5_positions = self.mt5_client.positions_get() or []
+                broker_positions_map = {p.ticket: p for p in mt5_positions}
+                broker_tickets = set(broker_positions_map.keys())
+                
+                # Use a copy of the cache keys for safe iteration
+                cached_tickets = list(self.risk.open_positions_cache.keys())
+                
+                # --- 1. Process Closed Trades ---
+                # A trade is closed if it's in our cache but NOT on the broker anymore.
+                for ticket in cached_tickets:
+                    if ticket not in broker_tickets:
+                        pos_details = self.risk.open_positions_cache[ticket]
+                        symbol = pos_details['symbol']
                         
-                        # Iterate through deals to get the last exit price and total PnL
-                        for deal in sorted(deals, key=lambda d: d.time): # Sort to get latest exit
-                            # We only care about DEAL_ENTRY_OUT deals for closure and PnL
-                            if deal.entry == mt5.DEAL_ENTRY_OUT:
-                                final_profit_sum += deal.profit # MT5 profit already includes commission/swap for a closed deal
-                                latest_exit_time = deal.time
-                                latest_exit_price = deal.price
-                        
-                        pnl = final_profit_sum
+                        deals = self.mt5_client.history_deals_get(position=ticket)
+                        pnl = 0.0
+                        exit_price = 0.0
+                        exit_time_dt = datetime.datetime.now(datetime.timezone.utc)
 
-                        if latest_exit_time > 0:
-                            exit_time_dt = datetime.datetime.fromtimestamp(latest_exit_time, tz=datetime.timezone.utc)
-                            exit_price = latest_exit_price
+                        if deals:
+                            final_profit_sum = 0.0
+                            latest_exit_time = 0
+                            latest_exit_price = 0.0
+                            
+                            for deal in sorted(deals, key=lambda d: d.time):
+                                if deal.entry == mt5.DEAL_ENTRY_OUT:
+                                    final_profit_sum += deal.profit
+                                    if deal.time > latest_exit_time:
+                                        latest_exit_time = deal.time
+                                        latest_exit_price = deal.price
+                            
+                            pnl = final_profit_sum
+                            if latest_exit_time > 0:
+                                exit_time_dt = datetime.datetime.fromtimestamp(latest_exit_time, tz=datetime.timezone.utc)
+                                exit_price = latest_exit_price
+                        else:
+                            logger.warning(f"[{symbol}] Position {ticket} closed, but no deal found in history for PnL calculation. PnL will be 0.")
 
-                    else:
-                        logger.warning(f"[{symbol}] Position {ticket} closed, but no deal found in history for PnL calculation. Removing from cache.")
-
-                    # Create the comprehensive ClosedTrade object
-                    closed_trade = ClosedTrade(
-                            ticket=ticket,
-                            symbol=symbol,
-                            direction=direction,
-                            lots=lots,
-                            entry_price=entry_price, # From cache (pos_details)
-                            exit_price=exit_price, # From deal or default
-                            entry_time=entry_time, # From cache (pos_details)
-                            exit_time=exit_time_dt,
-                            pnl=pnl,
+                        closed_trade = ClosedTrade(
+                            ticket=ticket, symbol=symbol, direction=pos_details.get('direction'),
+                            lots=pos_details.get('lots'), entry_price=pos_details.get('entry_price'),
+                            exit_price=exit_price, entry_time=pos_details.get("entry_time"),
+                            exit_time=exit_time_dt, pnl=pnl,
                             risk_fraction=pos_details.get("risk_fraction", 0.0),
-                            atr=pos_details.get("atr", 0.0),
-                            atr_idx=pos_details.get("atr_idx", -1),
+                            atr=pos_details.get("atr", 0.0), atr_idx=pos_details.get("atr_idx", -1),
                             min_prob_long_idx=pos_details.get("min_prob_long_idx", -1),
                             min_prob_short_idx=pos_details.get("min_prob_short_idx", -1),
                             entry_auc=pos_details.get("entry_auc", 0.5),
                             entry_equity=pos_details.get("entry_equity", 0.0),
-                            exit_equity=self.monitor.current_equity, # Use current global equity
-                            adx=pos_details.get("adx", 0.0),
-                            macd_diff=pos_details.get("macd_diff", 0.0),
+                            exit_equity=self.monitor.current_equity,
+                            adx=pos_details.get("adx", 0.0), macd_diff=pos_details.get("macd_diff", 0.0),
                             volatility_10=pos_details.get("volatility_10", 0.0),
                             dist_from_ema_200=pos_details.get("dist_from_ema_200", 0.0),
-                            context_vector=pos_details.get("context_vector") # NEW: Pass stored context vector
-                    )
-                    closed_trades_list.append(closed_trade) # Add to list to be returned
-                    logger.info(f"[{symbol}] Detected closed trade via reconciliation: {closed_trade}")
+                            context_vector=pos_details.get("context_vector")
+                        )
+                        closed_trades_list.append(closed_trade)
+                        logger.info(f"[{symbol}] Detected closed trade via reconciliation: {closed_trade}")
 
-                    tickets_to_remove.append(ticket) # Mark for removal from cache
+                        # Remove from cache after processing
+                        del self.risk.open_positions_cache[ticket]
 
-            for ticket in tickets_to_remove: # Remove after iterating to avoid dictionary modification during iteration
-                if ticket in self.risk.open_positions_cache:
-                    del self.risk.open_positions_cache[ticket]
-            
-            logger.info("Reconciliation complete. Internal cache synchronized with MT5.")
-            return closed_trades_list # Return the list of closed trades
+                # --- 2. Discover New (External) Trades ---
+                # A trade is new if it's on the broker but NOT in our cache.
+                for ticket in broker_tickets:
+                    if ticket not in self.risk.open_positions_cache:
+                        pos = broker_positions_map[ticket]
+                        direction = "long" if pos.type == mt5.POSITION_TYPE_BUY else "short"
+                        entry_time_dt = datetime.datetime.fromtimestamp(pos.time, tz=datetime.timezone.utc)
+                        
+                        self.risk.open_positions_cache[pos.ticket] = {
+                            "risk": 0.0, "ticket": pos.ticket, "symbol": pos.symbol,
+                            "entry_price": pos.price_open, "direction": direction, "lots": pos.volume,
+                            "entry_time": entry_time_dt, "atr": 0.0, "entry_auc": 0.5,
+                            "risk_fraction": 0.0, "entry_equity": 0.0, "sl": pos.sl, "tp": pos.tp,
+                            "pip_size": self.risk.get_pip_size(pos.symbol),
+                            "pip_value": self.risk.get_pip_value(pos.symbol),
+                            "atr_idx": -1, "min_prob_long_idx": -1, "min_prob_short_idx": -1,
+                            "adx": 0.0, "macd_diff": 0.0, "volatility_10": 0.0, "dist_from_ema_200": 0.0,
+                            "inter_market_feature": 0.0, "mta_feature": 0.0
+                        }
+                        logger.info(f'Discovered new external position: Ticket={pos.ticket}, Symbol={pos.symbol}, Direction={direction}, Lots={pos.volume}')
 
-        except Exception as e:
-            logger.exception(f"Failed to reconcile new external positions with MT5: {e}")
-            if self.notifier: self.notifier.send_message(f"<b>ERROR:</b> Failed to reconcile cache with MT5: {e}", level="ERROR")
-            return [] # Return empty list on error
+                if closed_trades_list or (broker_tickets - set(cached_tickets)):
+                     logger.info("Reconciliation complete. Internal cache synchronized with MT5.")
+                else:
+                    logger.debug("Reconciliation complete. No changes detected.")
+                
+                return closed_trades_list
+
+            except Exception as e:
+                logger.exception(f"Failed to reconcile positions with MT5: {e}")
+                if self.notifier: self.notifier.send_message(f"<b>ERROR:</b> Failed to reconcile cache with MT5: {e}", level="ERROR")
+                return []
         
     def _send_order_with_retry(self, request: dict, retries: int = -1, delay: float = 1.0):
         num_retries = self.risk.cfg.trading_costs.defaults.retry_order_send if retries == -1 else retries
@@ -230,199 +208,199 @@ class Execution:
         or simulates closures based on price action (dry-run).
         Returns a list of newly detected closed trades.
         """
-        closed_trades_list = []
+        with self.risk.cache_lock:
+            closed_trades_list = []
 
-        if self.dry_run:
-            # Simulate closures in dry-run mode
-            positions_to_check = list(self.risk.open_positions_cache.items()) # Iterate over a copy
-            for pid, trade_details in positions_to_check:
-                symbol = trade_details.get("symbol")
-                direction = trade_details.get("direction")
-                entry_price = trade_details.get("entry_price")
-                sl = trade_details.get("sl")
-                tp = trade_details.get("tp")
-                lots = trade_details.get("lots")
-                pip_size = trade_details.get("pip_size")
-                pip_value = trade_details.get("pip_value")
-                entry_time = trade_details.get("entry_time")
-                risk_fraction = trade_details.get("risk_fraction")
-                atr = trade_details.get("atr")
-                atr_idx = trade_details.get("atr_idx")
-                min_prob_long_idx = trade_details.get("min_prob_long_idx")
-                min_prob_short_idx = trade_details.get("min_prob_short_idx")
-                entry_auc = trade_details.get("entry_auc")
-                entry_equity = trade_details.get("entry_equity")
+            if self.dry_run:
+                # Simulate closures in dry-run mode
+                positions_to_check = list(self.risk.open_positions_cache.items()) # Iterate over a copy
+                for pid, trade_details in positions_to_check:
+                    symbol = trade_details.get("symbol")
+                    direction = trade_details.get("direction")
+                    entry_price = trade_details.get("entry_price")
+                    sl = trade_details.get("sl")
+                    tp = trade_details.get("tp")
+                    lots = trade_details.get("lots")
+                    pip_size = trade_details.get("pip_size")
+                    pip_value = trade_details.get("pip_value")
+                    entry_time = trade_details.get("entry_time")
+                    risk_fraction = trade_details.get("risk_fraction")
+                    atr = trade_details.get("atr")
+                    atr_idx = trade_details.get("atr_idx")
+                    min_prob_long_idx = trade_details.get("min_prob_long_idx")
+                    min_prob_short_idx = trade_details.get("min_prob_short_idx")
+                    entry_auc = trade_details.get("entry_auc")
+                    entry_equity = trade_details.get("entry_equity")
 
-                # Get current price from the passed latest_prices
-                current_price = latest_prices.get(symbol)
-                if current_price is None:
-                    logger.debug(f"[{symbol}] No current price in latest_prices for dry-run closure check. Skipping {pid}.")
-                    continue
+                    # Get current price from the passed latest_prices
+                    current_price = latest_prices.get(symbol)
+                    if current_price is None:
+                        logger.debug(f"[{symbol}] No current price in latest_prices for dry-run closure check. Skipping {pid}.")
+                        continue
 
-                closed = False
-                exit_price = 0.0
-                pnl = 0.0
-                closure_reason = ""
+                    closed = False
+                    exit_price = 0.0
+                    pnl = 0.0
+                    closure_reason = ""
 
-                if direction == "long":
-                    if current_price <= sl:
-                        closed = True
-                        exit_price = sl
-                        closure_reason = "SL hit"
-                    elif current_price >= tp:
-                        closed = True
-                        exit_price = tp
-                        closure_reason = "TP hit"
-                elif direction == "short":
-                    if current_price >= sl:
-                        closed = True
-                        exit_price = sl
-                        closure_reason = "SL hit"
-                    elif current_price <= tp:
-                        closed = True
-                        exit_price = tp
-                        closure_reason = "TP hit"
+                    if direction == "long":
+                        if current_price <= sl:
+                            closed = True
+                            exit_price = sl
+                            closure_reason = "SL hit"
+                        elif current_price >= tp:
+                            closed = True
+                            exit_price = tp
+                            closure_reason = "TP hit"
+                    elif direction == "short":
+                        if current_price >= sl:
+                            closed = True
+                            exit_price = sl
+                            closure_reason = "SL hit"
+                        elif current_price <= tp:
+                            closed = True
+                            exit_price = tp
+                            closure_reason = "TP hit"
+                    
+                    if closed:
+                        # Defensive check for malformed cache data from old versions
+                        if not all([pip_size, pip_value]) or pip_size <= 0 or pip_value <= 0:
+                            logger.warning(f"[DRY-RUN] Cannot simulate closure for trade {pid} due to missing or invalid pip_size/pip_value in cache. Removing position.")
+                            self.risk.open_positions_cache.pop(pid, None)
+                            continue
+
+                        # Calculate PnL for the simulated trade
+                        if direction == "long":
+                            gross_pnl = (exit_price - entry_price) / pip_size * pip_value * lots
+                        else: # short
+                            gross_pnl = (entry_price - exit_price) / pip_size * pip_value * lots
+                        
+                        # Apply transaction costs (spread and commission)
+                        spread_pips = getattr(self.risk.cfg.trading_costs.defaults, 'spread_pips', 0.0)
+                        commission_per_lot = getattr(self.risk.cfg.trading_costs.defaults, 'commission_per_trade', 0.0)
+                        
+                        transaction_cost = (spread_pips * pip_value * lots) + (commission_per_lot * lots)
+                        pnl = gross_pnl - transaction_cost
+
+                        # Get current equity for the ClosedTrade object (simulated)
+                        # This is a simplification; in live, it would be actual equity.
+                        # For dry-run, we use the current simulated equity from LivePerformanceMonitor
+                        # which is updated in main.py after this call.
+                        # For now, we'll use entry_equity + pnl as a proxy for exit_equity for this trade.
+                        simulated_exit_equity = entry_equity + pnl if entry_equity is not None else pnl
+
+                        closed_trade = ClosedTrade(
+                            ticket=pid,
+                            symbol=symbol,
+                            direction=direction,
+                            lots=lots,
+                            entry_price=entry_price,
+                            exit_price=exit_price,
+                            entry_time=entry_time,
+                            exit_time=now_utc, # Use current time as simulated exit time
+                            pnl=pnl,
+                            risk_fraction=risk_fraction,
+                            atr=atr,
+                            atr_idx=atr_idx,
+                            min_prob_long_idx=min_prob_long_idx,
+                            min_prob_short_idx=min_prob_short_idx,
+                            entry_auc=entry_auc,
+                            entry_equity=entry_equity,
+                            exit_equity=simulated_exit_equity,
+                            adx=trade_details.get("adx", 0.0),
+                            macd_diff=trade_details.get("macd_diff", 0.0),
+                            volatility_10=trade_details.get("volatility_10", 0.0),
+                            dist_from_ema_200=trade_details.get("dist_from_ema_200", 0.0),
+                            context_vector=trade_details.get("context_vector") # NEW: Pass stored context vector
+                        )
+                        closed_trades_list.append(closed_trade)
+                        logger.info(f"[DRY-RUN] Simulated closed trade: {closed_trade} ({closure_reason})")
+
+                        # Remove the now-closed position from our internal cache
+                        self.risk.open_positions_cache.pop(pid, None)
                 
-                if closed:
-                    # Defensive check for malformed cache data from old versions
-                    if not all([pip_size, pip_value]) or pip_size <= 0 or pip_value <= 0:
-                        logger.warning(f"[DRY-RUN] Cannot simulate closure for trade {pid} due to missing or invalid pip_size/pip_value in cache. Removing position.")
+                return closed_trades_list
+
+            # --- LIVE MODE LOGIC (existing code) ---
+            try:
+                # Get the ground truth of open positions from the broker
+                open_positions_on_broker = self.mt5_client.positions_get() or []
+                open_position_ids_on_broker = {pos.ticket for pos in open_positions_on_broker}
+
+                # Get the list of positions we are tracking internally
+                tracked_position_ids = list(self.risk.open_positions_cache.keys())
+
+                # Find positions that are in our cache but not in the broker's list of open positions
+                closed_pids = [pid for pid in tracked_position_ids if pid not in open_position_ids_on_broker]
+
+                for pid in closed_pids:
+                    trade_details = self.risk.open_positions_cache.get(pid)
+                    if not trade_details:
+                        continue
+
+                    # Fetch the deal history for this specific closed position to find the PnL
+                    deals = self.mt5_client.history_deals_get(position=pid)
+                    if not deals:
+                        logger.warning(f"Position {pid} is closed but no deal history found. Removing from cache.")
                         self.risk.open_positions_cache.pop(pid, None)
                         continue
 
-                    # Calculate PnL for the simulated trade
-                    if direction == "long":
-                        gross_pnl = (exit_price - entry_price) / pip_size * pip_value * lots
-                    else: # short
-                        gross_pnl = (entry_price - exit_price) / pip_size * pip_value * lots
-                    
-                    # Apply transaction costs (spread and commission)
-                    spread_pips = getattr(self.risk.cfg.trading_costs.defaults, 'spread_pips', 0.0)
-                    commission_per_lot = getattr(self.risk.cfg.trading_costs.defaults, 'commission_per_trade', 0.0)
-                    
-                    transaction_cost = (spread_pips * pip_value * lots) + (commission_per_lot * lots)
-                    pnl = gross_pnl - transaction_cost
+                    # Find the closing deal to get the final profit and exit details
+                    final_profit = 0.0
+                    last_exit_time = None
+                    last_exit_price = None
+                    for deal in sorted(deals, key=lambda d: d.time):
+                        if deal.entry == mt5.DEAL_ENTRY_OUT:
+                            # MT5 deal.profit already includes commission and swap.
+                            final_profit += deal.profit
+                            last_exit_time = deal.time
+                            last_exit_price = deal.price
+                    if last_exit_time is None:
+                        logger.warning(f"Position {pid} is closed but no 'out' deal found. Removing from cache.")
+                        self.risk.open_positions_cache.pop(pid, None)
+                        continue
 
-                    # Get current equity for the ClosedTrade object (simulated)
-                    # This is a simplification; in live, it would be actual equity.
-                    # For dry-run, we use the current simulated equity from LivePerformanceMonitor
-                    # which is updated in main.py after this call.
-                    # For now, we'll use entry_equity + pnl as a proxy for exit_equity for this trade.
-                    simulated_exit_equity = entry_equity + pnl if entry_equity is not None else pnl
+                    # Get current equity for the ClosedTrade object
+                    account_info = self.mt5_client.account_info()
+                    actual_equity = getattr(account_info, "equity", 0.0) if account_info else 0.0
+                    exit_time_dt = datetime.datetime.fromtimestamp(last_exit_time, tz=datetime.timezone.utc)
 
+                    # Create the comprehensive ClosedTrade object
                     closed_trade = ClosedTrade(
                         ticket=pid,
-                        symbol=symbol,
-                        direction=direction,
-                        lots=lots,
-                        entry_price=entry_price,
-                        exit_price=exit_price,
-                        entry_time=entry_time,
-                        exit_time=now_utc, # Use current time as simulated exit time
-                        pnl=pnl,
-                        risk_fraction=risk_fraction,
-                        atr=atr,
-                        atr_idx=atr_idx,
-                        min_prob_long_idx=min_prob_long_idx,
-                        min_prob_short_idx=min_prob_short_idx,
-                        entry_auc=entry_auc,
-                        entry_equity=entry_equity,
-                        exit_equity=simulated_exit_equity,
+                        symbol=trade_details.get("symbol", "UNKNOWN"),
+                        direction=trade_details.get("direction", ""),
+                        lots=trade_details.get("lots", 0.0),
+                        entry_price=trade_details.get("entry_price", 0.0),
+                        exit_price=last_exit_price or 0.0,
+                        entry_time=trade_details.get("entry_time"),
+                        exit_time=exit_time_dt,
+                        pnl=final_profit,
+                        risk_fraction=trade_details.get("risk_fraction", 0.0),
+                        atr=trade_details.get("atr", 0.0),
+                        atr_idx=trade_details.get("atr_idx", -1),
+                        min_prob_long_idx=trade_details.get("min_prob_long_idx", -1),
+                        min_prob_short_idx=trade_details.get("min_prob_short_idx", -1),
+                        entry_auc=trade_details.get("entry_auc", 0.5),
+                        entry_equity=trade_details.get("entry_equity", 0.0),
+                        exit_equity=actual_equity,
                         adx=trade_details.get("adx", 0.0),
                         macd_diff=trade_details.get("macd_diff", 0.0),
                         volatility_10=trade_details.get("volatility_10", 0.0),
-                        dist_from_ema_200=trade_details.get("dist_from_ema_200", 0.0),
-                        context_vector=trade_details.get("context_vector") # NEW: Pass stored context vector
+                        dist_from_ema_200=trade_details.get("dist_from_ema_200", 0.0)
                     )
                     closed_trades_list.append(closed_trade)
-                    logger.info(f"[DRY-RUN] Simulated closed trade: {closed_trade} ({closure_reason})")
+                    logger.info(f"Detected closed trade via reconciliation: {closed_trade}")
 
                     # Remove the now-closed position from our internal cache
                     self.risk.open_positions_cache.pop(pid, None)
+
+            except Exception as e:
+                logger.exception(f"Failed to check/reconcile closed trades: {e}")
             
+            # Sort closed trades by exit_time before returning
+            closed_trades_list.sort(key=lambda trade: trade.exit_time)
             return closed_trades_list
-
-        # --- LIVE MODE LOGIC (existing code) ---
-        try:
-            # Get the ground truth of open positions from the broker
-            open_positions_on_broker = self.mt5_client.positions_get() or []
-            open_position_ids_on_broker = {pos.ticket for pos in open_positions_on_broker}
-
-            # Get the list of positions we are tracking internally
-            tracked_position_ids = list(self.risk.open_positions_cache.keys())
-
-            # Find positions that are in our cache but not in the broker's list of open positions
-            closed_pids = [pid for pid in tracked_position_ids if pid not in open_position_ids_on_broker]
-
-            for pid in closed_pids:
-                trade_details = self.risk.open_positions_cache.get(pid)
-                if not trade_details:
-                    continue
-
-                # Fetch the deal history for this specific closed position to find the PnL
-                deals = self.mt5_client.history_deals_get(position=pid)
-                if not deals:
-                    logger.warning(f"Position {pid} is closed but no deal history found. Removing from cache.")
-                    self.risk.open_positions_cache.pop(pid, None)
-                    continue
-
-                # Find the closing deal to get the final profit and exit details
-                final_profit = 0.0
-                last_exit_time = None
-                last_exit_price = None
-                for deal in sorted(deals, key=lambda d: d.time):
-                    if deal.entry == mt5.DEAL_ENTRY_OUT:
-                        # Account for commission and swap explicitly
-                        final_profit += (deal.profit + deal.commission + deal.swap)
-                        last_exit_time = deal.time
-                        last_exit_price = deal.price
-
-                if last_exit_time is None:
-                    logger.warning(f"Position {pid} is closed but no 'out' deal found. Removing from cache.")
-                    self.risk.open_positions_cache.pop(pid, None)
-                    continue
-
-                # Get current equity for the ClosedTrade object
-                account_info = self.mt5_client.account_info()
-                actual_equity = getattr(account_info, "equity", 0.0) if account_info else 0.0
-                exit_time_dt = datetime.datetime.fromtimestamp(last_exit_time, tz=datetime.timezone.utc)
-
-                # Create the comprehensive ClosedTrade object
-                closed_trade = ClosedTrade(
-                    ticket=pid,
-                    symbol=trade_details.get("symbol", "UNKNOWN"),
-                    direction=trade_details.get("direction", ""),
-                    lots=trade_details.get("lots", 0.0),
-                    entry_price=trade_details.get("entry_price", 0.0),
-                    exit_price=last_exit_price or 0.0,
-                    entry_time=trade_details.get("entry_time"),
-                    exit_time=exit_time_dt,
-                    pnl=final_profit,
-                    risk_fraction=trade_details.get("risk_fraction", 0.0),
-                    atr=trade_details.get("atr", 0.0),
-                    atr_idx=trade_details.get("atr_idx", -1),
-                    min_prob_long_idx=trade_details.get("min_prob_long_idx", -1),
-                    min_prob_short_idx=trade_details.get("min_prob_short_idx", -1),
-                    entry_auc=trade_details.get("entry_auc", 0.5),
-                    entry_equity=trade_details.get("entry_equity", 0.0),
-                    exit_equity=actual_equity,
-                    adx=trade_details.get("adx", 0.0),
-                    macd_diff=trade_details.get("macd_diff", 0.0),
-                    volatility_10=trade_details.get("volatility_10", 0.0),
-                    dist_from_ema_200=trade_details.get("dist_from_ema_200", 0.0)
-                )
-                closed_trades_list.append(closed_trade)
-                logger.info(f"Detected closed trade via reconciliation: {closed_trade}")
-
-                # Remove the now-closed position from our internal cache
-                self.risk.open_positions_cache.pop(pid, None)
-
-        except Exception as e:
-            logger.exception(f"Failed to check/reconcile closed trades: {e}")
-        
-        # Sort closed trades by exit_time before returning
-        closed_trades_list.sort(key=lambda trade: trade.exit_time)
-        return closed_trades_list
 
     def trade(self, symbol: str, direction: str, lots: float, price: float, sl: float, tp: float, equity: float, pip_size: float, pip_value: float, now_utc: datetime.datetime, X: pd.DataFrame | None = None, atr: float | None = None, auc_score: float | None = 0.5, total_open_risk: float = 0.0, atr_idx: int = -1, min_prob_long_idx: int = -1, min_prob_short_idx: int = -1, context_vector: Optional[list[float]] = None) -> OrderResult:
         type_map = {"long": self.mt5_client.ORDER_TYPE_BUY, "short": self.mt5_client.ORDER_TYPE_SELL}
@@ -451,26 +429,27 @@ class Execution:
             if self.notifier: self.notifier.send_message(f"[DRY-RUN] Prepared {direction} for {symbol}: lots={lots}, SL={sl}, TP={tp}", level="INFO")
 
             # Store comprehensive details for later SimPosition reconstruction in dry-run
-            self.risk.open_positions_cache[simulated_ticket] = {
-                "risk": float(equity * self.risk._get_dynamic_value(self.risk.risk_cfg.dynamic_risk, auc_score, getattr(self.risk.risk_cfg, "risk_per_trade", 0.005))), # Store the dollar amount at risk
-                "entry_time": now_utc,
-                "atr": atr,
-                "entry_auc": auc_score,
-                "risk_fraction": self.risk._get_dynamic_value(self.risk.risk_cfg.dynamic_risk, auc_score, getattr(self.risk.risk_cfg, "risk_per_trade", 0.005)),
-                "entry_equity": equity,
-                "sl": sl,
-                "tp": tp,
-                "pip_size": pip_size,
-                "pip_value": pip_value,
-                "atr_idx": atr_idx,
-                "min_prob_long_idx": min_prob_long_idx,
-                "min_prob_short_idx": min_prob_short_idx,
-                "adx": float(X["adx"].iloc[-1]) if X is not None and "adx" in X.columns else 0.0,
-                "macd_diff": float(X["macd_diff"].iloc[-1]) if X is not None and "macd_diff" in X.columns else 0.0,
-                "volatility_10": float(X["volatility_10"].iloc[-1]) if X is not None and "volatility_10" in X.columns else 0.0,
-                "dist_from_ema_200": float(X["dist_from_ema_200"].iloc[-1]) if X is not None and "dist_from_ema_200" in X.columns else 0.0,
-                "context_vector": trade_context # NEW: Store the context vector
-            }
+            with self.risk.cache_lock:
+                self.risk.open_positions_cache[simulated_ticket] = {
+                    "risk": float(equity * self.risk._get_dynamic_value(self.risk.risk_cfg.dynamic_risk, auc_score, getattr(self.risk.risk_cfg, "risk_per_trade", 0.005))), # Store the dollar amount at risk
+                    "entry_time": now_utc,
+                    "atr": atr,
+                    "entry_auc": auc_score,
+                    "risk_fraction": self.risk._get_dynamic_value(self.risk.risk_cfg.dynamic_risk, auc_score, getattr(self.risk.risk_cfg, "risk_per_trade", 0.005)),
+                    "entry_equity": equity,
+                    "sl": sl,
+                    "tp": tp,
+                    "pip_size": pip_size,
+                    "pip_value": pip_value,
+                    "atr_idx": atr_idx,
+                    "min_prob_long_idx": min_prob_long_idx,
+                    "min_prob_short_idx": min_prob_short_idx,
+                    "adx": float(X["adx"].iloc[-1]) if X is not None and "adx" in X.columns else 0.0,
+                    "macd_diff": float(X["macd_diff"].iloc[-1]) if X is not None and "macd_diff" in X.columns else 0.0,
+                    "volatility_10": float(X["volatility_10"].iloc[-1]) if X is not None and "volatility_10" in X.columns else 0.0,
+                    "dist_from_ema_200": float(X["dist_from_ema_200"].iloc[-1]) if X is not None and "dist_from_ema_200" in X.columns else 0.0,
+                    "context_vector": context_vector # NEW: Store the context vector
+                }
             return OrderResult(True, simulated_ticket, "Dry-run prepared")
 
         logger.debug(f"[{symbol}] Sending order request: {request}")
@@ -505,34 +484,35 @@ class Execution:
             effective_lots = (risk_amt / (sl_distance * pip_value)) if pip_value and sl_distance else 0.0
             
             # Store comprehensive details for later SimPosition reconstruction
-            self.risk.open_positions_cache[position_id] = { # Use position_id as key
-                "risk": float(risk_amt), # Store the dollar amount at risk
-                "ticket": position_id, # Store position_id for consistency
-                "symbol": symbol, # Store symbol
-                "entry_price": price,
-                "direction": direction,
-                "lots": float(lots),
-                "entry_time": now_utc, # Use current UTC time
-                "atr": atr, # ATR at the time of entry
-                "entry_auc": auc_score, # AUC at the time of entry
-                "risk_fraction": risk_per_trade, # Store the risk_per_trade as risk_fraction
-                "entry_equity": equity, # Store equity at the time of entry
-                "sl": sl, # SL at entry
-                "tp": tp, # TP at entry
-                "pip_size": pip_size, # <-- ADD THIS
-                "pip_value": pip_value, # <-- ADD THIS
-                "atr_idx": atr_idx,
-                "min_prob_long_idx": min_prob_long_idx,
-                "min_prob_short_idx": min_prob_short_idx,
-                "adx": float(X["adx"].iloc[-1]) if "adx" in X.columns else 0.0,
-                "macd_diff": float(X["macd_diff"].iloc[-1]) if "macd_diff" in X.columns else 0.0,
-                "volatility_10": float(X["volatility_10"].iloc[-1]) if "volatility_10" in X.columns else 0.0,
-                "dist_from_ema_200": float(X["dist_from_ema_200"].iloc[-1]) if "dist_from_ema_200" in X.columns else 0.0,
-                # Add inter_market_feature and mta_feature to open_positions_cache
-                "inter_market_feature": float(X["inter_market_feature"].iloc[-1]) if "inter_market_feature" in X.columns else 0.0,
-                "mta_feature": float(X["mta_feature"].iloc[-1]) if "mta_feature" in X.columns else 0.0,
-                "trade_context": trade_context # NEW: Store the context dictionary
-            }
+            with self.risk.cache_lock:
+                self.risk.open_positions_cache[position_id] = { # Use position_id as key
+                    "risk": float(risk_amt), # Store the dollar amount at risk
+                    "ticket": position_id, # Store position_id for consistency
+                    "symbol": symbol, # Store symbol
+                    "entry_price": price,
+                    "direction": direction,
+                    "lots": float(lots),
+                    "entry_time": now_utc, # Use current UTC time
+                    "atr": atr, # ATR at the time of entry
+                    "entry_auc": auc_score, # AUC at the time of entry
+                    "risk_fraction": risk_per_trade, # Store the risk_per_trade as risk_fraction
+                    "entry_equity": equity, # Store equity at the time of entry
+                    "sl": sl, # SL at entry
+                    "tp": tp, # TP at entry
+                    "pip_size": pip_size, # <-- ADD THIS
+                    "pip_value": pip_value, # <-- ADD THIS
+                    "atr_idx": atr_idx,
+                    "min_prob_long_idx": min_prob_long_idx,
+                    "min_prob_short_idx": min_prob_short_idx,
+                    "adx": float(X["adx"].iloc[-1]) if "adx" in X.columns else 0.0,
+                    "macd_diff": float(X["macd_diff"].iloc[-1]) if "macd_diff" in X.columns else 0.0,
+                    "volatility_10": float(X["volatility_10"].iloc[-1]) if "volatility_10" in X.columns else 0.0,
+                    "dist_from_ema_200": float(X["dist_from_ema_200"].iloc[-1]) if "dist_from_ema_200" in X.columns else 0.0,
+                    # Add inter_market_feature and mta_feature to open_positions_cache
+                    "inter_market_feature": float(X["inter_market_feature"].iloc[-1]) if "inter_market_feature" in X.columns else 0.0,
+                    "mta_feature": float(X["mta_feature"].iloc[-1]) if "mta_feature" in X.columns else 0.0,
+                    "context_vector": context_vector # NEW: Store the context dictionary
+                }
         except Exception as e:
             logger.warning(f"Could not record open position in cache: {e}")
             if self.notifier: self.notifier.send_message(f"<b>WARNING:</b> Could not record open position in cache for {symbol}: {e}", level="WARNING")

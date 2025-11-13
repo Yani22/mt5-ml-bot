@@ -11,7 +11,7 @@ from src.config import Cfg, FeatureCfg
 from src.mt5_client import MT5Client
 from src.risk import RiskManager
 from src.execution import Execution
-from src.utils import setup_logging, get_training_data, load_ensemble, save_ensemble, safe_retrain_ensemble, load_optuna_params, log_symbol_specific_configs, log_startup_summary, timeframe_to_seconds, ensure_min_grid_size, timeframe_to_mt5_timeframe
+from src.utils import setup_logging, get_training_data, load_ensemble, save_ensemble, safe_retrain_ensemble, load_optuna_params, log_symbol_specific_configs, log_startup_summary, timeframe_to_seconds, ensure_min_grid_size, timeframe_to_mt5_timeframe, _initialize_metrics_csv, log_metrics_to_csv, METRICS_CSV_FILE, METRICS_HEADERS
 from src.live_performance_monitor import LivePerformanceMonitor
 from src.notifier import TelegramNotifier
 
@@ -29,35 +29,13 @@ from typing import List
 
 import threading
 from src.symbol_processor import SymbolProcessor
+from src.utils import _initialize_metrics_csv
 
 
 # --- Initial Setup ---
 load_dotenv()
 setup_logging()
-
-# --- Metrics Logging Setup ---
-METRICS_CSV_FILE = "results/risk_metrics.csv"
-METRICS_HEADERS = [
-    "timestamp", "symbol", "event_type", "atr_idx", "min_prob_long_idx", "min_prob_short_idx",
-    "atr_mult_sl", "atr_mult_tp", "min_prob_long", "min_prob_short",
-    "rule_scale", "reward", "equity", "peak_equity", "drawdown", "ensemble_auc"
-]
-
-def _initialize_metrics_csv():
-    if not os.path.exists(METRICS_CSV_FILE):
-        with open(METRICS_CSV_FILE, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(METRICS_HEADERS)
-        logger.info(f"Initialized metrics CSV file: {METRICS_CSV_FILE}")
-
-# Call initialization at startup
 _initialize_metrics_csv()
-
-def log_metrics_to_csv(data: Dict[str, Any]):
-    with open(METRICS_CSV_FILE, 'a', newline='') as f:
-        writer = csv.writer(f)
-        row = [data.get(header, "") for header in METRICS_HEADERS]
-        writer.writerow(row)
 
 def print_dashboard(cfg, risk, ens, X, sym, bar_counter, is_first_symbol, equity, balance):
     """ Prints a live portfolio dashboard for a single symbol, throttled. """
@@ -97,18 +75,14 @@ def run_retraining_in_background(cfg, sym, feature_cfg, dry_run, notifier, optun
     """
     try:
         data_manager = DataManager(cfg)
-        full_data, full_X, _ = data_manager.load_cached(sym, feature_cfg, count=cfg.retraining_window_bars, min_pct_change=feature_cfg.min_pct_change)
 
-        if full_X is None or full_X.empty:
-            message = f"[{sym}] <b>WARNING:</b> No data for retraining, background process exiting."
-            logger.warning(message)
-            if notifier: notifier.send_message(message, level="WARNING")
-            return
-
-        # Retrieve tuned prediction_horizon for this symbol
+        # Retrieve tuned prediction_horizon and min_pct_change for this symbol
         tuned_prediction_horizon = optuna_params_per_symbol[sym].get('prediction_horizon', cfg.prediction_horizon)
+        tuned_min_pct_change = optuna_params_per_symbol[sym].get('min_pct_change', feature_cfg.min_pct_change)
 
-        y_long, y_short = generate_long_short_labels(full_data, tuned_prediction_horizon, feature_cfg.min_pct_change)
+        full_data, full_X, _ = data_manager.load_cached(sym, feature_cfg, count=cfg.retraining_window_bars, min_pct_change=tuned_min_pct_change)
+
+        y_long, y_short = generate_long_short_labels(full_data, tuned_prediction_horizon, tuned_min_pct_change)
 
         logger.info(f"[{sym}] Retraining LONG model...")
         ens_old_long = load_ensemble(cfg, sym, "long", model_params=optuna_params_per_symbol[sym])
@@ -169,11 +143,11 @@ def _handle_model_acceptance(sym, cfg, ens_per_symbol_long, ens_per_symbol_short
     except Exception as e:
         logger.exception(f"[{sym}] Error during model acceptance: {e}")
 
-def _check_and_trigger_retraining(cfg: Cfg, sym: str, feature_cfg_per_symbol: Dict[str, FeatureCfg], dry_run: bool, notifier: TelegramNotifier, optuna_params_per_symbol: Dict[str, Any], retraining_processes: Dict[str, Process], retraining_status: Dict[str, bool], last_retrain_date: Dict[str, datetime.date], risk_controller: RiskController):
+def _check_and_trigger_retraining(cfg: Cfg, sym: str, feature_cfg_per_symbol: Dict[str, FeatureCfg], dry_run: bool, notifier: TelegramNotifier, optuna_params_per_symbol: Dict[str, Any], retraining_processes: Dict[str, Process], retraining_status: Dict[str, bool], last_retrain_date: Dict[str, datetime.date], risk_controller: RiskController, mt5c: MT5Client):
     """
     Checks if retraining should be triggered for a given symbol based on retrain_time_utc.
     """
-    current_utc_datetime = datetime.datetime.now(datetime.timezone.utc)
+    current_utc_datetime = mt5c.now_utc()
     current_utc_time = current_utc_datetime.time()
     current_utc_date = current_utc_datetime.date()
 
@@ -192,29 +166,17 @@ def _check_and_trigger_retraining(cfg: Cfg, sym: str, feature_cfg_per_symbol: Di
             # Check if current time is past the retrain time and it hasn't been retrained today
             if current_utc_datetime >= retrain_datetime and last_retrain_date[sym] != current_utc_date:
                 if not retraining_status[sym]:
-                    if cfg.fetch.retrain_in_background:
-                        logger.info(f"[{sym}] Triggering background retraining at {current_utc_datetime.time().strftime('%H:%M')} UTC...")
-                        notifier.send_message(f"[{sym}] Triggering background retraining.", level="INFO")
-                    else:
-                        logger.info(f"[{sym}] Triggering foreground retraining at {current_utc_datetime.time().strftime('%H:%M')} UTC...")
-                        notifier.send_message(f"[{sym}] Triggering foreground retraining.", level="INFO")
+                    logger.info(f"[{sym}] Triggering background retraining at {current_utc_datetime.time().strftime('%H:%M')} UTC...")
+                    notifier.send_message(f"[{sym}] Triggering background retraining.", level="INFO")
 
-                    if cfg.fetch.retrain_in_background:
-                        logger.info(f"[{sym}] Starting background retraining process...")
-                        process = Process(
-                            target=run_retraining_in_background,
-                            args=(cfg, sym, feature_cfg_per_symbol[sym], dry_run, notifier, optuna_params_per_symbol)
-                        )
-                        process.start()
-                        retraining_processes[sym] = process
-                        retraining_status[sym] = True
-                    else:
-                        logger.info(f"[{sym}] Running foreground retraining (blocking)...")
-                        run_retraining_in_background(cfg, sym, feature_cfg_per_symbol[sym], dry_run, notifier, optuna_params_per_symbol)
-                        logger.info(f"[{sym}] Foreground retraining finished.")
-                        # For foreground retraining, it's immediately done, so no process to track
-                        retraining_status[sym] = False # Mark as done
-                        # No need to add to retraining_processes as it's not a background process
+                    process = Process(
+                        target=run_retraining_in_background,
+                        args=(cfg, sym, feature_cfg_per_symbol[sym], dry_run, notifier, optuna_params_per_symbol)
+                    )
+                    process.start()
+                    retraining_processes[sym] = process
+                    retraining_status[sym] = True
+                    
                     last_retrain_date[sym] = current_utc_date  # Mark as retrained for today
                     risk_controller.update_last_daily_retrain_date(sym, current_utc_date) # Update RiskController's internal state
                 else:
@@ -294,6 +256,11 @@ def run(dry_run: bool = False):
                 live_monitor = LivePerformanceMonitor(cfg)
                 live_monitor.load_state()  # Load previous state on startup
 
+                # Immediately after loading state, sync the current_equity with the live account value
+                # This ensures the bot starts with the ground truth from the broker.
+                if account_info:
+                    live_monitor.sync_equity(account_info.equity)
+
                 # --- Load Ensembles and Feature Configs ---
                 ens_per_symbol_long = {}
                 ens_per_symbol_short = {}
@@ -313,30 +280,44 @@ def run(dry_run: bool = False):
 
                     data_manager.bootstrap_history(sym, initial_bars=initial_bars)
 
+                    # Bootstrap context feature history as well
+                    if cfg.context_features.mta.enabled:
+                        logger.info(f"[{sym}] Bootstrapping MTA history...")
+                        data_manager.bootstrap_history(sym, initial_bars=initial_bars, timeframe=cfg.context_features.mta.timeframe)
+                    if cfg.context_features.inter_market.enabled:
+                        im_sym = cfg.context_features.inter_market.symbol
+                        logger.info(f"[{sym}] Bootstrapping Inter-Market history for {im_sym}...")
+                        data_manager.bootstrap_history(im_sym, initial_bars=initial_bars, timeframe=cfg.timeframe)
+
                 bar_counters = {sym: 0 for sym in cfg.symbols}
                 last_bar_time = {sym: None for sym in cfg.symbols}
                 X_per_symbol = {}
 
                 # Warm-start bandit: merge latest backtest priors into live state file BEFORE instantiating RiskController
                 try:
-                    for sym in cfg.symbols:
+                    live_state_path = getattr(getattr(cfg, "thompson_sampling", {}), "state_file", "ts_risk_controller_state.json")
+                    os.makedirs("results", exist_ok=True) # Ensure results directory exists for the state file
 
-                        latest_backtest = find_latest_backtest_state(symbol=sym, results_dir="results")
-                        if latest_backtest:
-                            warm_weight = getattr(getattr(cfg, "thompson_sampling", {}), "warmstart_weight", 1.0)
-                            logger.info(f"Found backtest bandit state for {sym}: {latest_backtest}; merging into live state (weight={warm_weight})")
+                    # Find the latest backtest file once (now finds the latest overall backtest file)
+                    latest_backtest_file = find_latest_backtest_state(results_dir="results")
 
-                            # Ensure results directory exists for the state file
-                            os.makedirs("results", exist_ok=True)
-                            live_state_path = getattr(getattr(cfg, "thompson_sampling", {}), "state_file", "ts_risk_controller_state.json")
-                            merge_warmstart(latest_backtest, live_state_path, warmstart_weight=warm_weight)
-                        else:
-                            logger.info(f"No backtest bandit state file found to warm-start for {sym}.")
+                    if latest_backtest_file:
+                        warm_weight = getattr(getattr(cfg, "thompson_sampling", {}), "warmstart_weight", 1.0)
+                        logger.info(f"Found latest backtest bandit state: {latest_backtest_file}; merging into live state for all symbols (weight={warm_weight})")
+                        
+                        # Merge the entire backtest file into the live state.
+                        # merge_warmstart will handle extracting symbol-specific states for all symbols in the file.
+                        merge_warmstart(latest_backtest_file, live_state_path, warmstart_weight=warm_weight)
+                        logger.info(f"Warm-start merge complete for all symbols from {latest_backtest_file}.")
+                    else:
+                        logger.info(f"No backtest bandit state file found to warm-start any symbol.")
+
                 except Exception:
                     logger.exception(f"Warmstart merge failed; continuing without warmstart.")
 
                 # Instantiate risk manager and risk controller AFTER warmstart merge so they load the merged state
-                risk_manager = RiskManager(cfg, mt5c, notifier=notifier) # Pass notifier
+                lock = threading.Lock()
+                risk_manager = RiskManager(cfg, mt5c, lock, notifier=notifier) # Pass notifier
                 risk_controller = RiskController(cfg, notifier=notifier) # Instantiate RiskController
                 loaded_open_positions = risk_controller.load_state() # Load state again to get open_positions_cache
 
@@ -378,7 +359,49 @@ def run(dry_run: bool = False):
                 while True:
                     # Periodically save global states and check thread health
                     live_monitor.save_state()
-                    risk_controller.save_state(exe.risk.open_positions_cache)
+                    with lock:
+                        risk_controller.save_state(exe.risk.open_positions_cache)
+
+                    # --- Centralized Reconciliation ---
+                    # This is the single point of truth for reconciling closed positions
+                    closed_trades = exe.reconcile_open_positions_with_mt5()
+                    if closed_trades:
+                        for trade in closed_trades:
+                            # Add to monitor for metrics
+                            live_monitor.add_closed_trade(trade)
+                            # Update RiskController for learning
+                            risk_controller.update(trade)
+
+                            # Log metrics for the closed trade
+                            try:
+                                # Need to get the correct ensemble for the trade's symbol
+                                ens = ens_per_symbol_long[trade.symbol] if trade.direction == "long" else ens_per_symbol_short[trade.symbol]
+                                trade_auc = ens.ensemble_cv_auc_ if ens else 0.5
+
+                                normalized_reward = trade.pnl / max(1.0, trade.exit_equity) if trade.exit_equity else 0.0
+                                drawdown = 1 - (live_monitor.current_equity / live_monitor.peak_equity) if live_monitor.peak_equity > 0 else 0.0
+
+                                log_metrics_to_csv({
+                                    "timestamp": trade.exit_time.isoformat(),
+                                    "symbol": trade.symbol,
+                                    "event_type": "trade_reward",
+                                    "atr_idx": trade.atr_idx,
+                                    "min_prob_long_idx": trade.min_prob_long_idx,
+                                    "min_prob_short_idx": trade.min_prob_short_idx,
+                                    "reward": normalized_reward,
+                                    "equity": trade.exit_equity,
+                                    "peak_equity": live_monitor.peak_equity,
+                                    "drawdown": drawdown,
+                                    "ensemble_auc": trade_auc
+                                })
+                            except Exception as e:
+                                logger.exception(f"[{trade.symbol}] Failed to log metrics for closed trade {trade.ticket}: {e}")
+
+                        # After processing closed trades, update the equity from the broker
+                        account_info = mt5c.account_info()
+                        if account_info:
+                            live_monitor.update_equity(datetime.datetime.now(datetime.timezone.utc), account_info.equity)
+                            logger.info(f"Global equity updated to: {account_info.equity}")
 
                     for i, symbol_data in enumerate(symbol_threads):
                         if not symbol_data["thread"].is_alive():
@@ -394,7 +417,7 @@ def run(dry_run: bool = False):
                         _check_and_trigger_retraining(
                             cfg, sym, feature_cfg_per_symbol, dry_run, notifier,
                             optuna_params_per_symbol, retraining_processes,
-                            retraining_status, last_retrain_date, risk_controller
+                            retraining_status, last_retrain_date, risk_controller, mt5c
                         )
 
                         # Check if a retraining process has finished
@@ -449,7 +472,8 @@ def run(dry_run: bool = False):
         if risk_controller and exe: # Check if exe is also defined
             try:
                 # Use the latest open positions cache from the live monitor, as it's the aggregate from all threads
-                risk_controller.save_state(exe.risk.open_positions_cache) # Save final state
+                with lock:
+                    risk_controller.save_state(exe.risk.open_positions_cache) # Save final state
             except Exception:
                 logger.exception("Failed to save RiskController state on shutdown.")
         logger.info("MT5 ML Bot shutdown complete.")

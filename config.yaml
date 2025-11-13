@@ -10,7 +10,7 @@ optuna_n_trials: 150  # 150
 
 # --- Backtesting Settings ---
 backtesting:
-  initial_equity: 8.75
+  initial_equity: 5.00
   simulation_volume_min: 0.1 # NEW: Force backtester to use this minimum lot size
   enable_retraining: False # New field to control retraining in backtester.py
 

@@ -123,10 +123,20 @@ class MT5Client:
             return datetime.datetime.now(datetime.timezone.utc)
 
         try:
-            # We need a symbol to get the server time. Let's use the first one from the market watch.
+            # First, try to get server time from a common symbol like EURUSDm
+            common_symbol = "EURUSDm#"
+            tick = mt5.symbol_info_tick(common_symbol)
+            if tick and tick.time > 0:
+                return datetime.datetime.fromtimestamp(tick.time, tz=datetime.timezone.utc)
+            else:
+                logger.warning(f"MT5Client: Could not get server time from {common_symbol}. Trying other symbols.")
+
+            # If that fails, iterate through all symbols to find one with a valid tick
             symbols = mt5.symbols_get()
             if symbols:
-                for symbol_info in symbols:
+                # Filter out the common symbol since it has already been checked
+                other_symbols = [s for s in symbols if s.name != common_symbol]
+                for symbol_info in other_symbols:
                     tick = mt5.symbol_info_tick(symbol_info.name)
                     if tick and tick.time > 0:
                         return datetime.datetime.fromtimestamp(tick.time, tz=datetime.timezone.utc)
@@ -136,6 +146,18 @@ class MT5Client:
             pass
         
         return datetime.datetime.now(datetime.timezone.utc)
+
+    def get_timezone_offset(self) -> Optional[float]:
+        """Calculates the timezone offset of the broker's server from UTC in hours."""
+        if not self._connected:
+            logger.warning("get_timezone_offset: Not connected to MT5.")
+            return None
+
+        server_time_utc = self.now_utc()
+        system_time_utc = datetime.datetime.now(datetime.timezone.utc)
+        
+        offset_seconds = (server_time_utc - system_time_utc).total_seconds()
+        return offset_seconds / 3600
 
     def symbol_info_tick(self, symbol: str):
         """Wrapper for mt5.symbol_info_tick()"""

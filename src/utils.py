@@ -14,11 +14,36 @@ from src.data import merge_features_labels
 from src.time_utils import timeframe_to_seconds, timeframe_to_mt5_timeframe # NEW IMPORT
 import glob
 import numpy as np
+import csv
+from typing import Dict, Any
 
 MODEL_DIR = "models"
 PARAMS_DIR = "optuna_params"
 os.makedirs(MODEL_DIR, exist_ok=True)
 os.makedirs(PARAMS_DIR, exist_ok=True)
+
+# --- Metrics Logging Setup ---
+METRICS_CSV_FILE = "results/risk_metrics.csv"
+METRICS_HEADERS = [
+    "timestamp", "symbol", "event_type", "atr_idx", "min_prob_long_idx", "min_prob_short_idx",
+    "atr_mult_sl", "atr_mult_tp", "min_prob_long", "min_prob_short",
+    "rule_scale", "reward", "equity", "peak_equity", "drawdown", "ensemble_auc"
+]
+
+def _initialize_metrics_csv():
+    if not os.path.exists(METRICS_CSV_FILE):
+        with open(METRICS_CSV_FILE, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(METRICS_HEADERS)
+        logger.info(f"Initialized metrics CSV file: {METRICS_CSV_FILE}")
+
+def log_metrics_to_csv(data: Dict[str, Any]):
+    with open(METRICS_CSV_FILE, 'a', newline='') as f:
+        writer = csv.writer(f)
+        row = [data.get(header, "") for header in METRICS_HEADERS]
+        writer.writerow(row)
+        f.flush()
+        os.fsync(f.fileno())
 
 def setup_logging(level="INFO", to_file=True, rotate="10 MB", retention="7 days"):
     logger.remove()
