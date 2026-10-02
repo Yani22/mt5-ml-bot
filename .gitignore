@@ -37,3 +37,4 @@ monitor_state.json
 requirements-ci.txt
 CLAUDE.md
 .model_signing_key
+AUDIT.md
