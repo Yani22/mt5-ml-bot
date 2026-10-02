@@ -75,6 +75,25 @@ class SymbolProcessor:
 
         return data, X, y
 
+    def _manage_positions(self, X: pd.DataFrame):
+        """Breakeven/trailing for this symbol's open positions, on the last closed bar's ATR (same bar as the decision).
+        Live only: dry-run positions are simulated and never sent to the broker."""
+        if self.dry_run or X is None or len(X) < 2:
+            return
+        try:
+            self.risk_manager.manage_open_positions(self.symbol, float(X["atr_14"].iloc[-2]))
+        except Exception as e:
+            logger.exception(f"[{self.symbol}] Position management failed: {e}")
+
+    def _trading_allowed(self, now_utc) -> bool:
+        """Risk gate before an order: drawdown block, watchdog cooldown, session filter, max open positions."""
+        peak = self.monitor.peak_equity
+        drawdown = 1.0 - self.monitor.current_equity / peak if peak and peak > 0 else 0.0
+        if not self.risk_manager.should_trade(now_utc, drawdown):
+            logger.info(f"[{self.symbol}] Trade blocked by the risk gate (drawdown/watchdog/session).")
+            return False
+        return not self.risk_manager.max_positions_reached()
+
     def _make_trade_decision(self, data: pd.DataFrame, X: pd.DataFrame):
         import datetime  # Import datetime
 
@@ -134,6 +153,9 @@ class SymbolProcessor:
                 logger.info(f"[{self.symbol}] Short trade blocked due to low ensemble confidence (AUC={self.ens_short.ensemble_cv_auc_:.4f} < {min_ensemble_auc:.4f}).")
 
         if direction:
+            if not self._trading_allowed(now_utc):
+                return
+
             # Get spread for position sizing
             tick = self.mt5_client.symbol_info_tick(self.symbol)
             if not tick:
@@ -215,7 +237,8 @@ class SymbolProcessor:
                     time.sleep(self.cfg.timeframe_minutes() * 60)  # Wait a full bar duration before retrying
                     continue
 
-                # Make trade decisions
+                # Move stops on open positions, then make trade decisions
+                self._manage_positions(X)
                 self._make_trade_decision(data, X)
 
             except Exception as e:

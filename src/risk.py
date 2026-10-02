@@ -229,6 +229,10 @@ class RiskManager:
                 return 0
             # Convert to list sorted by time ascending
             recs = sorted(list(deals), key=lambda d: getattr(d, "time", 0))
+            # only this bot's closing deals: not deposits/withdrawals, not other systems' trades
+            my_magic = self.cfg.magic_number
+            closing = mt5.DEAL_ENTRY_OUT if mt5 is not None else 1
+            recs = [d for d in recs if getattr(d, "magic", None) == my_magic and getattr(d, "entry", None) == closing]
             # get only deals with non-zero profit (closed)
             profits = []
             for d in recs:
@@ -272,14 +276,25 @@ class RiskManager:
         return False
 
     # ---------- Exposed check for trading permission ----------
-    def should_trade(self, now_local: pd.Timestamp, drawdown: float) -> bool:
-        import MetaTrader5 as mt5  # type: ignore
+    def max_positions_reached(self) -> bool:
+        """True when the open-position cache already holds `risk.max_positions` positions (all symbols)."""
+        limit = int(getattr(self.risk_cfg, "max_positions", 0) or 0)
+        with self.cache_lock:
+            count = len(self.open_positions_cache)
+        if count >= limit:
+            logger.info(f"Trading blocked: {count} open positions, max_positions={limit}.")
+            return True
+        return False
+
+    def should_trade(self, now_local: datetime.datetime, drawdown: float) -> bool:
         """
         Returns True if trading is allowed.
         This function now enforces:
-        - equity drawdown block (block_on_drawdown)
+        - equity drawdown block (block_on_drawdown); with MT5 data it fails closed when the account cannot be read
         - watchdog consecutive losses/cooldown (if enabled)
         - session filter
+
+        `now_local` must be timezone-aware (UTC): the cooldown is stored as an aware time.
         """
 
         # 1) Watchdog checks (if enabled)
@@ -305,16 +320,19 @@ class RiskManager:
         if self.cfg.data_source == "mt5":
             try:
                 acct = self.mt5_client.account_info()
-                if acct:
-                    equity = float(getattr(acct, "equity", 0.0))
-                    self._update_equity_peak(equity)
-                    if self._drawdown_exceeded(equity):
-                        # Trigger cooldown only if watchdog is also enabled
-                        if self.watchdog_cfg.enabled:
-                            self._trigger_cooldown()
-                        return False
-            except Exception:
-                logger.debug("should_trade: account_info() unavailable for drawdown checks")
+            except Exception as e:
+                logger.warning(f"Trading blocked: account_info() failed ({e}); cannot check drawdown.")
+                return False
+            if not acct:
+                logger.warning("Trading blocked: account_info() returned nothing; cannot check drawdown.")
+                return False
+            equity = float(getattr(acct, "equity", 0.0))
+            self._update_equity_peak(equity)
+            if self._drawdown_exceeded(equity):
+                # Trigger cooldown only if watchdog is also enabled
+                if self.watchdog_cfg.enabled:
+                    self._trigger_cooldown(now=now_local)
+                return False
         else:
             # For CSV backtesting, rely on the passed drawdown parameter
             if drawdown >= getattr(self.risk_cfg, "block_on_drawdown", 0.10):
@@ -348,14 +366,16 @@ class RiskManager:
         # allowed by default
         return True
 
-    # ---------- Manage open positions (unchanged mostly) ----------
+    # ---------- Manage open positions: breakeven at +1R, then trailing ----------
     def manage_open_positions(self, symbol: str, current_atr: float):
+        """
+        Moves the stop of this symbol's open positions: to entry once the trade is +1R, then trails it by
+        `trailing_atr_mult` x ATR. 1R is the stop actually placed (`sl_atr_mult` x the entry ATR, stored at entry);
+        entries without it get no breakeven. Trailing starts once the trade has reached +1R or the stop is already
+        at entry, and the stop is only ever tightened. Simulated (dry-run) entries are never sent to the broker.
+        """
         if self.cfg.data_source != "mt5":
             return  # Not applicable for CSV backtesting
-        """
-        Manages trailing stops for open positions of a given symbol.
-        Includes breakeven and ATR trailing logic, adapted for live trading.
-        """
 
         breakeven_enabled = self.cfg.get_symbol_value(symbol, 'breakeven_at_1R', True)
         trailing_mult = self.cfg.get_symbol_value(symbol, 'trailing_atr_mult', 0.0)
@@ -364,7 +384,8 @@ class RiskManager:
             return  # No trailing logic enabled for this symbol
 
         with self.cache_lock:
-            positions_to_manage = [p for p in self.open_positions_cache.values() if p.get("symbol") == symbol]
+            positions_to_manage = [(key, dict(p)) for key, p in self.open_positions_cache.items()
+                                   if p.get("symbol") == symbol and not p.get("dry_run")]
 
         if not positions_to_manage:
             return
@@ -374,8 +395,8 @@ class RiskManager:
             logger.warning(f"[{symbol}] Could not get tick for trailing stop management.")
             return
 
-        for pos_details in positions_to_manage:
-            ticket = pos_details.get('ticket')
+        for cache_key, pos_details in positions_to_manage:
+            ticket = pos_details.get('ticket', cache_key)
             direction = pos_details.get('direction')
             entry_price = pos_details.get('entry_price')
             current_sl = pos_details.get('sl', 0.0)
@@ -385,37 +406,27 @@ class RiskManager:
                 logger.debug(f"[{symbol}] Skipping position {ticket} due to missing details in cache.")
                 continue
 
+            is_long = direction == "long"
+            exit_price = tick.bid if is_long else tick.ask
+            profit_move = (exit_price - entry_price) if is_long else (entry_price - exit_price)
+            placed_mult = pos_details.get('sl_atr_mult')
+            reached_1r = bool(placed_mult) and profit_move >= placed_mult * pos_atr_at_entry - 1e-9  # tolerance: float noise in prices
+            stop_at_entry = (current_sl >= entry_price) if is_long else (0 < current_sl <= entry_price)
+
             new_sl = current_sl
-            exit_price = tick.bid if direction == "long" else tick.ask
+            if breakeven_enabled and reached_1r and not stop_at_entry:
+                new_sl = entry_price
+                logger.info(f"[{symbol}] Condition met to move SL to breakeven for position {ticket} at {new_sl:.5f}")
 
-            if breakeven_enabled:
-                sl_mult = self.cfg.get_symbol_value(symbol, 'atr_multiplier_sl', 1.5)
-                one_r_price_move = sl_mult * pos_atr_at_entry
-
-                is_in_profit_for_be = (direction == "long" and exit_price >= entry_price + one_r_price_move) or \
-                                     (direction == "short" and exit_price <= entry_price - one_r_price_move)
-
-                is_sl_not_at_be = (direction == "long" and current_sl < entry_price) or \
-                                  (direction == "short" and current_sl > entry_price)
-
-                if is_in_profit_for_be and is_sl_not_at_be:
-                    new_sl = entry_price
-                    logger.info(f"[{symbol}] Condition met to move SL to breakeven for position {ticket} at {new_sl:.5f}")
-
-            if trailing_mult > 0:
+            if trailing_mult > 0 and (reached_1r or stop_at_entry):
                 trailing_atr_dist = current_atr * trailing_mult
-                potential_new_sl = 0.0
+                if is_long:
+                    new_sl = max(new_sl, exit_price - trailing_atr_dist)
+                else:
+                    new_sl = min(new_sl, exit_price + trailing_atr_dist)
 
-                if direction == "long":
-                    potential_new_sl = exit_price - trailing_atr_dist
-                    if potential_new_sl > new_sl:
-                        new_sl = potential_new_sl
-                else:  # Short position
-                    potential_new_sl = exit_price + trailing_atr_dist
-                    if (new_sl == 0.0) or (potential_new_sl < new_sl):
-                        new_sl = potential_new_sl
-
-            if new_sl > 0 and abs(new_sl - current_sl) > 1e-9:
+            tightened = new_sl > current_sl + 1e-9 if is_long else 0 < new_sl < current_sl - 1e-9
+            if new_sl > 0 and tightened:
                 # --- Dynamic Freeze Level Check based on Spread ---
                 symbol_info = self.mt5_client.symbol_info(symbol)
                 if not symbol_info:
@@ -425,6 +436,9 @@ class RiskManager:
                 # Ensure new_sl is rounded to correct precision before checks
                 price_digits = symbol_info.digits
                 new_sl = round(new_sl, price_digits)
+                still_tighter = round(current_sl, price_digits) < new_sl if is_long else new_sl < round(current_sl, price_digits)
+                if not still_tighter:
+                    continue  # rounds back to the current stop: nothing to send
 
                 # Calculate current spread
                 current_spread = abs(tick.ask - tick.bid)
@@ -450,6 +464,7 @@ class RiskManager:
 
                 request = {
                     "action": mt5.TRADE_ACTION_SLTP,
+                    "symbol": symbol,
                     "position": ticket,
                     "sl": new_sl,
                     "tp": pos_details.get('tp', 0.0),
@@ -461,7 +476,8 @@ class RiskManager:
                 if result and result.retcode == mt5.TRADE_RETCODE_DONE:
                     logger.info(f"[{symbol}] Successfully modified SL for position {ticket}.")
                     with self.cache_lock:
-                        self.open_positions_cache[ticket]['sl'] = new_sl
+                        if cache_key in self.open_positions_cache:
+                            self.open_positions_cache[cache_key]['sl'] = new_sl
                 else:
                     retcode = result.retcode if result else 'N/A'
                     comment = result.comment if result else 'N/A'
