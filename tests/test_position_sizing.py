@@ -127,3 +127,51 @@ def test_symbol_processor_sizes_on_the_bandit_stop_not_the_config_stop():
     stop_distance = abs(call["price"] - call["sl"])
     assert stop_distance == pytest.approx(0.0020)            # bandit arm 2.0 x ATR, not the config 1.0 x ATR
     assert call["lots"] * stop_distance * CONTRACT == pytest.approx(EQUITY * 0.01, rel=0.02)
+
+
+# ---- K4: floor lots to the broker step, never round up past the risk budget -----------------------------------
+
+def _rm_with_volume(step, vmin=0.01, vmax=100):
+    class Client(FakeClient):
+        def symbol_info(self, symbol):
+            return NS(point=1e-5, trade_contract_size=CONTRACT, digits=5, trade_stops_level=0,
+                      volume_min=vmin, volume_step=step, volume_max=vmax)
+    return RiskManager(make_cfg(), Client(), threading.Lock())
+
+
+def _lots_for_units(units, rm=None):
+    """Equity chosen so the exact (unrounded) lot size is `units`: atr 0.01 means $1000 per lot, risk 1%."""
+    return size(rm or make_rm(), equity=units * 1000 / 0.01, atr=0.0100)
+
+
+@pytest.mark.parametrize("units, expected", [(0.015, 0.01), (0.0251, 0.02), (0.0299, 0.02), (1.239, 1.23)])
+def test_lots_are_floored_to_the_step_not_rounded_to_nearest(units, expected):
+    assert _lots_for_units(units)[0] == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("units", [0.03, 0.07, 0.29, 0.58, 1.1])
+def test_an_exact_multiple_of_the_step_is_not_floored_down_by_float_noise(units):
+    assert _lots_for_units(units)[0] == pytest.approx(units)
+
+
+def test_below_the_minimum_lot_the_trade_is_skipped():
+    assert _lots_for_units(0.0099) == (0.0, 0.0)
+
+
+def test_floored_lots_never_risk_more_than_the_budget():
+    for units in (0.011, 0.0199, 0.0451, 0.333, 2.999):
+        lots, risk = _lots_for_units(units)
+        assert lots * 1000 <= units * 1000 + 1e-9
+
+
+def test_a_step_finer_than_two_decimals_is_respected():
+    lots, _ = _lots_for_units(0.0157, rm=_rm_with_volume(step=0.001, vmin=0.001))
+    assert lots == pytest.approx(0.015)
+
+
+def test_a_coarse_step_floors_to_it():
+    assert _lots_for_units(0.47, rm=_rm_with_volume(step=0.1, vmin=0.1))[0] == pytest.approx(0.4)
+
+
+def test_lots_are_capped_at_the_broker_maximum():
+    assert _lots_for_units(5.0, rm=_rm_with_volume(step=0.01, vmax=2.0))[0] == pytest.approx(2.0)

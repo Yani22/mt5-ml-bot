@@ -9,6 +9,7 @@ import numpy as np  # type: ignore
 from loguru import logger  # type: ignore
 from .config import Cfg
 import datetime
+import math
 from datetime import timezone, timedelta
 from typing import List, Optional  # Import Optional
 from .trade import SimPosition  # Import SimPosition
@@ -130,15 +131,20 @@ class RiskManager:
         volume_step = symbol_info.volume_step
         volume_max = symbol_info.volume_max
 
-        if units < volume_min:
-            logger.info(f"Calculated lot size {units:.4f} is below broker's minimum of {volume_min}. Skipping trade.")
+        if not volume_step or volume_step <= 0:
+            logger.warning(f"[{symbol}] Invalid volume step ({volume_step}). Skipping trade.")
             return 0.0, 0.0
 
-        lots = round(units / volume_step) * volume_step
-        lots = float(np.clip(lots, volume_min, volume_max))
+        # Floor to a whole number of steps (epsilon absorbs float noise on exact multiples). Never round up:
+        # that would risk more than the budget, and the minimum lot is a floor, not something to clip up to.
+        steps = min(math.floor(units / volume_step + 1e-9), math.floor(volume_max / volume_step + 1e-9))
+        lots = round(steps * volume_step, 8)
+        if lots < volume_min - 1e-12:
+            logger.info(f"Lot size {units:.4f} floors to {lots} (broker minimum {volume_min}). Skipping trade.")
+            return 0.0, 0.0
 
         logger.info(f"Position sizing (backtest logic): equity={equity:.2f}, ATR={atr:.6f}, lots={lots:.4f}, effective_risk={effective_risk:.6f}")
-        return round(lots, 2), effective_risk
+        return lots, effective_risk
 
     # ---------- SL / TP ----------
     def stop_targets(self, price: float, atr: float, direction: str, auc_score: float, symbol: str, sl_mult: float | None = None, tp_mult: float | float | None = None):
