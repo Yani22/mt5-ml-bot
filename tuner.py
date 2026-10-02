@@ -100,7 +100,7 @@ def objective(trial, df: pd.DataFrame, static_features: pd.DataFrame, symbol: st
         model_params = {}
         for model in yaml_cfg["models"]:
             model_name = model["name"]
-            model_params[model_name] = suggest_params(trial, f"model_{model_name}", model.get("params", {}))
+            model_params[model_name] = suggest_params(trial, f"model_{model_name}", model.get("tune", {}))
 
         # --- 4. Evaluate Ensemble ---
         ens = Ensemble(cfg, model_params=model_params)

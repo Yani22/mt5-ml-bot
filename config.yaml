@@ -1,4 +1,6 @@
 # config.yaml
+# Values here are what the bot and backtester run with. Tuner (tuner.py) results are NOT written here:
+# they go to optuna_params/<symbol>_best_params.pkl and override `models.defaults` / `features` at load time.
 
 # --- General Settings ---
 use_gpu: false # Master switch to enable GPU acceleration for supported models (lgbm, xgb)
@@ -6,14 +8,8 @@ magic_number: 424242 # Unique ID for this bot's trades
 data_source: mt5 # "mt5" or "csv". Automatically switches to csv on non-windows
 
 # --- Optuna Tuning Specifics ---
-optuna_n_trials: 150  # 150
-
-# --- Backtesting Settings ---
-backtesting:
-  initial_equity: 20.00
-  enable_retraining: False # New field to control retraining in backtester.py
-
-optuna_pruning_interval: 100 # New: Interval for Optuna pruning checks
+optuna_n_trials: 150
+optuna_pruning_interval: 100 # Interval for Optuna pruning checks
 n_jobs: -1 # Number of parallel jobs for tuning. -1 means all available CPU cores.
 roc_lags_options:
 - [1, 3, 5, 10]
@@ -21,34 +17,37 @@ roc_lags_options:
 - [2, 5, 10, 15]
 - [1, 2, 3]
 
+# --- Backtesting Settings ---
+backtesting:
+  initial_equity: 20.00
+  enable_retraining: False # Whether backtester.py retrains during the run
+
 # --- ML & CV Settings ---
 cv_samples_per_split: 1000 # Affects number of splits in TimeSeriesSplit. Higher -> fewer splits -> faster but less robust CV.
 
 # --- Fetch / Data Management ---
 fetch:
-  initial_fetch_bars: 45000        # 30000 how many bars to bootstrap at startup / initial fetch
+  initial_fetch_bars: 45000        # how many bars to bootstrap at startup / initial fetch
   save_raw_data_locally: true      # store raw CSV/feather parquet locally for caching
   raw_data_dir: "data/historical_data" # where to store cached data
   retrain_in_background: false      # whether retrain runs async
-  retrain_time_utc: "23:55"           #null set to "23:55" if you want scheduled daily retrain, null = disabled
+  retrain_time_utc: "23:55"           # scheduled daily retrain (UTC); null = disabled
 force_retrain_on_startup: false    # Set to true to force retraining of all models on bot startup (e.g., after feature changes).
 
 # --- Ensemble Training Control ---
 ensemble_training:
-  min_samples_for_ensemble: 1000   # don’t fit ensemble if fewer samples available
+  min_samples_for_ensemble: 1000   # don't fit ensemble if fewer samples available
 
 # --- Symbols & timeframe ---
-# historical_data symbols for .csv needed: M5-EURUSD#, H1-EURUSD#, and M5-USDX-DEC25
+# CSV data needed per symbol: M5-<SYMBOL>, H1-<SYMBOL>, and M5-USDX-DEC25 if inter_market is enabled
 symbols: ["AUDUSDm#", "EURUSDm#", "GBPUSDm#"]
-# symbols: ["AUDUSDm#", "EURUSDm#", "GBPUSDm#"]
-# symbols: ["USDJPYm#", "GBPJPYm#", "EURJPYm", "USDCADm", "EURGBPm"] 
 timeframe: "M5"            # One of: M1, M5, M15, M30, H1, H4
-history_bars: 45000          #22500 18000 36000 45000 #12000-for-tuner.py #5000-for-backtesting
+history_bars: 45000
 retrain_every_bars: 10000     # ~3.5 days at M5
-prediction_horizon: 12       # 6 Bars ahead for label (~30 min on M5)
+prediction_horizon: 12       # bars ahead for the label (12 bars = 1 hour on M5)
 retraining_window_bars: 45000         # Number of recent bars for rolling window retraining. null for expanding window.
 
-# --- Features (now tunable) ---
+# --- Features ---
 features:
   rsi_period: [14, 14]
   ema_slow: [200, 200]
@@ -57,26 +56,31 @@ features:
 context_features:
   mta:
     enabled: true
-    timeframe: "H1"   #M5 H1
-    ema_period: 50    #600  50
-    rsi_period: 14    #600  14
+    timeframe: "H1"
+    ema_period: 50
+    rsi_period: 14
   inter_market:
     enabled: false
     symbol: "USDX-DEC25" # Make sure this symbol is available in your data source
     roc_lags: [5, 21, 63]
   price_action:
     enabled: true
-    home_base_ma_period: 200  #1000 200
-    swing_lookback: 50        #250  50
+    home_base_ma_period: 200
+    swing_lookback: 50
 
-# --- Base learners / models ---
-# For live bot: after tuning, Optuna best parameters overwrite these
-# For tuning: these ranges are used by Optuna
+# --- Base learners ---
+# defaults: single values used when a symbol has no tuned params (optuna_params/<symbol>_best_params.pkl).
+# tune:     [min, max] (or [min, max, "log"]) search ranges, used ONLY by tuner.py.
 models:
 - name: lgbm
-  params:
-      # Tunable ranges for Optuna
-    n_estimators: [100, 500]         # min, max
+  defaults:
+    n_estimators: 200
+    learning_rate: 0.05
+    max_depth: -1
+    subsample: 0.8
+    colsample_bytree: 0.8
+  tune:
+    n_estimators: [100, 500]
     learning_rate: [0.01, 0.1, "log"]
     max_depth: [3, 10]
     subsample: [0.6, 1.0]
@@ -84,9 +88,9 @@ models:
 
 ensemble:
   method: soft_vote
-  threshold_metric: sharpe_ratio # custom_pnl # sharpe_ratio
-  threshold_grid: auto # [0.5, 0.51, 0.52, 0.53, 0.54, 0.55, 0.56, 0.57, 0.58, 0.59, 0.6] # auto
-  min_ensemble_auc: 0.55        # 0.55 Minimum AUC required to allow trading
+  threshold_metric: sharpe_ratio # sharpe_ratio | custom_pnl
+  threshold_grid: auto # "auto" or an explicit list, e.g. [0.5, 0.52, 0.55, 0.6]
+  min_ensemble_auc: 0.55        # Minimum AUC required to allow trading
   auto_threshold: true           # Auto-adjust thresholds based on historical PnL
 
 # --- Trading costs & execution ---
@@ -140,36 +144,36 @@ risk:
   risk_per_trade: 0.035
   dynamic_risk:
     enabled: true
-    base_risk: 0.035      #0.02 Risk 2% of equity on the least confident trades 0.01
-    max_risk: 0.05         #0.035 Risk up to 3% of equity on the most confident trades  0.015
-    auc_floor: 0.55        # The AUC score that corresponds to base_risk
-    auc_ceiling: 0.65      # The AUC score that corresponds to max_risk
+    base_risk: 0.035      # Fraction of equity risked at auc_floor
+    max_risk: 0.05        # Fraction of equity risked at auc_ceiling
+    auc_floor: 0.55       # The AUC score that corresponds to base_risk
+    auc_ceiling: 0.65     # The AUC score that corresponds to max_risk
 
   dynamic_tp:
     enabled: true
     base_tp_mult: 2.0     # For low-confidence trades, aim for a 2x ATR take-profit
     max_tp_mult: 4.0      # For high-confidence trades, give them more room to run with a 4x ATR take-profit
-    auc_floor: 0.55        # Same AUC floor as risk
-    auc_ceiling: 0.65      # Same AUC ceiling as risk
+    auc_floor: 0.55       # Same AUC floor as risk
+    auc_ceiling: 0.65     # Same AUC ceiling as risk
 
-  max_positions: 3            # Max concurrent positions 1-backtest 3-main
-  max_portfolio_risk: 0.15       #Total equity risk cap  0.05-backtest 0.15-main
+  max_positions: 3            # Max concurrent positions (live uses 3; earlier backtests used 1)
+  max_portfolio_risk: 0.15    # Total equity risk cap (live uses 0.15; earlier backtests used 0.05)
   atr_multiplier_sl: 1.0
   atr_multiplier_tp: 2.0
   breakeven_at_1R: true
   trailing_atr_mult: 1.0
-  min_prob_long: 0.55 #0.65-max #0.51-0.55|low #0.56-0.65|high
-  min_prob_short: 0.55 #0.65-max #0.51-0.55|low #0.56-0.65|high
-  block_on_drawdown: 1.0      # 0.20         # 0.1 pause if drawdown from equity peak exceeds 10%     #disable 1.0
-  min_auc_improvement: 0.0025     # 0.005 default # minimum improvement in AUC to accept a new model
-  max_drawdown_for_pruning: 1.0 # New: Max drawdown allowed before Optuna trial pruning  #disable 1.0
+  min_prob_long: 0.55         # 0.51-0.55 = low confidence, 0.56-0.65 = high
+  min_prob_short: 0.55        # 0.51-0.55 = low confidence, 0.56-0.65 = high
+  block_on_drawdown: 1.0      # pause if drawdown from equity peak exceeds this fraction; 1.0 = disabled
+  min_auc_improvement: 0.0025 # minimum AUC improvement to accept a retrained model
+  max_drawdown_for_pruning: 1.0 # Max drawdown allowed before Optuna trial pruning; 1.0 = disabled
   session_filter:
     start: "00:00"
     end: "23:59"
 
 # --- Logging ---
 logging:
-  level: INFO  #INFO #DEBUG
+  level: INFO  # INFO | DEBUG
   to_file: false
   rotate: 10 MB
   retention: 7 days
@@ -177,8 +181,8 @@ logging:
 # --- Monitoring / Safety ---
 watchdog:
   enabled: false
-  max_consecutive_losses: 5      # 5 Stop trading if more than N losses in a row
-  cooldown_hours: 1              # 1 Pause trading for X hours if triggered
+  max_consecutive_losses: 5      # Stop trading if more than N losses in a row
+  cooldown_hours: 1              # Pause trading for X hours if triggered
 
 # --- Monitoring ---
 monitoring:
@@ -200,23 +204,20 @@ asymmetric_compounding:
 startup_logging: true             # log key settings at bot launch for transparency
 
 # --- Symbol Specific Overrides ---
-# Use this section to override settings for specific symbols, like pip_value for non-forex instruments.
+# Overrides any top-level setting for one symbol. Retraining times are staggered so symbols don't retrain at once.
 symbol_overrides:
   "GBPUSDm#":
-    retrain_time_utc: "01:02" #"23:55" Staggered retraining time  "01:00"
-    # --- Thompson Sampling Grid Overrides ---
+    retrain_time_utc: "01:02"
     atr_grid: [1.0, 1.5, 2.0, 2.5]
     min_prob_grid_long: [0.53, 0.55, 0.57, 0.60, 0.63]
     min_prob_grid_short: [0.53, 0.55, 0.57, 0.60, 0.63]
   "AUDUSDm#":
-    retrain_time_utc: "01:12" #"23:55" Staggered retraining time  "01:15"
-    # --- Thompson Sampling Grid Overrides ---
+    retrain_time_utc: "01:12"
     atr_grid: [1.0, 1.5, 2.0, 2.5]
     min_prob_grid_long: [0.53, 0.55, 0.57, 0.60, 0.63]
     min_prob_grid_short: [0.53, 0.55, 0.57, 0.60, 0.63]
-  "EURUSDm#": 
-    retrain_time_utc: "01:22" #"23:55" Staggered retraining time  "01:30"
-    # --- Thompson Sampling Grid Overrides ---
+  "EURUSDm#":
+    retrain_time_utc: "01:22"
     atr_grid: [1.0, 1.5, 2.0, 2.5]
     min_prob_grid_long: [0.53, 0.55, 0.57, 0.60, 0.63]
     min_prob_grid_short: [0.53, 0.55, 0.57, 0.60, 0.63]

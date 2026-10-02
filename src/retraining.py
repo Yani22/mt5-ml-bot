@@ -18,7 +18,7 @@ from src.utils import load_ensemble, safe_retrain_ensemble
 def run_retraining_in_background(cfg, sym, feature_cfg, dry_run, notifier, optuna_params_per_symbol):
     """
     A wrapper function to run the entire retraining pipeline for both long and short models in a separate process.
-    This function now saves optimized parameters to the symbol_overrides section of config.yaml.
+    Tuned parameters come from optuna_params/<symbol>_best_params.pkl; config.yaml is never modified.
     """
     try:
         data_manager = DataManager(cfg)

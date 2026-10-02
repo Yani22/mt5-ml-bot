@@ -177,7 +177,7 @@ class Ensemble:
     def __init__(self, cfg, model_params: Optional[Dict[str, Dict]] = None):
         """
         cfg: configuration object with
-          - cfg.models: list of dicts, each with "name" and optional "params"
+          - cfg.models: list of dicts, each with "name" and optional "defaults" (single values)
           - cfg.ensemble: method, weights, etc.
           - cfg.cv_samples_per_split, etc.
         model_params: optional override from tuning; keys matching model names.
@@ -195,12 +195,10 @@ class Ensemble:
             # Initialize params with tuned parameters if available
             current_model_params = model_params.get(name, {}) if model_params else {}
 
-            # Fallback to default parameters from cfg.models if not found in tuned params
-            # But ensure these are single values, not lists (take first element if it's a list)
-            default_params_from_cfg = m.get("params", {})
-            for k, v in default_params_from_cfg.items():
-                if k not in current_model_params:
-                    current_model_params[k] = v[0] if isinstance(v, list) else v  # Take first element if list
+            # Fall back to the config's single-value defaults for anything the tuner did not set
+            # (the "tune" ranges are only for tuner.py and are never used here).
+            for k, v in m.get("defaults", {}).items():
+                current_model_params.setdefault(k, v)
 
             # Ensure all parameters are single values, not lists
             cleaned_model_params = {}
