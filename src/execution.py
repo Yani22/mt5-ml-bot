@@ -84,6 +84,27 @@ class Execution:
             logger.exception(f"Failed to load open positions state: {e}")
             return {}
 
+    def _drop_unusable_cache_entries(self, simulated_too: bool) -> None:
+        """Caller holds cache_lock. Drops entries that can never be reconciled: those without a symbol (the shape
+        older dry-runs saved) and, for a live run, simulated dry-run entries that never existed at the broker."""
+        for ticket, details in list(self.risk.open_positions_cache.items()):
+            if not details.get("symbol") or (simulated_too and details.get("dry_run")):
+                logger.warning(f"Dropping unusable cached position {ticket} (simulated or missing symbol).")
+                del self.risk.open_positions_cache[ticket]
+
+    def _close_simulated_positions(self) -> List[ClosedTrade]:
+        """Dry-run counterpart of reconciliation: closes simulated positions the latest bar's close put through
+        their stop or target."""
+        with self.risk.cache_lock:
+            self._drop_unusable_cache_entries(simulated_too=False)
+            symbols = {d["symbol"] for d in self.risk.open_positions_cache.values()}
+        prices = {}
+        for symbol in symbols:
+            price = self.data_manager.get_latest_bar_close(symbol)
+            if price is not None:
+                prices[symbol] = float(price)
+        return self.check_closed_trades(prices, datetime.datetime.now(datetime.timezone.utc))
+
     def reconcile_open_positions_with_mt5(self) -> List[ClosedTrade]:
         import MetaTrader5 as mt5
         """
@@ -93,11 +114,12 @@ class Execution:
         2. It discovers new trades by checking which broker trades are not in the cache.
         Returns a list of ClosedTrade objects for newly detected closed trades.
         """
+        if self.dry_run:
+            return self._close_simulated_positions()
+
         with self.risk.cache_lock:
             logger.info("Checking for open positions and reconciling cache with MT5...")
-            if self.dry_run:
-                logger.info("[DRY-RUN] Skipping reconciliation process.")
-                return []
+            self._drop_unusable_cache_entries(simulated_too=True)
 
             closed_trades_list = []
             try:
@@ -442,6 +464,12 @@ class Execution:
             # Store comprehensive details for later SimPosition reconstruction in dry-run
             with self.risk.cache_lock:
                 self.risk.open_positions_cache[simulated_ticket] = {
+                    "ticket": simulated_ticket,
+                    "symbol": symbol,
+                    "direction": direction,
+                    "entry_price": price,
+                    "lots": float(lots),
+                    "dry_run": True,  # simulated: never exists at the broker
                     "risk": float(equity * self.risk._get_dynamic_value(self.risk.risk_cfg.dynamic_risk, auc_score, getattr(self.risk.risk_cfg, "risk_per_trade", 0.005))),  # Store the dollar amount at risk
                     "entry_time": now_utc,
                     "atr": atr,
