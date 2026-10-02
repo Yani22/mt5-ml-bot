@@ -72,11 +72,12 @@ class RiskManager:
         return float(val)
 
     # ---------- Position sizing ----------
-    def position_size(self, equity: float, atr: float, auc_score: float, total_open_risk: float = 0.0, symbol: str | None = None, exploration_mult: float = 1.0, ac_multiplier: float = 1.0) -> tuple[float, float]:
+    def position_size(self, equity: float, atr: float, auc_score: float, total_open_risk: float = 0.0, symbol: str | None = None, exploration_mult: float = 1.0, ac_multiplier: float = 1.0, sl_distance: float | None = None) -> tuple[float, float]:
         """
-        Calculates position size based on the simpler, backtester-aligned logic.
-        Lot size is determined by ATR-based stop distance and configured risk,
-        ignoring live spread/slippage in the calculation to match the profitable model.
+        Calculates position size from the stop distance and the configured risk.
+        total_open_risk is the MONEY (account currency) currently at risk in open positions; the portfolio cap
+        max_portfolio_risk is a fraction of equity. sl_distance is the stop distance in price units that will really
+        be placed; without it the configured ATR multiple is used.
         """
         with self.cache_lock:
             # CRITICAL SAFETY CHECK: Do not open a new position if one already exists for this symbol.
@@ -97,17 +98,18 @@ class RiskManager:
         risk_per_trade_base = self.cfg.get_symbol_value(symbol, 'risk_per_trade', 0.005)
         risk_per_trade = self._get_dynamic_value(self.cfg.get_symbol_value(symbol, 'dynamic_risk'), auc_score, risk_per_trade_base)
 
-        max_risk_allowed = max(0.0, float(self.risk_cfg.max_portfolio_risk) - float(total_open_risk))
-        effective_risk = min(risk_per_trade, max_risk_allowed)
-
-        effective_risk *= exploration_mult
-        effective_risk *= ac_multiplier
+        open_risk_fraction = float(total_open_risk) / float(equity) if equity > 0 else 1.0
+        max_risk_allowed = max(0.0, float(self.risk_cfg.max_portfolio_risk) - open_risk_fraction)
+        # Streak and exploration multipliers apply BEFORE the cap, so the cap is a hard limit.
+        effective_risk = min(risk_per_trade * exploration_mult * ac_multiplier, max_risk_allowed)
 
         risk_amt = float(equity) * float(effective_risk)
 
-        # SL distance is based purely on ATR, just like in the backtester's conceptual model
-        atr_mult_sl = self.cfg.get_symbol_value(symbol, 'atr_multiplier_sl', 1.0)
-        sl_distance = float(atr_mult_sl) * float(atr)
+        # Size on the stop that is really placed; without one, fall back to the configured ATR multiple.
+        if sl_distance is None:
+            atr_mult_sl = self.cfg.get_symbol_value(symbol, 'atr_multiplier_sl', 1.0)
+            sl_distance = float(atr_mult_sl) * float(atr)
+        sl_distance = float(sl_distance)
 
         if sl_distance <= 0 or pip_value <= 0 or pip_size <= 0:
             logger.warning(f"Invalid SL distance ({sl_distance}), pip_value ({pip_value}), or pip_size ({pip_size})")

@@ -149,12 +149,22 @@ class SymbolProcessor:
             pip_value = self.risk_manager.get_pip_value(self.symbol)
             pip_size = self.risk_manager.get_pip_size(self.symbol)
 
-            # Determine position size and stop/take-profit targets
+            # Work out the stop/take-profit first, then size the position on that exact stop distance.
+            price = float(tick.ask) if direction == "long" else float(tick.bid)
+            sl, tp = self.risk_manager.stop_targets(
+                price, atr, direction, auc_score, self.symbol,
+                sl_mult=atr_multiplier_sl, tp_mult=atr_multiplier_tp
+            )
+            if sl <= 0 or tp <= 0:
+                logger.warning(f"[{self.symbol}] Could not compute stop/take-profit. Skipping trade.")
+                return
+
             lots, effective_risk = self.risk_manager.position_size(
                 self.monitor.current_equity, atr, auc_score,
                 total_open_risk=total_open_risk, symbol=self.symbol,
                 exploration_mult=dynamic_risk_params.get("exploration_risk_mult", 1.0),
-                ac_multiplier=dynamic_risk_params.get("ac_multiplier", 1.0)
+                ac_multiplier=dynamic_risk_params.get("ac_multiplier", 1.0),
+                sl_distance=abs(price - sl)
             )
 
             # CRITICAL: If position_size returned 0 lots (e.g., due to existing open position for symbol), skip trade execution.
@@ -162,21 +172,6 @@ class SymbolProcessor:
                 logger.info(f"[{self.symbol}] Trade skipped due to risk limits or position size zero (calculated lots: {lots:.4f}).")
                 return  # Exit early, as no trade can be executed with zero lots
 
-            # If we reach here, a trade direction (long/short) has been identified and lots > 0
-            # Proceed with obtaining tick price, calculating SL/TP, and executing the trade.
-
-            # Get live tick price for trade execution
-            tick = self.mt5_client.symbol_info_tick(self.symbol)
-            if not tick:
-                logger.warning(f"[{self.symbol}] Could not get tick info for live price. Skipping trade.")
-                return  # Exit if no tick info
-
-            price = float(tick.ask) if direction == "long" else float(tick.bid)  # Define price here
-
-            sl, tp = self.risk_manager.stop_targets(
-                price, atr, direction, auc_score, self.symbol,
-                sl_mult=atr_multiplier_sl, tp_mult=atr_multiplier_tp
-            )
             # Execute trade
             order_result = self.execution.trade(
                 symbol=self.symbol,
