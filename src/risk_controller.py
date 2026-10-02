@@ -456,6 +456,11 @@ class RiskController:
         min_prob_long_choice = sym_state.min_prob_grid_long_values[min_prob_long_idx]
         min_prob_short_choice = sym_state.min_prob_grid_short_values[min_prob_short_idx]
 
+        # Take-profit keeps the configured reward:risk (atr_multiplier_tp / atr_multiplier_sl) for every arm
+        cfg_sl = float(self.cfg.get_symbol_value(symbol, 'atr_multiplier_sl', 1.5))
+        cfg_tp = float(self.cfg.get_symbol_value(symbol, 'atr_multiplier_tp', 2.5))
+        tp_ratio = cfg_tp / cfg_sl if cfg_sl > 0 else 1.0
+
         # Use the symbol-specific value for the trailing stop multiplier
         base_trailing_mult = self.cfg.get_symbol_value(symbol, 'trailing_atr_mult', 1.0)
         trailing_atr_mult_choice = base_trailing_mult * rule_scale
@@ -474,7 +479,7 @@ class RiskController:
         # Return chosen params plus exploratory metadata
         return {
             "atr_multiplier_sl": atr_choice,
-            "atr_multiplier_tp": atr_choice,
+            "atr_multiplier_tp": atr_choice * tp_ratio,
             "trailing_atr_mult": trailing_atr_mult_choice,
             "min_prob_long": min_prob_long_choice,
             "min_prob_short": min_prob_short_choice,
