@@ -59,9 +59,13 @@ def setup_logging(level="INFO", to_file=True, rotate="10 MB", retention="7 days"
         logger.add("logs/bot.log", level=level, rotation=rotate, retention=retention, enqueue=True)
 
 
+def optuna_params_filename(symbol: str) -> str:
+    """File name for a symbol's tuned params, shared by the tuner (writer) and the bot (reader). The '#' is dropped."""
+    return f"{symbol.replace('#', '')}_best_params.pkl"
+
+
 def load_optuna_params(symbol: str, cfg: Cfg) -> dict | None:
-    # symbol names in params are saved without '#'
-    file_path = os.path.join(PARAMS_DIR, f"{symbol.replace('#', '')}_best_params.pkl")
+    file_path = os.path.join(PARAMS_DIR, optuna_params_filename(symbol))
     if not os.path.exists(file_path):
         logger.warning(f"[{symbol}] No Optuna params found at {file_path}, using defaults from config.")
         return None

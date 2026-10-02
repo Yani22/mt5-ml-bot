@@ -13,7 +13,7 @@ import traceback  # Added for detailed error logging
 from src.config import Cfg, RiskCfg
 from src.features import FeatureCfg, build_dynamic_features
 from src.data_colab import fetch_bars, merge_features_labels
-from src.utils import get_training_data
+from src.utils import get_training_data, optuna_params_filename
 from src.ensemble import Ensemble
 from sklearn.model_selection import TimeSeriesSplit  # type: ignore
 from sklearn.metrics import roc_auc_score  # type: ignore
@@ -187,7 +187,7 @@ def run_tuning_for_symbol(sym: str):
                 best_params_structured["models"][model_name] = {}
             best_params_structured["models"][model_name][param_name] = value
 
-    param_file = os.path.join(PARAMS_DIR, f"{sym.replace('#', '_')}_best_params.pkl")
+    param_file = os.path.join(PARAMS_DIR, optuna_params_filename(sym))
     with open(param_file, "wb") as f:
         pickle.dump(best_params_structured, f)
 
