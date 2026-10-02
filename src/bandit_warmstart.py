@@ -152,23 +152,35 @@ def merge_warmstart(backtest_state_path: str | None, live_state_path: str, warms
         logger.warning(f"No backtest state found at {backtest_state_path}; skipping warmstart merge.")
         return
 
+    if warmstart_weight <= 0:
+        logger.info("warmstart_weight <= 0; skipping warm-start merge.")
+        return
+
     live = _load_json(live_state_path) if os.path.exists(live_state_path) else {}
 
-    out = {}
     back_sym = back.get("symbol_states", back) if isinstance(back, dict) else {}
     live_sym = live.get("symbol_states", live) if isinstance(live, dict) else {}
+
+    # Keep everything else in the live file (open_positions_cache, last_daily_retrain_date, bar_counters, ...)
+    out = dict(live) if "symbol_states" in live else {}
+    sources = dict(out.get("warmstart_sources", {}))
 
     merged_sym_states = {}
     # First, copy all existing live states to the merged dictionary
     for symbol, lstate in (live_sym or {}).items():
         merged_sym_states[symbol] = lstate.copy()
 
-    # Now, iterate over the backtest states and merge their data
+    # Now, iterate over the backtest states and merge their data, once per symbol per live state file
     for symbol, bstate in (back_sym or {}).items():
+        if symbol in sources:
+            logger.info(f"[{symbol}] Already warm-started from {sources[symbol]}; not merging again.")
+            continue
         lstate = merged_sym_states.get(symbol, {})
         merged_sym_states[symbol] = _merge_bandit_states(lstate, bstate, warmstart_weight)
+        sources[symbol] = os.path.basename(backtest_state_path)
 
     out["symbol_states"] = merged_sym_states
+    out["warmstart_sources"] = sources
 
     # persist merged object to live state file path
     _save_json(out, live_state_path)

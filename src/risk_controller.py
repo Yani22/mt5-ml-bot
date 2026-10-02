@@ -265,6 +265,7 @@ class RiskController:
         self.state_file = cfg.thompson_sampling.state_file
         self.last_daily_retrain_date: Dict[str, Optional[datetime.date]] = {sym: None for sym in cfg.symbols}
         self.bar_counters: Dict[str, int] = {sym: 0 for sym in cfg.symbols}
+        self.warmstart_sources: Dict[str, str] = {}  # symbol -> backtest file it was warm-started from (kept in the state file)
 
     def increment_bar_counter(self, symbol: str):
         """Increments the bar counter for a given symbol."""
@@ -619,7 +620,8 @@ class RiskController:
                 "symbol_states": symbol_states_data,
                 "open_positions_cache": open_positions_cache or {},
                 "last_daily_retrain_date": {sym: date.isoformat() if date else None for sym, date in self.last_daily_retrain_date.items()},
-                "bar_counters": self.bar_counters
+                "bar_counters": self.bar_counters,
+                "warmstart_sources": self.warmstart_sources,
             }
             with open(state_path, 'w') as f:
                 json.dump(state, f, indent=4, default=_json_serial)
@@ -652,6 +654,7 @@ class RiskController:
                 if sym in self.cfg.symbols:
                     self.last_daily_retrain_date[sym] = datetime.date.fromisoformat(date_str) if date_str else None
             self.bar_counters = state.get("bar_counters", {sym: 0 for sym in self.cfg.symbols})
+            self.warmstart_sources = dict(state.get("warmstart_sources", {}))
 
             logger.info(f"RiskController state loaded from {state_path}")
             # Return the open positions cache, ensuring keys are integers
