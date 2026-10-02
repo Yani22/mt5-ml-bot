@@ -43,9 +43,9 @@ def get_info(symbol: str):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python get_symbol_info.py <SYMBOL>")
-        print("Example: python get_symbol_info.py \"GOLDm#\"")
+        print("Usage: python scripts/get_symbol_info_2.py <SYMBOL>")
+        print("Example: python scripts/get_symbol_info_2.py \"GOLDm#\"")
     else:
         get_info(sys.argv[1])
 
-# run $python get_symbol_info_2.py "AUDUSDm#"
+# run $python scripts/get_symbol_info_2.py "AUDUSDm#"

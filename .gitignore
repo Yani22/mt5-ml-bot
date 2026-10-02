@@ -33,4 +33,6 @@ ehthumbs.db
 Thumbs.db
 ts_risk_controller_state.json
 risk_metrics.csv
-monitor_state.jsonrequirements-ci.txt
+monitor_state.json
+requirements-ci.txt
+CLAUDE.md

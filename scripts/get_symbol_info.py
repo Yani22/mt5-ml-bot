@@ -1,3 +1,6 @@
+import sys, os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))  # allow `from src...` when run as a script
+
 import MetaTrader5 as mt5
 import os
 from dotenv import load_dotenv
