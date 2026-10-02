@@ -36,3 +36,4 @@ risk_metrics.csv
 monitor_state.json
 requirements-ci.txt
 CLAUDE.md
+.model_signing_key

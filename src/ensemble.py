@@ -6,6 +6,7 @@ import pandas as pd  # type: ignore
 import numpy as np  # type: ignore
 from typing import Dict, Optional, List, Tuple
 from .strategy_ml import MLStrategy
+from .model_integrity import sign as sign_model_dir, verify as verify_model_dir
 from .config import Cfg
 from sklearn.isotonic import IsotonicRegression  # type: ignore
 from loguru import logger  # type: ignore
@@ -280,10 +281,13 @@ class Ensemble:
             with open(calibrator_path, "wb") as f:
                 pickle.dump(self._meta_calibrator, f)
 
+        sign_model_dir(path)  # must stay last: the manifest covers every file written above
+
     @classmethod
     def load(cls, path: str, cfg, model_params: Optional[Dict[str, Dict]] = None) -> "Ensemble":
         """Loads an entire ensemble from a directory."""
         logger.debug(f"Loading ensemble from {path}")
+        verify_model_dir(path)  # refuse to unpickle anything that is not signed with our key
 
         # Create a new ensemble instance to populate
         ensemble = cls(cfg, model_params=model_params)
