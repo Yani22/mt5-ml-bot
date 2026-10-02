@@ -344,5 +344,5 @@ def run(dry_run: bool = False):
 
 if __name__ == "__main__":
     # Default to dry-run to be safe; change to False when you are ready.
-    # run(dry_run=True)
-    run(dry_run=False)
+    run(dry_run=True)
+    # run(dry_run=False)
