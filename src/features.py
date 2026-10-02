@@ -5,6 +5,8 @@ import ta  # type: ignore
 from loguru import logger  # type: ignore
 from src.config import FeatureCfg, MtaCfg, InterMarketCfg, PriceActionCfg # Import FeatureConfig from src.config
 
+_TF_DELTA = {"M1": "1min", "M5": "5min", "M15": "15min", "M30": "30min", "H1": "1h", "H4": "4h", "D1": "1D"}
+
 def add_contextual_features(df: pd.DataFrame, mta_df: pd.DataFrame = None, inter_market_df: pd.DataFrame = None, mta_cfg: "MtaCfg" = None, im_cfg: "InterMarketCfg" = None) -> pd.DataFrame:
     """
     Adds contextual features from higher timeframes (MTA) and other markets.
@@ -20,9 +22,10 @@ def add_contextual_features(df: pd.DataFrame, mta_df: pd.DataFrame = None, inter
         mta_features[f'mta_ema_{mta_cfg.ema_period}'] = mta_ema
         mta_features[f'mta_rsi_{mta_cfg.rsi_period}'] = mta_rsi
 
-        # Align with the primary dataframe
-        df = pd.merge(df, mta_features, left_index=True, right_index=True, how='left')
-        df.ffill(inplace=True)
+        # MT5 indexes bars by OPEN time, but a bar's close is only known one bar-length later.
+        # Shift to availability time and as-of join so no bar sees its own higher-timeframe bar's unfinished close.
+        mta_features.index = mta_features.index + pd.Timedelta(_TF_DELTA[mta_cfg.timeframe])
+        df = pd.merge_asof(df.sort_index(), mta_features.sort_index(), left_index=True, right_index=True, direction="backward")
 
     if inter_market_df is not None and im_cfg and im_cfg.enabled:
         logger.debug(f"Adding Inter-Market features from symbol {im_cfg.symbol}...")
@@ -65,8 +68,10 @@ def build_static_features(df: pd.DataFrame, symbol: str = None, pa_cfg: "PriceAc
         X["vol_ratio"] = df["volume"] / (X["vol_ma_20"] + 1e-10)
 
     # --- Fractal Features ---
-    X["fractal_up"] = ((df["high"].shift(2) < df["high"].shift(1)) & (df["high"].shift(1) > df["high"]) & (df["high"].shift(1) > df["high"].shift(-1)) & (df["high"].shift(1) > df["high"].shift(-2))).astype(int)
-    X["fractal_down"] = ((df["low"].shift(2) > df["low"].shift(1)) & (df["low"].shift(1) < df["low"]) & (df["low"].shift(1) < df["low"].shift(-1)) & (df["low"].shift(1) < df["low"].shift(-2))).astype(int)
+    # Confirmed 5-bar fractals: the centre bar is t-2, so the pattern is only known at bar t (no look-ahead).
+    hi_c, lo_c = df["high"].shift(2), df["low"].shift(2)
+    X["fractal_up"] = ((hi_c > df["high"].shift(4)) & (hi_c > df["high"].shift(3)) & (hi_c > df["high"].shift(1)) & (hi_c > df["high"])).astype(int)
+    X["fractal_down"] = ((lo_c < df["low"].shift(4)) & (lo_c < df["low"].shift(3)) & (lo_c < df["low"].shift(1)) & (lo_c < df["low"])).astype(int)
 
     # --- Rolling Statistics ---
     X["ret_skew_10"] = df["close"].pct_change().rolling(10).skew()

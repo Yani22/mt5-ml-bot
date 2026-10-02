@@ -83,6 +83,9 @@ def run_retraining_in_background(cfg, sym, feature_cfg, dry_run, notifier, optun
         full_data, full_X, _ = data_manager.load_cached(sym, feature_cfg, count=cfg.retraining_window_bars, min_pct_change=tuned_min_pct_change)
 
         y_long, y_short = generate_long_short_labels(full_data, tuned_prediction_horizon, tuned_min_pct_change)
+        # Labels drop the unknown-future tail; align features and prices to them.
+        full_X = full_X.loc[y_long.index]
+        full_data = full_data.loc[y_long.index]
 
         logger.info(f"[{sym}] Retraining LONG model...")
         ens_old_long = load_ensemble(cfg, sym, "long", model_params=optuna_params_per_symbol[sym])

@@ -1,7 +1,6 @@
 """Look-ahead leakage checks: a feature at bar t must not depend on bars after t."""
 import numpy as np
 import pandas as pd
-import pytest
 
 from src.config import FeatureCfg, MtaCfg, PriceActionCfg
 from src.features import add_contextual_features, build_dynamic_features, build_static_features
@@ -23,7 +22,6 @@ def _features(df):
     return build_dynamic_features(df, static, FeatureCfg(), "TEST")
 
 
-@pytest.mark.xfail(strict=True, reason="KNOWN LEAK: fractal_up/fractal_down use shift(-1)/shift(-2) in src/features.py")
 def test_features_do_not_use_future_bars():
     df = _ohlc()
     full = _features(df)
@@ -37,7 +35,6 @@ def test_features_do_not_use_future_bars():
     assert not bad, f"features change when future bars are removed (look-ahead): {sorted(bad)}"
 
 
-@pytest.mark.xfail(strict=True, reason="KNOWN LEAK: MTA merge in add_contextual_features exposes the H1 bar's close during its own hour")
 def test_mta_feature_ignores_unclosed_higher_timeframe_bar():
     m5 = _ohlc(n=600)
     # H1 indexed by bar OPEN time (MT5 convention); its close is only known at open + 1h.
@@ -56,11 +53,11 @@ def test_mta_feature_ignores_unclosed_higher_timeframe_bar():
         "M5 bars inside an H1 hour see that hour's (unfinished) close"
 
 
-@pytest.mark.xfail(strict=True, reason="KNOWN LEAK: generate_long_short_labels labels the last `horizon` rows 0 instead of NaN")
 def test_labels_drop_unknown_tail():
     df = _ohlc(n=100)
     h = 12
     y_long, y_short = generate_long_short_labels(df, h, 0.0)
-    # Last h rows have no known future; they must not be labelled as real 0s.
-    assert y_long.iloc[-h:].isna().all() and y_short.iloc[-h:].isna().all(), \
-        "unknown-future tail is labelled 0 instead of NaN/dropped"
+    # The last h rows have no known future; they must be dropped, not labelled 0.
+    assert len(y_long) == len(y_short) == len(df) - h
+    assert y_long.index[-1] == df.index[-h - 1]
+    assert not y_long.isna().any()
