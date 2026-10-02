@@ -20,6 +20,7 @@ class LivePerformanceMonitor:
         self.current_equity: float = cfg.initial_equity
         self.last_check_time: Optional[datetime.datetime] = None
         self.last_ensemble_auc: float = 0.0  # To track the latest AUC from retraining
+        self.account_id: Optional[str] = None  # "login@server"; set before load_state so a state file is only used on its own account
 
         # Ensure initial_equity is set in Cfg or handle it
         if not hasattr(cfg, 'initial_equity'):
@@ -62,6 +63,10 @@ class LivePerformanceMonitor:
 
     def save_state(self):
         state_path = self.cfg.monitoring.monitor_state_file
+        if self.account_id is None:
+            # Unknown account (account_info failed at startup): do not replace a saved state with an unstamped fresh one
+            logger.debug("Monitor account unknown; not saving monitor state.")
+            return
         try:
             # Manually build a serializable list of closed trades
             closed_trades_data = []
@@ -81,6 +86,7 @@ class LivePerformanceMonitor:
             state = {
                 "closed_trades": closed_trades_data,
                 "equity_curve": equity_curve_data,
+                "account_id": self.account_id,
                 "peak_equity": self.peak_equity,
                 "current_equity": self.current_equity,
                 "last_check_time": self.last_check_time.isoformat() if self.last_check_time else None,
@@ -101,6 +107,12 @@ class LivePerformanceMonitor:
         try:
             with open(state_path, 'r') as f:
                 state = json.load(f)
+
+            # A peak equity from another account would show a fake drawdown (B7)
+            if self.account_id is None or state.get("account_id") != self.account_id:
+                logger.warning(f"Monitor state in {state_path} is for account {state.get('account_id')!r}, current account is "
+                               f"{self.account_id!r}. Not loading it; starting fresh at the current equity.")
+                return
 
             # Reconstruct deque and ClosedTrade objects
             self.closed_trades.clear()

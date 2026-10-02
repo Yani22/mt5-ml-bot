@@ -176,6 +176,8 @@ def run(dry_run: bool = True):
                 cfg.initial_equity = initial_equity  # Set initial equity in Cfg for the monitor
 
                 live_monitor = LivePerformanceMonitor(cfg)
+                if account_info:
+                    live_monitor.account_id = f"{getattr(account_info, 'login', None)}@{getattr(account_info, 'server', None)}"
                 live_monitor.load_state()  # Load previous state on startup
 
                 # Immediately after loading state, sync the current_equity with the live account value
