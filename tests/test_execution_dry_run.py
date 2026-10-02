@@ -166,3 +166,40 @@ def test_live_reconcile_keeps_own_position_closed_by_hand_in_the_terminal():
                                     "entry_time": NOW, "risk": 5.0}
     closed = ex.reconcile_open_positions_with_mt5()
     assert [t.ticket for t in closed] == [902] and closed[0].pnl == 2.0
+
+
+# --- T5 / T3: the cache and the closed trade carry the money risked and the stop actually placed ---
+
+def test_dry_run_cache_records_money_risked_and_the_stop_in_atr():
+    ex, rm = make(dry_run=True)
+    open_long(ex)  # 0.02 lots, stop 0.0006 below entry, pip_size 1e-5, pip_value 1.0, atr 0.0006
+    ((_, pos),) = rm.open_positions_cache.items()
+    assert pos["risk_amount"] == pytest.approx(1.2)
+    assert pos["sl_atr_mult"] == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize("price, r_multiple", [(1.0990, -1.0), (1.1020, 2.0)])
+def test_closed_trade_pnl_over_risk_amount_is_the_r_multiple(price, r_multiple):
+    ex, rm = make(dry_run=True, prices={"EURUSD#": price})
+    open_long(ex)
+    (t,) = ex.reconcile_open_positions_with_mt5()
+    assert t.risk_amount == pytest.approx(1.2) and t.sl_atr_mult == pytest.approx(1.0)
+    assert t.pnl / t.risk_amount == pytest.approx(r_multiple)
+
+
+def test_live_reconcile_carries_risk_amount_to_the_closed_trade():
+    deal = NS(entry=mt5.DEAL_ENTRY_OUT, profit=-1.2, time=1767607200, price=1.0995, magic=OURS)
+    ex, rm = make(dry_run=False, client=FakeClient(positions=[], deals={777: [deal]}))
+    rm.open_positions_cache[777] = {"symbol": "EURUSD#", "direction": "long", "lots": 0.02, "entry_price": 1.1001,
+                                    "entry_time": NOW, "risk_amount": 1.2, "sl_atr_mult": 1.0}
+    (t,) = ex.reconcile_open_positions_with_mt5()
+    assert (t.risk_amount, t.sl_atr_mult) == (1.2, 1.0)
+
+
+def test_adopted_and_old_cache_entries_have_no_risk_amount():
+    deal = NS(entry=mt5.DEAL_ENTRY_OUT, profit=3.5, time=1767607200, price=1.1013, magic=OURS)
+    ex, rm = make(dry_run=False, client=FakeClient(positions=[], deals={777: [deal]}))
+    rm.open_positions_cache[777] = {"symbol": "EURUSD#", "direction": "long", "lots": 0.02, "entry_price": 1.1001,
+                                    "entry_time": NOW}
+    (t,) = ex.reconcile_open_positions_with_mt5()
+    assert t.risk_amount is None and t.sl_atr_mult is None

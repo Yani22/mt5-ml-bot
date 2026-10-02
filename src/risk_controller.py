@@ -498,19 +498,27 @@ class RiskController:
             return
 
         sym_state = self.symbol_states[symbol]
-        reward = trade.pnl / self.cfg.thompson_sampling.reward_normalization_factor  # Normalize PnL
+        # Reward is profit in units of the money risked (R), so it does not depend on account size or on how much
+        # the trade was scaled (exploration, streak multipliers). Without a usable risk amount (adopted or old
+        # trades) there is no valid reward: the bandits must not learn from it, and units must not be mixed.
+        reward = trade.pnl / trade.risk_amount if trade.risk_amount is not None and trade.risk_amount > 0 else None
 
         # --- Update Core Performance Metrics ---
         if trade.exit_equity is not None:
             sym_state.current_equity = trade.exit_equity
             sym_state.peak_equity = max(sym_state.peak_equity, trade.exit_equity)
 
-        sym_state.recent_returns.append(reward)
-
         if trade.pnl <= 0:
             sym_state.consecutive_losses += 1
         else:
             sym_state.consecutive_losses = 0
+
+        if reward is None:
+            logger.warning(f"[{symbol}] Trade {trade.ticket} has no risk amount; skipping bandit update.")
+            self._update_streaks(sym_state, trade, symbol)
+            return
+
+        sym_state.recent_returns.append(reward)
 
         # --- Update Bandits ---
         # Update ATR bandit
@@ -520,6 +528,10 @@ class RiskController:
                     context_vector = np.array(trade.context_vector)
                     if context_vector.shape[0] == sym_state.contextual_bandit.dim:
                         sym_state.contextual_bandit.update(trade.atr_idx, context_vector, reward)
+                        # Also record the visit on the plain ATR bandit: get_params() reads its counts to decide
+                        # whether an arm is still exploratory, and it is never sampled in contextual mode.
+                        if trade.atr_idx < sym_state.atr_bandit.num_arms:
+                            sym_state.atr_bandit.update(trade.atr_idx, reward)
                     else:
                         logger.warning(f"[{symbol}] Context vector dimension mismatch. Bandit dim: {sym_state.contextual_bandit.dim}, trade context dim: {context_vector.shape[0]}.")
                 else:
@@ -530,15 +542,15 @@ class RiskController:
                 else:
                     logger.warning(f"[{symbol}] Invalid atr_idx {trade.atr_idx} for atr_bandit with {sym_state.atr_bandit.num_arms} arms.")
 
-        # Update min_prob_long bandit
-        if trade.min_prob_long_idx is not None and trade.min_prob_long_idx != -1:
+        # Credit only the threshold bandit for the side that traded; the other side tested nothing.
+        long_traded = trade.direction == "long" and trade.min_prob_long_idx is not None and trade.min_prob_long_idx != -1
+        short_traded = trade.direction == "short" and trade.min_prob_short_idx is not None and trade.min_prob_short_idx != -1
+        if long_traded:
             if trade.min_prob_long_idx < sym_state.min_prob_bandit_long.num_arms:
                 sym_state.min_prob_bandit_long.update(trade.min_prob_long_idx, reward)
             else:
                 logger.warning(f"[{symbol}] Invalid min_prob_long_idx {trade.min_prob_long_idx} for min_prob_bandit_long with {sym_state.min_prob_bandit_long.num_arms} arms.")
-
-        # Update min_prob_short bandit
-        if trade.min_prob_short_idx is not None and trade.min_prob_short_idx != -1:
+        if short_traded:
             if trade.min_prob_short_idx < sym_state.min_prob_bandit_short.num_arms:
                 sym_state.min_prob_bandit_short.update(trade.min_prob_short_idx, reward)
             else:
@@ -547,9 +559,7 @@ class RiskController:
         # Increment adaptation counters
         if trade.atr_idx is not None and trade.atr_idx != -1:
             sym_state.atr_updates_since_last_adaptation += 1
-        if trade.min_prob_long_idx is not None and trade.min_prob_long_idx != -1:
-            sym_state.min_prob_updates_since_last_adaptation += 1
-        if trade.min_prob_short_idx is not None and trade.min_prob_short_idx != -1:
+        if long_traded or short_traded:
             sym_state.min_prob_updates_since_last_adaptation += 1
 
         logger.debug(f"[{symbol}] Thompson Sampling bandits updated for trade {trade.ticket} with reward {reward:.4f}.")
@@ -557,7 +567,10 @@ class RiskController:
         # Check and trigger grid adaptation after updating bandits
         self._check_and_trigger_adaptation(symbol)
 
-        # --- Asymmetric Compounding Logic ---
+        self._update_streaks(sym_state, trade, symbol)
+
+    def _update_streaks(self, sym_state, trade: ClosedTrade, symbol: str):
+        """Asymmetric compounding: win/loss streaks and the lot multiplier they drive."""
         ac_cfg = self.cfg.asymmetric_compounding
         if ac_cfg.enabled:
             is_win = trade.pnl > 0

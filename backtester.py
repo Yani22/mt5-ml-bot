@@ -155,7 +155,9 @@ class HybridBacktester:
                     macd_diff=getattr(pos, 'macd_diff', 0.0),
                     volatility_10=getattr(pos, 'volatility_10', 0.0),
                     dist_from_ema_200=getattr(pos, 'dist_from_ema_200', 0.0),
-                    context_vector=getattr(pos, 'trade_context', None)  # NEW: Pass stored context vector
+                    context_vector=getattr(pos, 'trade_context', None),  # NEW: Pass stored context vector
+                    risk_amount=pos.lots * abs(pos.entry_price - pos.sl) * contract_size,
+                    sl_atr_mult=(abs(pos.entry_price - pos.sl) / pos.atr) if pos.atr else None
                 )
 
                 # Update the bandit and the symbol's state with the ClosedTrade object

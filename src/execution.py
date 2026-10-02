@@ -191,7 +191,8 @@ class Execution:
                             adx=pos_details.get("adx", 0.0), macd_diff=pos_details.get("macd_diff", 0.0),
                             volatility_10=pos_details.get("volatility_10", 0.0),
                             dist_from_ema_200=pos_details.get("dist_from_ema_200", 0.0),
-                            context_vector=pos_details.get("context_vector")
+                            context_vector=pos_details.get("context_vector"),
+                            risk_amount=pos_details.get("risk_amount"), sl_atr_mult=pos_details.get("sl_atr_mult")
                         )
                         closed_trades_list.append(closed_trade)
                         logger.info(f"[{symbol}] Detected closed trade via reconciliation: {closed_trade}")
@@ -234,6 +235,17 @@ class Execution:
                 if self.notifier:
                     self.notifier.send_message(f"<b>ERROR:</b> Failed to reconcile cache with MT5: {e}", level="ERROR")
                 return []
+
+    @staticmethod
+    def _stop_fields(price, sl, lots, atr, pip_size, pip_value) -> Dict[str, Any]:
+        """Money risked at the stop that was placed (same convention as RiskManager.position_size) and that stop in ATR."""
+        distance = abs(float(price) - float(sl))
+        out: Dict[str, Any] = {"risk_amount": None, "sl_atr_mult": None}
+        if pip_size and pip_value and pip_size > 0 and pip_value > 0 and distance > 0:
+            out["risk_amount"] = float(lots) * distance / pip_size * pip_value
+        if atr and atr > 0 and distance > 0:
+            out["sl_atr_mult"] = distance / float(atr)
+        return out
 
     def _send_order_with_retry(self, request: dict, retries: int = -1, delay: float = 1.0):
         num_retries = self.risk.cfg.trading_costs.defaults.retry_order_send if retries == -1 else retries
@@ -359,7 +371,8 @@ class Execution:
                             macd_diff=trade_details.get("macd_diff", 0.0),
                             volatility_10=trade_details.get("volatility_10", 0.0),
                             dist_from_ema_200=trade_details.get("dist_from_ema_200", 0.0),
-                            context_vector=trade_details.get("context_vector")  # NEW: Pass stored context vector
+                            context_vector=trade_details.get("context_vector"),  # NEW: Pass stored context vector
+                            risk_amount=trade_details.get("risk_amount"), sl_atr_mult=trade_details.get("sl_atr_mult")
                         )
                         closed_trades_list.append(closed_trade)
                         logger.info(f"[DRY-RUN] Simulated closed trade: {closed_trade} ({closure_reason})")
@@ -435,7 +448,8 @@ class Execution:
                         adx=trade_details.get("adx", 0.0),
                         macd_diff=trade_details.get("macd_diff", 0.0),
                         volatility_10=trade_details.get("volatility_10", 0.0),
-                        dist_from_ema_200=trade_details.get("dist_from_ema_200", 0.0)
+                        dist_from_ema_200=trade_details.get("dist_from_ema_200", 0.0),
+                        risk_amount=trade_details.get("risk_amount"), sl_atr_mult=trade_details.get("sl_atr_mult")
                     )
                     closed_trades_list.append(closed_trade)
                     logger.info(f"Detected closed trade via reconciliation: {closed_trade}")
@@ -496,6 +510,7 @@ class Execution:
                     "tp": tp,
                     "pip_size": pip_size,
                     "pip_value": pip_value,
+                    **self._stop_fields(price, sl, lots, atr, pip_size, pip_value),
                     "atr_idx": atr_idx,
                     "min_prob_long_idx": min_prob_long_idx,
                     "min_prob_short_idx": min_prob_short_idx,
@@ -558,6 +573,7 @@ class Execution:
                     "tp": tp,  # TP at entry
                     "pip_size": pip_size,  # <-- ADD THIS
                     "pip_value": pip_value,  # <-- ADD THIS
+                    **self._stop_fields(price, sl, lots, atr, pip_size, pip_value),
                     "atr_idx": atr_idx,
                     "min_prob_long_idx": min_prob_long_idx,
                     "min_prob_short_idx": min_prob_short_idx,

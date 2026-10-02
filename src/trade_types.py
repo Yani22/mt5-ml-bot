@@ -30,6 +30,8 @@ class ClosedTrade:
     inter_market_feature: float = 0.0
     mta_feature: float = 0.0
     context_vector: Optional[List[float]] = None  # NEW: Store context vector for contextual bandits
+    risk_amount: Optional[float] = None  # money at risk at the stop that was placed; None if unknown (adopted/old trades)
+    sl_atr_mult: Optional[float] = None  # stop distance actually placed, in ATR
 
     def __repr__(self):
         return f"<ClosedTrade ticket={self.ticket}, pnl={self.pnl:.2f}>"
