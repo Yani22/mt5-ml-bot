@@ -6,10 +6,15 @@ PRE-REGISTERED (written before the first run, 2026-10-02):
     95% CI low > 0, >= 60% years positive, and swap-charged mean > 0.
   * Exploratory only (window already used today): GOLD H1 and M30 (resampled from M5), USDJPY/GBPJPY/EURUSD/GBPUSD/
     BTCUSD H1 on 2024-26.
+  * FRESH HOLDOUT (--set fresh; pre-registered 2026-10-02, after the USDJPY result, before the data was exported):
+    GOLD, GBPJPY, EURJPY H1 2010-01 .. 2023-12 (data/historical_old), rule and exits unchanged, no parameter search.
+    Same per-symbol bar as above. The rule counts as validated only if >= 2 of the 3 symbols PASS (with 3 tries, a single
+    pass is weak evidence). Even then: a GOLD stop at 0.01 lot is ~$30-39 (2025-26 ATR,
+    100 oz contract assumed), too large for a $250 account; a pass would mean a demo forward test, not funding.
 Signal at the close of bar t (cross between t-1 and t), fill at the open of t+1; one position at a time, a cross
 while in a position is ignored. Costs and fills as in resad_recipe.first_touch (shorts on the ask, SL wins ties).
 
-Usage: python scripts/resad_trend.py
+Usage: python scripts/resad_trend.py [--set fresh]
 """
 import os
 import sys
@@ -76,10 +81,14 @@ def load(symbol, tf, d, end=None):
 
 
 if __name__ == "__main__":
-    cells = [("USDJPY", "H1", "data/historical_old", "2023-12-31", "CONFIRMATORY")]
-    cells += [(s, "H1", "data/historical_data", None, "explore") for s in
-              ("GOLD", "USDJPY", "GBPJPY", "EURUSD", "GBPUSD", "BTCUSD")]
-    cells += [("GOLD", "M30", "data/historical_data", None, "explore")]
+    fresh = sys.argv[1:] == ["--set", "fresh"]
+    if fresh:
+        cells = [(s, "H1", "data/historical_old", "2023-12-31", "FRESH") for s in ("GOLD", "GBPJPY", "EURJPY")]
+    else:
+        cells = [("USDJPY", "H1", "data/historical_old", "2023-12-31", "CONFIRMATORY")]
+        cells += [(s, "H1", "data/historical_data", None, "explore") for s in
+                  ("GOLD", "USDJPY", "GBPJPY", "EURUSD", "GBPUSD", "BTCUSD")]
+        cells += [("GOLD", "M30", "data/historical_data", None, "explore")]
     res = []
     for sym, tf, d, end, kind in cells:
         bars, sp = load(sym, tf, d, end)
@@ -89,5 +98,8 @@ if __name__ == "__main__":
         ok = j["trades"] > 0 and j["mean_r"] > 0 and j["ci_lo"] > 0 and j["folds_pos"] >= 60 and j["mean_r_swap"] > 0
         res.append(dict(kind=kind, symbol=sym, tf=tf, verdict="PASS" if ok else "FAIL", **j))
     summ = pd.DataFrame(res).drop(columns=["pts"])
-    summ.to_csv("results/resad_trend_summary.csv", index=False)
+    summ.to_csv(f"results/resad_trend_{'fresh' if fresh else 'summary'}.csv", index=False)
     print(summ.round(3).to_string(index=False))
+    if fresh:
+        n = int((summ.verdict == "PASS").sum())
+        print(f"{n} of 3 symbols pass -> rule {'VALIDATED (demo forward test next)' if n >= 2 else 'NOT validated'}")
