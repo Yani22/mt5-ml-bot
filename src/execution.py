@@ -131,6 +131,16 @@ class Execution:
                 # Use a copy of the cache keys for safe iteration
                 cached_tickets = list(self.risk.open_positions_cache.keys())
 
+                # Positions that carry another magic number (other EAs, manual trades) are not ours. Drop them from
+                # the cache silently so they never reach the bandit or the monitor.
+                my_magic = self.risk.cfg.magic_number
+                for ticket in cached_tickets:
+                    broker_pos = broker_positions_map.get(ticket)
+                    if broker_pos is not None and broker_pos.magic != my_magic:
+                        logger.info(f"Dropping foreign position {ticket} (magic {broker_pos.magic}) from the cache.")
+                        del self.risk.open_positions_cache[ticket]
+                cached_tickets = list(self.risk.open_positions_cache.keys())
+
                 # --- 1. Process Closed Trades ---
                 # A trade is closed if it's in our cache but NOT on the broker anymore.
                 for ticket in cached_tickets:
@@ -139,6 +149,10 @@ class Execution:
                         symbol = pos_details['symbol']
 
                         deals = self.mt5_client.history_deals_get(position=ticket)
+                        if deals and all(d.magic != my_magic for d in deals):
+                            logger.info(f"[{symbol}] Dropping foreign closed position {ticket} from the cache.")
+                            del self.risk.open_positions_cache[ticket]
+                            continue
                         pnl = 0.0
                         exit_price = 0.0
                         exit_time_dt = datetime.datetime.now(datetime.timezone.utc)
@@ -190,6 +204,8 @@ class Execution:
                 for ticket in broker_tickets:
                     if ticket not in self.risk.open_positions_cache:
                         pos = broker_positions_map[ticket]
+                        if pos.magic != my_magic:
+                            continue
                         direction = "long" if pos.type == mt5.POSITION_TYPE_BUY else "short"
                         entry_time_dt = datetime.datetime.fromtimestamp(pos.time, tz=datetime.timezone.utc)
 
