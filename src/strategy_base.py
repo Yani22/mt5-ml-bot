@@ -2,6 +2,7 @@
 from abc import ABC, abstractmethod
 import pandas as pd
 
+
 class Strategy(ABC):
     """
     Abstract base class for a trading strategy.

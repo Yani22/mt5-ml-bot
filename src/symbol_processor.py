@@ -14,7 +14,8 @@ from src.risk_controller import RiskController
 from src.live_performance_monitor import LivePerformanceMonitor
 from src.execution import Execution
 from src.utils import load_ensemble, load_optuna_params, timeframe_to_mt5_timeframe, log_symbol_specific_configs, log_metrics_to_csv
-from src.risk import RiskManager # NEW
+from src.risk import RiskManager  # NEW
+
 
 class SymbolProcessor:
     def __init__(self, cfg: Cfg, symbol: str, mt5_client: MT5Client, risk_controller: RiskController, risk_manager: RiskManager, monitor: LivePerformanceMonitor, execution: Execution, dry_run: bool):
@@ -22,7 +23,7 @@ class SymbolProcessor:
         self.symbol = symbol
         self.mt5_client = mt5_client
         self.risk_controller = risk_controller
-        self.risk_manager = risk_manager # NEW
+        self.risk_manager = risk_manager  # NEW
         self.monitor = monitor
         self.dry_run = dry_run
         self.data_manager = DataManager(cfg)
@@ -54,7 +55,7 @@ class SymbolProcessor:
     def _fetch_and_prepare_data(self) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame] | tuple[None, None, None]:
         logger.info(f"[{self.symbol}] Bootstrapping local history...")
         # Fetch initial history
-        data, _, _ = self.data_manager.fetch_live(self.symbol, self.feature_cfg) # data, X, y are returned, but we only need data here
+        data, _, _ = self.data_manager.fetch_live(self.symbol, self.feature_cfg)  # data, X, y are returned, but we only need data here
         if data.empty:
             logger.warning(f"[{self.symbol}] No data fetched for live trading. Skipping symbol.")
             return None, None, None
@@ -70,14 +71,14 @@ class SymbolProcessor:
 
         # Build features
         X = build_features(data, self.feature_cfg, self.cfg, self.symbol, mta_df, inter_market_df)
-        y = pd.DataFrame() # y is not used in live trading
+        y = pd.DataFrame()  # y is not used in live trading
 
         return data, X, y
 
     def _make_trade_decision(self, data: pd.DataFrame, X: pd.DataFrame):
-        import datetime # Import datetime
+        import datetime  # Import datetime
 
-        now_utc = datetime.datetime.now(datetime.timezone.utc) # Define now_utc here
+        now_utc = datetime.datetime.now(datetime.timezone.utc)  # Define now_utc here
         if self.ens_long is None or self.ens_short is None:
             logger.warning(f"[{self.symbol}] Ensembles not loaded. Skipping trade decision.")
             return
@@ -118,7 +119,7 @@ class SymbolProcessor:
         min_prob_short_idx = dynamic_risk_params.get("min_prob_short_idx", -1)
 
         direction = None
-        auc_score = 0.5        
+        auc_score = 0.5
         if prob_long >= min_prob_long and self.ens_long.ensemble_cv_auc_ >= min_ensemble_auc:
             direction = "long"
             auc_score = self.ens_long.ensemble_cv_auc_
@@ -159,18 +160,18 @@ class SymbolProcessor:
             # CRITICAL: If position_size returned 0 lots (e.g., due to existing open position for symbol), skip trade execution.
             if lots <= 0:
                 logger.info(f"[{self.symbol}] Trade skipped due to risk limits or position size zero (calculated lots: {lots:.4f}).")
-                return # Exit early, as no trade can be executed with zero lots
+                return  # Exit early, as no trade can be executed with zero lots
 
             # If we reach here, a trade direction (long/short) has been identified and lots > 0
             # Proceed with obtaining tick price, calculating SL/TP, and executing the trade.
-            
+
             # Get live tick price for trade execution
             tick = self.mt5_client.symbol_info_tick(self.symbol)
             if not tick:
                 logger.warning(f"[{self.symbol}] Could not get tick info for live price. Skipping trade.")
-                return # Exit if no tick info
+                return  # Exit if no tick info
 
-            price = float(tick.ask) if direction == "long" else float(tick.bid) # Define price here
+            price = float(tick.ask) if direction == "long" else float(tick.bid)  # Define price here
 
             sl, tp = self.risk_manager.stop_targets(
                 price, atr, direction, auc_score, self.symbol,
@@ -195,11 +196,10 @@ class SymbolProcessor:
                 atr_idx=atr_idx,
                 min_prob_long_idx=min_prob_long_idx,
                 min_prob_short_idx=min_prob_short_idx,
-                context_vector=dynamic_risk_params.get("context_vector") # NEW: Pass the context vector
+                context_vector=dynamic_risk_params.get("context_vector")  # NEW: Pass the context vector
             )
         # The 'else' branch for 'if prob_long/prob_short >= ...' is now implicitly handled higher up by a 'return'
         # if 'direction' remains None. Thus, no final 'else' for logging 'No trade signal' is needed here.
-        
 
     def run_loop(self):
         logger.info(f"[{self.symbol}] Starting processing loop.")
@@ -208,16 +208,16 @@ class SymbolProcessor:
                 # Wait for a new bar
                 if not self.mt5_client.wait_for_new_bar(self.symbol, self.mt5_timeframe):
                     logger.warning(f"[{self.symbol}] Timeout or error waiting for new bar. Retrying...")
-                    time.sleep(self.cfg.timeframe_minutes() * 60 / 2) # Wait half a bar duration before retrying
+                    time.sleep(self.cfg.timeframe_minutes() * 60 / 2)  # Wait half a bar duration before retrying
                     continue
 
                 logger.info(f"[{self.symbol}] New *closed* bar detected.")
-                self.risk_controller.increment_bar_counter(self.symbol) # Increment bar counter
+                self.risk_controller.increment_bar_counter(self.symbol)  # Increment bar counter
 
                 # Fetch and prepare data
                 data, X, y = self._fetch_and_prepare_data()
                 if data is None:
-                    time.sleep(self.cfg.timeframe_minutes() * 60) # Wait a full bar duration before retrying
+                    time.sleep(self.cfg.timeframe_minutes() * 60)  # Wait a full bar duration before retrying
                     continue
 
                 # Make trade decisions
@@ -225,6 +225,6 @@ class SymbolProcessor:
 
             except Exception as e:
                 logger.exception(f"[{self.symbol}] Error in processing loop: {e}")
-                time.sleep(self.cfg.timeframe_minutes() * 60) # Wait a full bar duration on error to avoid rapid error looping
-            
-            time.sleep(1) # Small sleep to prevent busy-waiting, though wait_for_new_bar should handle most of this
+                time.sleep(self.cfg.timeframe_minutes() * 60)  # Wait a full bar duration on error to avoid rapid error looping
+
+            time.sleep(1)  # Small sleep to prevent busy-waiting, though wait_for_new_bar should handle most of this

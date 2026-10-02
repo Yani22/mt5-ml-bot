@@ -7,6 +7,7 @@ import MetaTrader5 as mt5  # type: ignore
 from loguru import logger
 from src.time_utils import timeframe_to_seconds
 
+
 class MT5Client:
     """ Safe wrapper around MetaTrader5 initialization and login. """
 
@@ -111,7 +112,8 @@ class MT5Client:
             self._connected = False
 
     def account_info(self):
-        if not self._connected: return None
+        if not self._connected:
+            return None
         try:
             return mt5.account_info()
         except Exception:
@@ -144,7 +146,7 @@ class MT5Client:
             logger.warning(f"MT5Client: exception getting server time from tick: {e}")
             # Fallback to system time if we can't get server time from any tick
             pass
-        
+
         return datetime.datetime.now(datetime.timezone.utc)
 
     def get_timezone_offset(self) -> Optional[float]:
@@ -155,13 +157,14 @@ class MT5Client:
 
         server_time_utc = self.now_utc()
         system_time_utc = datetime.datetime.now(datetime.timezone.utc)
-        
+
         offset_seconds = (server_time_utc - system_time_utc).total_seconds()
         return offset_seconds / 3600
 
     def symbol_info_tick(self, symbol: str):
         """Wrapper for mt5.symbol_info_tick()"""
-        if not self._connected: return None
+        if not self._connected:
+            return None
         try:
             return mt5.symbol_info_tick(symbol)
         except Exception:
@@ -169,7 +172,8 @@ class MT5Client:
 
     def symbol_info(self, symbol: str):
         """Wrapper for mt5.symbol_info()"""
-        if not self._connected: return None
+        if not self._connected:
+            return None
         try:
             return mt5.symbol_info(symbol)
         except Exception:
@@ -177,7 +181,8 @@ class MT5Client:
 
     def history_deals_get(self, *args, **kwargs):
         """Wrapper for mt5.history_deals_get()"""
-        if not self._connected: return None
+        if not self._connected:
+            return None
         try:
             return mt5.history_deals_get(*args, **kwargs)
         except Exception:
@@ -185,15 +190,17 @@ class MT5Client:
 
     def order_send(self, request: dict):
         """Wrapper for mt5.order_send()"""
-        if not self._connected: return None
+        if not self._connected:
+            return None
         try:
             return mt5.order_send(request)
         except Exception:
             return None
-        
+
     def positions_get(self, *args, **kwargs):
         """Wrapper for mt5.positions_get()"""
-        if not self._connected: return None
+        if not self._connected:
+            return None
         try:
             return mt5.positions_get(*args, **kwargs)
         except Exception:
@@ -201,7 +208,8 @@ class MT5Client:
 
     def get_rates(self, symbol: str, timeframe: int, count: int):
         """Wrapper for mt5.copy_rates_from_pos()"""
-        if not self._connected: return None
+        if not self._connected:
+            return None
         try:
             return mt5.copy_rates_from_pos(symbol, timeframe, 0, count)
         except Exception:
@@ -213,9 +221,9 @@ class MT5Client:
             logger.warning("wait_for_new_bar: Not connected to MT5.")
             return False
 
-        timeframe_seconds = timeframe_to_seconds(timeframe) # Convert MT5 timeframe to seconds
-        dynamic_timeout = int(timeframe_seconds * timeout_multiplier) # Calculate dynamic timeout
-        if dynamic_timeout < 60: # Ensure a minimum timeout of 60 seconds
+        timeframe_seconds = timeframe_to_seconds(timeframe)  # Convert MT5 timeframe to seconds
+        dynamic_timeout = int(timeframe_seconds * timeout_multiplier)  # Calculate dynamic timeout
+        if dynamic_timeout < 60:  # Ensure a minimum timeout of 60 seconds
             dynamic_timeout = 60
 
         last_bar = self.get_rates(symbol, timeframe, 1)

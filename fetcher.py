@@ -1,5 +1,5 @@
 # fetcher.py
-import MetaTrader5 as mt5 # type: ignore
+import MetaTrader5 as mt5  # type: ignore
 import pandas as pd  # type: ignore
 import os
 # import yaml # Removed
@@ -24,6 +24,7 @@ TF_MAP = {
     "H4": mt5.TIMEFRAME_H4,
 }
 
+
 def fetch_and_save_bars(symbol: str, timeframe: str, count: int, save_dir: str):
     """Fetches historical bars from MT5 and saves them to a CSV file."""
     tf = TF_MAP[timeframe]
@@ -39,20 +40,21 @@ def fetch_and_save_bars(symbol: str, timeframe: str, count: int, save_dir: str):
         df = pd.DataFrame(rates)
         df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
         df = df.set_index("time").sort_index()
-        
+
         # Select and rename columns to match original data.py output
         df = df[["open", "high", "low", "close", "tick_volume"]].rename(columns={"tick_volume": "volume"})
-        
+
         os.makedirs(save_dir, exist_ok=True)
         df.to_csv(file_path)
         logger.success(f"[{symbol}] Fetched {len(df)} bars and saved to {file_path}")
     except Exception as e:
         logger.error(f"[{symbol}] Error fetching or saving bars: {e}")
 
+
 if __name__ == "__main__":
     # --- Initial Setup --- # Added
-    load_dotenv() # Added
-    setup_logging() # Added
+    load_dotenv()  # Added
+    setup_logging()  # Added
 
     # Ensure logs directory exists # Removed (setup_logging handles this)
     # os.makedirs("logs", exist_ok=True) # Removed
@@ -74,12 +76,12 @@ if __name__ == "__main__":
     #     logger.error(f"config.yaml not found at {config_path}. Please run this script from the project root.") # Removed
     #     mt5.shutdown() # Removed
     #     exit() # Removed
-    cfg = Cfg.from_yaml("config.yaml") # Added
+    cfg = Cfg.from_yaml("config.yaml")  # Added
 
-    symbols = cfg.symbols # Changed from cfg.get("symbols", [])
-    timeframe = cfg.timeframe # Changed from cfg.get("timeframe", "M5")
-    history_bars = cfg.history_bars # Changed from cfg.get("history_bars", 2000)
-    
+    symbols = cfg.symbols  # Changed from cfg.get("symbols", [])
+    timeframe = cfg.timeframe  # Changed from cfg.get("timeframe", "M5")
+    history_bars = cfg.history_bars  # Changed from cfg.get("history_bars", 2000)
+
     if not symbols:
         logger.warning("No symbols found in config.yaml. Exiting.")
         mt5.shutdown()

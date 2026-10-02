@@ -69,12 +69,13 @@ def custom_pnl(
     logger.debug(f"custom_pnl: total={total:.6f}, trades={len(pnl)}")
     return total
 
+
 def calculate_sharpe_ratio(
     y_true: pd.Series,
-    y_pred: pd.Series, # These are binary 0/1 signals
+    y_pred: pd.Series,  # These are binary 0/1 signals
     prices: pd.Series,
     cfg: "Cfg",
-    model_type: str = "long", # The crucial new parameter
+    model_type: str = "long",  # The crucial new parameter
     **trading_costs
 ) -> float:
     """Calculates annualized Sharpe ratio for a given set of predictions using forward returns."""
@@ -101,7 +102,7 @@ def calculate_sharpe_ratio(
     # NOTE: This uses global pip_size, as symbol is not available here. A minor inaccuracy.
     pip_size = trading_costs.get("pip_value", 0.0001)
     cost_per_trade = spread_pips * pip_size
-    
+
     pnl = trade_returns - cost_per_trade
 
     if pnl.std() == 0 or pnl.empty:
@@ -192,13 +193,13 @@ class Ensemble:
                 continue
             # Initialize params with tuned parameters if available
             current_model_params = model_params.get(name, {}) if model_params else {}
-            
+
             # Fallback to default parameters from cfg.models if not found in tuned params
             # But ensure these are single values, not lists (take first element if it's a list)
             default_params_from_cfg = m.get("params", {})
             for k, v in default_params_from_cfg.items():
                 if k not in current_model_params:
-                    current_model_params[k] = v[0] if isinstance(v, list) else v # Take first element if list
+                    current_model_params[k] = v[0] if isinstance(v, list) else v  # Take first element if list
 
             # Ensure all parameters are single values, not lists
             cleaned_model_params = {}
@@ -238,7 +239,7 @@ class Ensemble:
 
         # placeholder for threshold (after optimization)
         self.best_threshold_: Optional[float] = None
-        self.promising_thresholds_: List[float] = field(default_factory=list) # NEW: for Thompson Sampling grids
+        self.promising_thresholds_: List[float] = field(default_factory=list)  # NEW: for Thompson Sampling grids
 
     def save(self, path: str):
         """Saves the entire ensemble to a directory."""
@@ -283,7 +284,7 @@ class Ensemble:
     def load(cls, path: str, cfg, model_params: Optional[Dict[str, Dict]] = None) -> "Ensemble":
         """Loads an entire ensemble from a directory."""
         logger.debug(f"Loading ensemble from {path}")
-        
+
         # Create a new ensemble instance to populate
         ensemble = cls(cfg, model_params=model_params)
 
@@ -299,7 +300,7 @@ class Ensemble:
             else:
                 logger.warning(f"Directory for member {name} not found at {member_path}")
                 ensemble.failed_members.add(name)
-        
+
         # Remove failed members from the active list
         for name in list(ensemble.failed_members):
             if name in ensemble.members:
@@ -316,7 +317,7 @@ class Ensemble:
             ensemble.promising_thresholds_ = metadata.get("promising_thresholds_", [])
             if hasattr(ensemble, "dynamic_ensemble"):
                 ensemble.dynamic_ensemble.model_scores = metadata.get("dynamic_ensemble_scores", {k: 0.5 for k in ensemble.members})
-                ensemble.dynamic_ensemble.weights = metadata.get("dynamic_ensemble_weights", {k: 1.0/len(ensemble.members) for k in ensemble.members})
+                ensemble.dynamic_ensemble.weights = metadata.get("dynamic_ensemble_weights", {k: 1.0 / len(ensemble.members) for k in ensemble.members})
 
         # Load stacker if it exists
         stacker_path = os.path.join(path, "stacker.pkl")
@@ -329,7 +330,7 @@ class Ensemble:
         if os.path.exists(calibrator_path):
             with open(calibrator_path, "rb") as f:
                 ensemble._meta_calibrator = pickle.load(f)
-        
+
         return ensemble
 
     def _perform_cross_validation(
@@ -407,7 +408,7 @@ class Ensemble:
                 logger.info(f"[{name}] CV AUC: {self.member_cv_aucs_[name]:.4f}")
 
             if self.method == "stacking":
-                from sklearn.linear_model import LogisticRegression # type: ignore
+                from sklearn.linear_model import LogisticRegression  # type: ignore
 
                 try:
                     self._stacker = LogisticRegression(C=self.meta.get("C", 1.0), max_iter=200, random_state=42)
@@ -418,7 +419,7 @@ class Ensemble:
                     logger.error(f"Ensemble.fit: stacking failed: {e}")
                     # fallback: average of member CVs
                     self.ensemble_cv_auc_ = float(np.mean(list(self.member_cv_aucs_.values()))
-                                                 if self.member_cv_aucs_ else 0.5)
+                                                  if self.member_cv_aucs_ else 0.5)
                     self._stacker = None
             else:
                 # using soft vote or other methods
@@ -435,7 +436,7 @@ class Ensemble:
                     # compute mean predictions across folds per sample
                     # simplest: use P_oof.mean(axis=1)
                     mean_proba = P_oof.mean(axis=1)
-                    self.best_threshold_, self.promising_thresholds_ = self._optimize_threshold(y_oof, mean_proba, price_segment, model_type=model_type) # MODIFIED
+                    self.best_threshold_, self.promising_thresholds_ = self._optimize_threshold(y_oof, mean_proba, price_segment, model_type=model_type)  # MODIFIED
                 except Exception as e:
                     logger.warning(f"Ensemble.fit: threshold optimization failed: {e}")
 
@@ -445,7 +446,7 @@ class Ensemble:
         y: pd.Series,
         prices: Optional[pd.Series] = None,
         cv: bool = True,
-        model_type: str = "long" # NEW
+        model_type: str = "long"  # NEW
     ) -> Ensemble:
         logger.info("Ensemble.fit: start")
 
@@ -495,7 +496,7 @@ class Ensemble:
 
         return self
 
-    def _optimize_threshold(self, y_true: pd.Series, y_pred_probs: pd.Series, prices: pd.Series, model_type: str = "long") -> Tuple[Optional[float], List[float]]: # MODIFIED
+    def _optimize_threshold(self, y_true: pd.Series, y_pred_probs: pd.Series, prices: pd.Series, model_type: str = "long") -> Tuple[Optional[float], List[float]]:  # MODIFIED
         if prices is None or len(y_true) != len(y_pred_probs) or len(prices) != len(y_pred_probs):
             logger.warning("Threshold optimization: input lengths mismatch; skipping optimization.")
             return None, []
@@ -511,7 +512,7 @@ class Ensemble:
 
         best_thr = 0.5
         best_score = -np.inf
-        all_threshold_scores: List[Tuple[float, float]] = [] # Store (threshold, score) pairs
+        all_threshold_scores: List[Tuple[float, float]] = []  # Store (threshold, score) pairs
 
         for thr in thresholds:
             preds = (y_pred_probs >= thr).astype(int)
@@ -533,14 +534,14 @@ class Ensemble:
                     continue
             elif self.threshold_metric == "sharpe_ratio":
                 try:
-                    score = calculate_sharpe_ratio(y_true, preds, prices, self.cfg, model_type=model_type, **self.trading_costs) # MODIFIED
+                    score = calculate_sharpe_ratio(y_true, preds, prices, self.cfg, model_type=model_type, **self.trading_costs)  # MODIFIED
                 except Exception as e:
                     logger.warning(f"Threshold evaluation sharpe_ratio failed at thr={thr}: {e}")
                     continue
             else:
                 score = f1_score(y_true, preds)
 
-            all_threshold_scores.append((thr, score)) # Store all scores
+            all_threshold_scores.append((thr, score))  # Store all scores
 
             if score > best_score:
                 best_score = score
@@ -551,14 +552,14 @@ class Ensemble:
 
         # Identify promising thresholds for TS grid
         promising_thresholds: List[float] = []
-        if best_score > -np.inf: # Ensure a valid best_score was found
-            promising_factor = 0.9 # Thresholds with score >= 90% of best_score
+        if best_score > -np.inf:  # Ensure a valid best_score was found
+            promising_factor = 0.9  # Thresholds with score >= 90% of best_score
             for thr, score in all_threshold_scores:
                 if score >= best_score * promising_factor:
                     promising_thresholds.append(thr)
             # Ensure the best_thr is always included and sort them
             promising_thresholds = sorted(list(set(promising_thresholds + [best_thr])))
-            
+
             # Limit the number of promising thresholds to a reasonable amount (e.g., 5-7)
             # to avoid excessively large grids for Thompson Sampling
             if len(promising_thresholds) > 7:
@@ -577,7 +578,7 @@ class Ensemble:
 
         # clean data
         Xc = X.replace([np.inf, -np.inf], np.nan).ffill().bfill()
-        Xc = Xc.fillna(0) # Fill any remaining NaNs with 0
+        Xc = Xc.fillna(0)  # Fill any remaining NaNs with 0
 
         if Xc.empty:
             logger.warning("predict_proba: empty features after cleaning, returning default 0.5")

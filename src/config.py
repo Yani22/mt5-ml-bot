@@ -7,6 +7,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
 @dataclass
 class MtaCfg:
     enabled: bool = True
@@ -14,11 +15,13 @@ class MtaCfg:
     ema_period: int = 50
     rsi_period: int = 14
 
+
 @dataclass
 class InterMarketCfg:
     enabled: bool = True
     symbol: str = "DXY"
     roc_lags: List[int] = field(default_factory=lambda: [5, 21])
+
 
 @dataclass
 class BacktestingCfg:
@@ -26,17 +29,20 @@ class BacktestingCfg:
     simulation_volume_min: float = 0.01
     enable_retraining: bool = True
 
+
 @dataclass
 class PriceActionCfg:
     enabled: bool = True
     home_base_ma_period: int = 200
     swing_lookback: int = 50
 
+
 @dataclass
 class ContextFeaturesCfg:
     mta: MtaCfg = field(default_factory=MtaCfg)
     inter_market: InterMarketCfg = field(default_factory=InterMarketCfg)
     price_action: PriceActionCfg = field(default_factory=PriceActionCfg)
+
 
 @dataclass
 class FeatureCfg:
@@ -51,7 +57,8 @@ class FeatureCfg:
     rsi_os_level: int = 30
     adx_trend_thresh: int = 25
     timeframe_minutes: int = 5
-    min_pct_change: float = 0.0001 # New: Minimum percentage change for label generation
+    min_pct_change: float = 0.0001  # New: Minimum percentage change for label generation
+
 
 @dataclass
 class RiskCfg:
@@ -70,7 +77,7 @@ class RiskCfg:
     session_filter: Optional[Dict[str, str]] = None
     min_ensemble_auc: float = 0.55
     min_auc_improvement: float = 0.005
-    max_drawdown_for_pruning: float = 0.70 # New: Max drawdown allowed before Optuna trial pruning
+    max_drawdown_for_pruning: float = 0.70  # New: Max drawdown allowed before Optuna trial pruning
     dynamic_risk: Dict[str, Any] = field(
         default_factory=lambda: {
             "enabled": True,
@@ -90,6 +97,7 @@ class RiskCfg:
         }
     )
 
+
 @dataclass
 class WatchdogCfg:
     enabled: bool = True
@@ -98,12 +106,14 @@ class WatchdogCfg:
     # additional optional thresholds
     daily_loss_limit: Optional[float] = None  # absolute or fraction of equity (if used)
 
+
 @dataclass
 class MonitoringCfg:
     lookback_days: int = 30
     monitor_state_file: str = "monitor_state.json"
     telegram_bot_token: Optional[str] = None
     telegram_chat_id: Optional[str] = None
+
 
 @dataclass
 class TradingCostsDefaultsCfg:
@@ -113,10 +123,12 @@ class TradingCostsDefaultsCfg:
     retry_order_send: int = 3
     adaptive_slippage_multiplier: float = 1.0
 
+
 @dataclass
 class TradingCostsCfg:
     source: str = "static"
     defaults: TradingCostsDefaultsCfg = field(default_factory=TradingCostsDefaultsCfg)
+
 
 @dataclass
 class FetchCfg:
@@ -125,6 +137,7 @@ class FetchCfg:
     raw_data_dir: str = "data/historical_data"
     retrain_in_background: bool = True
     retrain_time_utc: Optional[List[str]] = None  # "HH:MM" format or None
+
 
 @dataclass
 class ThompsonSamplingCfg:
@@ -164,14 +177,16 @@ class ThompsonSamplingCfg:
     reset_on_low_ensemble_auc: float = 0.52
     reset_cooldown_hours: float = 24.0
 
+
 @dataclass
 class AsymmetricCompoundingCfg:
     enabled: bool = False
-    win_streak_multiplier: float = 1.2 # Multiplier for risk after a winning trade
+    win_streak_multiplier: float = 1.2  # Multiplier for risk after a winning trade
     loss_streak_divisor: float = 0.8   # Divisor for risk after a losing trade
     max_streak_effect: float = 2.0     # Max multiplier/divisor effect (e.g., 2.0 means risk can be 2x or 0.5x)
-    reset_on_opposite_outcome: bool = True # Reset streak counter if outcome changes
+    reset_on_opposite_outcome: bool = True  # Reset streak counter if outcome changes
     lookback_trades: int = 5           # Number of recent trades to consider for streak
+
 
 @dataclass
 class Cfg:
@@ -184,9 +199,9 @@ class Cfg:
     use_gpu: bool = False
     cv_samples_per_split: int = 300
     optuna_n_trials: int = 150
-    optuna_pruning_interval: int = 100 # New: Interval for Optuna pruning checks
-    n_jobs: int = -1 # Number of parallel jobs for tuning. -1 means all available CPU cores.
-    initial_equity: float = 100.0 # New: Initial equity for backtesting
+    optuna_pruning_interval: int = 100  # New: Interval for Optuna pruning checks
+    n_jobs: int = -1  # Number of parallel jobs for tuning. -1 means all available CPU cores.
+    initial_equity: float = 100.0  # New: Initial equity for backtesting
     features: FeatureCfg = field(default_factory=FeatureCfg)
     context_features: ContextFeaturesCfg = field(default_factory=ContextFeaturesCfg)
     models: List[Dict[str, Any]] = field(default_factory=list)
@@ -199,8 +214,8 @@ class Cfg:
     trading_costs: TradingCostsCfg = field(default_factory=TradingCostsCfg)
     fetch: FetchCfg = field(default_factory=FetchCfg)
     min_samples_for_ensemble: int = 1000
-    force_retrain_on_startup: bool = False # New: Force retraining of all models on bot startup
-    retraining_window_bars: Optional[int] = None # New: Number of recent bars for rolling window retraining
+    force_retrain_on_startup: bool = False  # New: Force retraining of all models on bot startup
+    retraining_window_bars: Optional[int] = None  # New: Number of recent bars for rolling window retraining
     startup_logging: bool = True
     magic_number: int = 424242
     symbol_overrides: Dict[str, Dict[str, Any]] = field(default_factory=dict)
@@ -214,11 +229,11 @@ class Cfg:
             # Base context: vol, equity, peak_equity, ensemble_auc
             dim += 4
             if self.context_features.mta.enabled:
-                dim += 2 # rsi, ema
+                dim += 2  # rsi, ema
             if self.context_features.inter_market.enabled:
                 dim += len(self.context_features.inter_market.roc_lags)
             if self.context_features.price_action.enabled:
-                dim += 2 # dist_from_ema_200, adx
+                dim += 2  # dist_from_ema_200, adx
             self.thompson_sampling.context_dim = dim
 
     def timeframe_seconds(self) -> Optional[int]:
@@ -291,11 +306,11 @@ class Cfg:
         raw_features = raw.get("features", {}) or {}
         cleaned_features: Dict[str, Any] = {}
         for k, v in raw_features.items():
-            if isinstance(v, list) and k != "roc_lags": # roc_lags is handled separately if it's a list of lists
+            if isinstance(v, list) and k != "roc_lags":  # roc_lags is handled separately if it's a list of lists
                 cleaned_features[k] = v[0]
             else:
                 cleaned_features[k] = v
-        
+
         # Handle roc_lags_options specifically
         roc_lags_options_from_yaml = raw.get("roc_lags_options", [])
         if roc_lags_options_from_yaml:
@@ -407,8 +422,8 @@ class Cfg:
             use_gpu=bool(raw.get("use_gpu", False)),
             cv_samples_per_split=int(raw.get("cv_samples_per_split", 300)),
             optuna_n_trials=int(raw.get("optuna_n_trials", 100)),
-            optuna_pruning_interval=int(raw.get("optuna_pruning_interval", 100)), # New
-            n_jobs=int(raw.get("n_jobs", -1)), # New
+            optuna_pruning_interval=int(raw.get("optuna_pruning_interval", 100)),  # New
+            n_jobs=int(raw.get("n_jobs", -1)),  # New
             initial_equity=float(bt_obj.initial_equity if "backtesting" in raw else raw.get("initial_equity", 100.0)),
             features=features_obj,
             context_features=context_features_obj,

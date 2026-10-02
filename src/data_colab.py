@@ -19,6 +19,7 @@ TF_MAP = {
 # This path is relative to the project root (mt5-ml-bot/)
 HISTORICAL_DATA_DIR = "data/historical_data"
 
+
 def fetch_bars(symbol: str, timeframe: str, count: int) -> pd.DataFrame:
     """Fetches historical bars from a local CSV file."""
     # Construct the expected file path
@@ -32,15 +33,15 @@ def fetch_bars(symbol: str, timeframe: str, count: int) -> pd.DataFrame:
             raise FileNotFoundError(f"Historical data CSV not found for {symbol} {timeframe}")
 
         df = pd.read_csv(file_path, index_col="time")
-        df.index = pd.to_datetime(df.index, format='%Y-%m-%d %H:%M:%S%z') # Explicitly convert index to datetime with format
-        
+        df.index = pd.to_datetime(df.index, format='%Y-%m-%d %H:%M:%S%z')  # Explicitly convert index to datetime with format
+
         # Ensure the DataFrame has the expected columns and order
         expected_cols = ["open", "high", "low", "close", "volume"]
         if not all(col in df.columns for col in expected_cols):
             logger.error(f"Missing expected columns in {file_path}. Expected: {expected_cols}, Found: {df.columns.tolist()}")
             raise ValueError("CSV file has incorrect columns")
 
-        df = df[expected_cols] # Ensure column order
+        df = df[expected_cols]  # Ensure column order
 
         # Optionally, truncate data if 'count' is less than available bars and count is not None
         if count is not None and len(df) > count:
@@ -52,6 +53,7 @@ def fetch_bars(symbol: str, timeframe: str, count: int) -> pd.DataFrame:
     except Exception as e:
         logger.exception(f"[{symbol}] Error loading bars from CSV: {e}")
         raise
+
 
 def merge_features_labels(df: pd.DataFrame, X: pd.DataFrame, y: pd.Series) -> pd.DataFrame:
     """Merges features and labels, identical to original src/data.py."""

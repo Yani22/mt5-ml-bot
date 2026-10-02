@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np  # type: ignore
 from typing import List
 
+
 class LinearThompson:
     """
     Lightweight contextual Thompson Sampling.
@@ -11,6 +12,7 @@ class LinearThompson:
       prior w ~ N(0, (1/lambda_prior) I)
     Small, fast (dim small).
     """
+
     def __init__(self, num_arms: int, dim: int, lambda_prior: float = 1.0, noise_var: float = 1.0):
         self.num_arms = int(num_arms)
         self.dim = int(dim)

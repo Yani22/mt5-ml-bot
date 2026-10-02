@@ -24,6 +24,7 @@ import random
 # Safe retraining parameters
 MIN_SAMPLES_TO_RETRAIN = 1000  # don't retrain if less than this many samples
 
+
 def train_and_save_model(cfg: Cfg, symbol: str, model_type: str, X: pd.DataFrame, y: pd.Series, prices: pd.Series, dry_run: bool = True) -> dict:
     """
     Trains and saves a single model (long or short).
@@ -45,6 +46,7 @@ def train_and_save_model(cfg: Cfg, symbol: str, model_type: str, X: pd.DataFrame
         old_auc = getattr(ens_old, "ensemble_cv_auc_", getattr(ens_old, "cv_auc_", None))
         return {"ok": True, "old_auc": old_auc, "new_auc": new_auc}
 
+
 def retrain_symbol(cfg: Cfg, symbol: str, dry_run: bool = True, mt5_instance=None) -> dict:
     """
     Retrain ensemble for one symbol safely.
@@ -58,21 +60,21 @@ def retrain_symbol(cfg: Cfg, symbol: str, dry_run: bool = True, mt5_instance=Non
     optuna_params = load_optuna_params(symbol, cfg)
     feature_params = optuna_params.get('features', {}) if optuna_params else {}
     feature_cfg = FeatureCfg(**feature_params)
-    tuned_prediction_horizon = optuna_params.get('prediction_horizon', cfg.prediction_horizon) # Get tuned prediction_horizon
-    tuned_min_pct_change = optuna_params.get('min_pct_change', cfg.features.min_pct_change) # Get tuned min_pct_change
+    tuned_prediction_horizon = optuna_params.get('prediction_horizon', cfg.prediction_horizon)  # Get tuned prediction_horizon
+    tuned_min_pct_change = optuna_params.get('min_pct_change', cfg.features.min_pct_change)  # Get tuned min_pct_change
 
     logger.info(f"[{symbol}] Loading full history via DataManager...")
     dm = DataManager(cfg)
-    
+
     # Use get_training_data with build_dynamic=False and return_long_short_labels=True to get untrimmed data and features
     X, y_long, y_short, data = get_training_data(
         cfg=cfg,
         symbol=symbol,
         feature_cfg=feature_cfg,
         count=cfg.retraining_window_bars,
-        min_pct_change=tuned_min_pct_change, # Pass tuned min_pct_change
-        prediction_horizon=tuned_prediction_horizon, # Pass tuned prediction_horizon
-        build_dynamic=False, # We need raw data (df) and features (X), will generate labels (y) later
+        min_pct_change=tuned_min_pct_change,  # Pass tuned min_pct_change
+        prediction_horizon=tuned_prediction_horizon,  # Pass tuned prediction_horizon
+        build_dynamic=False,  # We need raw data (df) and features (X), will generate labels (y) later
         return_long_short_labels=True
     )
 
@@ -96,6 +98,7 @@ def retrain_symbol(cfg: Cfg, symbol: str, dry_run: bool = True, mt5_instance=Non
 
     return results
 
+
 def retrain_all(cfg: Cfg, symbols: list[str], dry_run: bool = True, mt5_instance=None) -> dict:
     results = {}
     for s in symbols:
@@ -105,12 +108,6 @@ def retrain_all(cfg: Cfg, symbols: list[str], dry_run: bool = True, mt5_instance
             logger.exception(f"[{s}] retrain_all error: {e}")
             results[s] = {"ok": False, "reason": str(e)}
     return results
-
-
-
-
-
-
 
 
 if __name__ == "__main__":

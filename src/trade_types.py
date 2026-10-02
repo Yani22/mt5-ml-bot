@@ -2,6 +2,7 @@ from dataclasses import dataclass
 import datetime
 from typing import Optional, List
 
+
 @dataclass
 class ClosedTrade:
     """A comprehensive closed trade object for all post-trade processing."""
@@ -28,7 +29,7 @@ class ClosedTrade:
     dist_from_ema_200: float = 0.0
     inter_market_feature: float = 0.0
     mta_feature: float = 0.0
-    context_vector: Optional[List[float]] = None # NEW: Store context vector for contextual bandits
+    context_vector: Optional[List[float]] = None  # NEW: Store context vector for contextual bandits
 
     def __repr__(self):
         return f"<ClosedTrade ticket={self.ticket}, pnl={self.pnl:.2f}>"

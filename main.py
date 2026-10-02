@@ -37,6 +37,7 @@ load_dotenv()
 setup_logging()
 _initialize_metrics_csv()
 
+
 def print_dashboard(cfg, risk, ens, X, sym, bar_counter, is_first_symbol, equity, balance):
     """ Prints a live portfolio dashboard for a single symbol, throttled. """
     if is_first_symbol:
@@ -67,6 +68,7 @@ def print_dashboard(cfg, risk, ens, X, sym, bar_counter, is_first_symbol, equity
             f"Ticket({p.get('ticket')}, {p.get('direction')}, {p.get('lots')} lots)"
             for p in positions_for_symbol
         ]) if positions_for_symbol else "None"
+
 
 def run_retraining_in_background(cfg, sym, feature_cfg, dry_run, notifier, optuna_params_per_symbol):
     """
@@ -100,6 +102,7 @@ def run_retraining_in_background(cfg, sym, feature_cfg, dry_run, notifier, optun
     except Exception as e:
         logger.exception(f"[{sym}] Background retraining process failed: {e}")
 
+
 def _handle_model_acceptance(sym, cfg, ens_per_symbol_long, ens_per_symbol_short, active_model_auc, live_monitor, notifier, optuna_params_per_symbol):
     """Loads newly trained models, compares them, and accepts them if they are an improvement."""
     logger.info(f"[{sym}] Handling model acceptance...")
@@ -127,24 +130,29 @@ def _handle_model_acceptance(sym, cfg, ens_per_symbol_long, ens_per_symbol_short
             live_monitor.update_ensemble_auc(new_auc_long)
             message = f"[{sym}] New LONG model accepted (AUC: {old_auc_long:.4f} -> {new_auc_long:.4f})."
             logger.info(message)
-            if notifier: notifier.send_message(message, level="INFO")
+            if notifier:
+                notifier.send_message(message, level="INFO")
         else:
             message = f"[{sym}] New LONG model rejected (AUC: {old_auc_long:.4f} -> {new_auc_long:.4f}). Keeping old model."
             logger.warning(message)
-            if notifier: notifier.send_message(message, level="WARNING")
+            if notifier:
+                notifier.send_message(message, level="WARNING")
 
         if short_accepted:
             ens_per_symbol_short[sym] = new_ens_short
             message = f"[{sym}] New SHORT model accepted (AUC: {old_auc_short:.4f} -> {new_auc_short:.4f})."
             logger.info(message)
-            if notifier: notifier.send_message(message, level="INFO")
+            if notifier:
+                notifier.send_message(message, level="INFO")
         else:
             message = f"[{sym}] New SHORT model rejected (AUC: {old_auc_short:.4f} -> {new_auc_short:.4f}). Keeping old model."
             logger.warning(message)
-            if notifier: notifier.send_message(message, level="WARNING")
+            if notifier:
+                notifier.send_message(message, level="WARNING")
 
     except Exception as e:
         logger.exception(f"[{sym}] Error during model acceptance: {e}")
+
 
 def _check_and_trigger_retraining(cfg: Cfg, sym: str, feature_cfg_per_symbol: Dict[str, FeatureCfg], dry_run: bool, notifier: TelegramNotifier, optuna_params_per_symbol: Dict[str, Any], retraining_processes: Dict[str, Process], retraining_status: Dict[str, bool], last_retrain_date: Dict[str, datetime.date], risk_controller: RiskController, mt5c: MT5Client):
     """
@@ -179,16 +187,17 @@ def _check_and_trigger_retraining(cfg: Cfg, sym: str, feature_cfg_per_symbol: Di
                     process.start()
                     retraining_processes[sym] = process
                     retraining_status[sym] = True
-                    
+
                     last_retrain_date[sym] = current_utc_date  # Mark as retrained for today
-                    risk_controller.update_last_daily_retrain_date(sym, current_utc_date) # Update RiskController's internal state
+                    risk_controller.update_last_daily_retrain_date(sym, current_utc_date)  # Update RiskController's internal state
                 else:
                     logger.info(f"[{sym}] Retraining already in progress for today. Skipping.")
-                return # Only trigger once per day per symbol
+                return  # Only trigger once per day per symbol
         except ValueError:
             logger.error(f"[{sym}] Invalid retrain_time_utc format: {retrain_time_str}. Expected HH:MM.")
         except Exception as e:
             logger.exception(f"[{sym}] Error checking or triggering retraining: {e}")
+
 
 def run(dry_run: bool = False):
     """ Production-ready main loop for hybrid adaptive MT5 ML bot. """
@@ -203,7 +212,7 @@ def run(dry_run: bool = False):
 
     logger.info("=== Starting MT5 ML Bot (Hybrid Adaptive) ===")
     logger.info(f"Dry-run mode: {dry_run}")
-    logger.info(f"Symbols: {cfg.symbols if hasattr(cfg,'symbols') else []}")
+    logger.info(f"Symbols: {cfg.symbols if hasattr(cfg, 'symbols') else []}")
 
     # Initialize notifier
     notifier = TelegramNotifier(cfg)
@@ -228,8 +237,8 @@ def run(dry_run: bool = False):
 
     live_monitor = None
     risk_controller = None
-    risk_manager = None # Declare risk_manager here
-    exe = None # Declare exe here
+    risk_manager = None  # Declare risk_manager here
+    exe = None  # Declare exe here
     mt5c = None
     try:
         # Outer loop for MT5 reconnection attempts
@@ -299,7 +308,7 @@ def run(dry_run: bool = False):
                 # Warm-start bandit: merge latest backtest priors into live state file BEFORE instantiating RiskController
                 try:
                     live_state_path = getattr(getattr(cfg, "thompson_sampling", {}), "state_file", "ts_risk_controller_state.json")
-                    os.makedirs("results", exist_ok=True) # Ensure results directory exists for the state file
+                    os.makedirs("results", exist_ok=True)  # Ensure results directory exists for the state file
 
                     # Find the latest backtest file once (now finds the latest overall backtest file)
                     latest_backtest_file = find_latest_backtest_state(results_dir="results")
@@ -307,7 +316,7 @@ def run(dry_run: bool = False):
                     if latest_backtest_file:
                         warm_weight = getattr(getattr(cfg, "thompson_sampling", {}), "warmstart_weight", 1.0)
                         logger.info(f"Found latest backtest bandit state: {latest_backtest_file}; merging into live state for all symbols (weight={warm_weight})")
-                        
+
                         # Merge the entire backtest file into the live state.
                         # merge_warmstart will handle extracting symbol-specific states for all symbols in the file.
                         merge_warmstart(latest_backtest_file, live_state_path, warmstart_weight=warm_weight)
@@ -320,9 +329,9 @@ def run(dry_run: bool = False):
 
                 # Instantiate risk manager and risk controller AFTER warmstart merge so they load the merged state
                 lock = threading.Lock()
-                risk_manager = RiskManager(cfg, mt5c, lock, notifier=notifier) # Pass notifier
-                risk_controller = RiskController(cfg, notifier=notifier) # Instantiate RiskController
-                loaded_open_positions = risk_controller.load_state() # Load state again to get open_positions_cache
+                risk_manager = RiskManager(cfg, mt5c, lock, notifier=notifier)  # Pass notifier
+                risk_controller = RiskController(cfg, notifier=notifier)  # Instantiate RiskController
+                loaded_open_positions = risk_controller.load_state()  # Load state again to get open_positions_cache
 
                 # Execution object (single instance)
                 exe = Execution(ens_per_symbol_long, ens_per_symbol_short, risk_manager, mt5c, data_manager, dry_run=dry_run, notifier=notifier, monitor=live_monitor)
@@ -338,7 +347,7 @@ def run(dry_run: bool = False):
                 last_retrain_date = risk_controller.last_daily_retrain_date
 
                 # --- Start Symbol Processors ---
-                symbol_threads = [] # Initialize here to prevent UnboundLocalError
+                symbol_threads = []  # Initialize here to prevent UnboundLocalError
                 for sym in cfg.symbols:
                     # Each MT5Client instance needs to be independent for thread safety
                     # Initialize a new MT5Client for each SymbolProcessor
@@ -431,10 +440,10 @@ def run(dry_run: bool = False):
                                 active_model_auc, live_monitor, notifier, optuna_params_per_symbol
                             )
                             retraining_status[sym] = False
-                            del retraining_processes[sym] # Clean up the process entry
+                            del retraining_processes[sym]  # Clean up the process entry
 
                     # Sleep for a short interval before checking again
-                    time.sleep(5) # Check every 5 seconds
+                    time.sleep(5)  # Check every 5 seconds
 
             except Exception as e:
                 logger.exception(f"MT5 connection lost or critical error in trading loop: {e}. Attempting to reconnect...")
@@ -472,15 +481,16 @@ def run(dry_run: bool = False):
             except Exception:
                 logger.error("Failed to save live monitor state on shutdown.", exc_info=True)
 
-        if risk_controller and exe: # Check if exe is also defined
+        if risk_controller and exe:  # Check if exe is also defined
             try:
                 # Use the latest open positions cache from the live monitor, as it's the aggregate from all threads
                 with lock:
-                    risk_controller.save_state(exe.risk.open_positions_cache) # Save final state
+                    risk_controller.save_state(exe.risk.open_positions_cache)  # Save final state
             except Exception:
                 logger.exception("Failed to save RiskController state on shutdown.")
         logger.info("MT5 ML Bot shutdown complete.")
         notifier.send_message("MT5 ML Bot shutdown complete.", level="INFO")
+
 
 if __name__ == "__main__":
     # Default to dry-run to be safe; change to False when you are ready.

@@ -1,11 +1,11 @@
 # backtester.py
 from __future__ import annotations
-import pandas as pd # type: ignore
-from loguru import logger # type: ignore
+import pandas as pd  # type: ignore
+from loguru import logger  # type: ignore
 import os
 import datetime
-import quantstats as qs # type: ignore
-import optuna # type: ignore
+import quantstats as qs  # type: ignore
+import optuna  # type: ignore
 import numpy as np  # type: ignore
 
 from src.config import Cfg
@@ -14,8 +14,9 @@ from src.risk import RiskManager
 from src.utils import get_training_data, load_ensemble, save_ensemble, setup_logging, safe_retrain_ensemble, load_optuna_params, log_symbol_specific_configs
 from src.trade import SimPosition
 from src.risk_controller import RiskController
-from src.trade_types import ClosedTrade # NEW: Import ClosedTrade for backtester
+from src.trade_types import ClosedTrade  # NEW: Import ClosedTrade for backtester
 import threading
+
 
 class HybridBacktester:
     """Adaptive hybrid backtester mirroring main_hybrid_adaptive.py logic."""
@@ -24,21 +25,21 @@ class HybridBacktester:
         self.logged_low_confidence = set()
         self.logged_skips = set()
         self.cfg = cfg
-        log_symbol_specific_configs(self.cfg) # NEW
+        log_symbol_specific_configs(self.cfg)  # NEW
         self.equity = cfg.backtesting.initial_equity
-        self.initial_equity = cfg.backtesting.initial_equity # Store initial equity for drawdown pruning
-        self.consecutive_losses = 0 # NEW: Efficiently track consecutive losses
+        self.initial_equity = cfg.backtesting.initial_equity  # Store initial equity for drawdown pruning
+        self.consecutive_losses = 0  # NEW: Efficiently track consecutive losses
         self.positions: list[SimPosition] = []
         self.equity_curve = []
         lock = threading.Lock()
         self.risk_manager = RiskManager(cfg, broker_client, lock)
         self.bar_counters = {sym: 0 for sym in cfg.symbols}
-        self.risk_controller = RiskController(cfg) # Instantiate RiskController
-        self.risk_controller.load_state() # Load previous state if it exists
-        self.ts_param_history = [] # To store Thompson Sampling parameter evolution
+        self.risk_controller = RiskController(cfg)  # Instantiate RiskController
+        self.risk_controller.load_state()  # Load previous state if it exists
+        self.ts_param_history = []  # To store Thompson Sampling parameter evolution
         self.save_state_every_bars = getattr(cfg, "save_ts_state_every_bars", 500)
         ts_ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        symbol_str = self.cfg.symbols[0].replace('#', '') # Use the exact symbol string from config, sanitized
+        symbol_str = self.cfg.symbols[0].replace('#', '')  # Use the exact symbol string from config, sanitized
         self.backtest_ts_state_file = f"results/ts_risk_controller_state_backtest_{symbol_str}_{ts_ts}.json"
         self.ts_history_csv = f"results/ts_param_evolution_backtest_{symbol_str}_{ts_ts}.csv"
         os.makedirs("results", exist_ok=True)
@@ -51,7 +52,7 @@ class HybridBacktester:
         """Simulated version of the live trailing stop logic."""
         risk_cfg = self.risk_manager.risk_cfg
         if not (risk_cfg.breakeven_at_1R or risk_cfg.trailing_atr_mult > 0):
-            return # No trailing logic enabled
+            return  # No trailing logic enabled
 
         for pos in [p for p in self.positions if p.symbol == sym and p.status == "open"]:
             price = row["close"]
@@ -75,12 +76,12 @@ class HybridBacktester:
                     if potential_new_sl > new_sl:
                         new_sl = potential_new_sl
                         logger.debug(f"[{sym}] Trailing SL for long position to {new_sl:.5f}")
-                else: # Short position
+                else:  # Short position
                     potential_new_sl = price + trailing_atr_dist
                     if potential_new_sl < new_sl:
                         new_sl = potential_new_sl
                         logger.debug(f"[{sym}] Trailing SL for short position to {new_sl:.5f}")
-            
+
             pos.sl = new_sl
 
     def _update_positions(self, sym, row):
@@ -89,17 +90,17 @@ class HybridBacktester:
 
         contract_size = self.risk_manager.get_contract_size(sym)
         pip_value = self.risk_manager.get_pip_value(sym)
-        
+
         # Get commission and slippage from config for backtesting PnL calculation
         commission_per_trade = self.cfg.trading_costs.defaults.commission_per_trade
         slippage_pips = self.cfg.trading_costs.defaults.slippage_pips
         adaptive_slippage_multiplier = self.cfg.trading_costs.defaults.adaptive_slippage_multiplier
 
         # This loop identifies trades that close on the current bar
-        for pos in [p for p in self.positions if p.symbol==sym and p.status=="open"]:
+        for pos in [p for p in self.positions if p.symbol == sym and p.status == "open"]:
             price = row["close"]
             exit_reason = None
-            
+
             if pos.direction == "long":
                 if price <= pos.sl:
                     exit_reason = "Stop Loss"
@@ -113,7 +114,7 @@ class HybridBacktester:
 
             if exit_reason:
                 gross_pnl = ((price - pos.entry_price) * pos.lots * contract_size) if pos.direction == "long" else ((pos.entry_price - price) * pos.lots * contract_size)
-                
+
                 # Calculate slippage cost for backtesting
                 backtest_slippage_cost_value = 0.0
                 if self.cfg.trading_costs.defaults.adaptive_slippage:
@@ -131,28 +132,28 @@ class HybridBacktester:
 
                 # Create ClosedTrade object from SimPosition
                 closed_trade = ClosedTrade(
-                    ticket=pos.ticket, # SimPosition already has a unique ticket-like ID
+                    ticket=pos.ticket,  # SimPosition already has a unique ticket-like ID
                     symbol=pos.symbol,
                     direction=pos.direction,
                     lots=pos.lots,
                     entry_price=pos.entry_price,
                     exit_price=price,
                     entry_time=pos.entry_time,
-                    exit_time=row.name, # Use bar timestamp as exit_time
+                    exit_time=row.name,  # Use bar timestamp as exit_time
                     pnl=net_pnl,
                     risk_fraction=pos.risk_fraction,
-                    atr=pos.atr, # ATR at entry
+                    atr=pos.atr,  # ATR at entry
                     atr_idx=pos.atr_idx,
                     min_prob_long_idx=pos.min_prob_long_idx,
                     min_prob_short_idx=pos.min_prob_short_idx,
                     entry_auc=pos.entry_auc,
                     entry_equity=pos.entry_equity,
-                    exit_equity=exit_equity, # Pass the correct exit equity
+                    exit_equity=exit_equity,  # Pass the correct exit equity
                     adx=getattr(pos, 'adx', 0.0),
                     macd_diff=getattr(pos, 'macd_diff', 0.0),
                     volatility_10=getattr(pos, 'volatility_10', 0.0),
                     dist_from_ema_200=getattr(pos, 'dist_from_ema_200', 0.0),
-                    context_vector=getattr(pos, 'trade_context', None) # NEW: Pass stored context vector
+                    context_vector=getattr(pos, 'trade_context', None)  # NEW: Pass stored context vector
                 )
 
                 # Update the bandit and the symbol's state with the ClosedTrade object
@@ -168,7 +169,7 @@ class HybridBacktester:
                     f"[{sym}] Closed {pos.direction} position at {pos.exit_price:.5f}. "
                     f"Entry: {pos.entry_price:.5f}, PnL: {pos.pnl:.2f}, Final Equity: {self.equity:.2f}"
                 )
-    
+
     def _perform_retraining(self, sym: str, bar_time: pd.Timestamp, i: int, data: pd.DataFrame, X: pd.DataFrame, y_long: pd.Series, y_short: pd.Series):
         """
         Handles the logic for retraining the model.
@@ -195,16 +196,16 @@ class HybridBacktester:
 
             ens_old_long = self.ens_per_symbol_long[sym]
             ens_old_short = self.ens_per_symbol_short[sym]
-            
+
             # Use the shared safe_retrain_ensemble function
             # IMPORTANT: A dry_run=True flag should be added here to prevent overwriting prod models.
             ens_new_long = safe_retrain_ensemble(self.cfg, sym, ens_old_long, train_data[X.columns], y_long.loc[train_data.index], train_data["close"] if "close" in train_data.columns else None, dry_run=True, model_type="long")
             ens_new_short = safe_retrain_ensemble(self.cfg, sym, ens_old_short, train_data[X.columns], y_short.loc[train_data.index], train_data["close"] if "close" in train_data.columns else None, dry_run=True, model_type="short")
-            
+
             # Update the ensemble in the backtester's state
             self.ens_per_symbol_long[sym] = ens_new_long
             self.ens_per_symbol_short[sym] = ens_new_short
-            
+
         return self.ens_per_symbol_long[sym], self.ens_per_symbol_short[sym]
 
     def _check_and_prune(self, trial: optuna.Trial, i: int):
@@ -230,10 +231,10 @@ class HybridBacktester:
         logger.info(f"Processing {len(data)} bars for {sym}...")
         # Iterate over the aligned features (X), which do not include the forming bar
         for i in range(20, len(X)):
-            bar_time = X.index[i] # Use X's index for bar_time
-            current_row = data.loc[[bar_time]].iloc[0] # Get the corresponding row from the original data using X's index
+            bar_time = X.index[i]  # Use X's index for bar_time
+            current_row = data.loc[[bar_time]].iloc[0]  # Get the corresponding row from the original data using X's index
             self.bar_counters[sym] += 1
-            last_features = X.iloc[[i]] # X is already aligned, so X.iloc[[i]] is correct
+            last_features = X.iloc[[i]]  # X is already aligned, so X.iloc[[i]] is correct
             atr = X["atr_14"].iloc[i]
 
             # Manage existing positions first
@@ -291,7 +292,7 @@ class HybridBacktester:
                 "vol": atr,
                 "equity": self.equity,
                 "peak_equity": self.risk_manager.equity_peak,
-                "ensemble_auc": (ens_long.ensemble_cv_auc_ + ens_short.ensemble_cv_auc_) / 2, # Pass current model confidence
+                "ensemble_auc": (ens_long.ensemble_cv_auc_ + ens_short.ensemble_cv_auc_) / 2,  # Pass current model confidence
                 "adx": float(last_features["adx"].iloc[0]) if "adx" in last_features.columns else 0.0,
                 "macd_diff": float(last_features["macd_diff"].iloc[0]) if "macd_diff" in last_features.columns else 0.0,
                 "volatility_10": float(last_features["volatility_10"].iloc[0]) if "volatility_10" in last_features.columns else 0.0,
@@ -345,8 +346,8 @@ class HybridBacktester:
                         entry_equity=self.equity,
                         atr_idx=atr_idx,
                         min_prob_long_idx=min_prob_long_idx,
-                        min_prob_short_idx=min_prob_short_idx, # Store discrete choices
-                        trade_context=dynamic_risk_params.get("context_vector") # NEW: Store the context vector
+                        min_prob_short_idx=min_prob_short_idx,  # Store discrete choices
+                        trade_context=dynamic_risk_params.get("context_vector")  # NEW: Store the context vector
                     )
                     self.positions.append(pos)
                     logger.info(
@@ -358,13 +359,12 @@ class HybridBacktester:
                 logger.info(f"[{sym}] No trade signal. Probs: (Long: {prob_long:.3f}, Short: {prob_short:.3f}) ")
 
             self.equity_curve.append((bar_time, self.equity))
-            
+
             # Periodic persistence of Thompson state + CSV (avoid overwriting prod state)
             total_bars = sum(self.bar_counters.values())
             if total_bars % self.save_state_every_bars == 0:
                 # write to the backtest-specific file so you don't overwrite live/prod state
                 self._persist_bandit_state(force_path=self.backtest_ts_state_file)
-
 
             # --- Pruning Check (if in tuning mode) ---
             if trial and pruning_interval > 0 and (i % pruning_interval == 0) and self.cfg.symbols.index(sym) == 0:
@@ -391,7 +391,7 @@ class HybridBacktester:
 
             returns = pd.Series([t.pnl for t in trades if t.pnl is not None], index=[t.exit_time for t in trades if t.pnl is not None])
             returns.index = pd.to_datetime(returns.index)
-            
+
             if not eq_df.empty:
                 try:
                     report_path = f"results/report_{symbol_str}_hybrid_adaptive.html"
@@ -436,7 +436,7 @@ class HybridBacktester:
 
             # Save human-readable CSV of ts history for offline analysis
             if self.ts_param_history:
-                import pandas as pd # type: ignore
+                import pandas as pd  # type: ignore
                 df = pd.DataFrame(self.ts_param_history)
                 df.to_csv(self.ts_history_csv, index=False)
 
@@ -448,13 +448,12 @@ class HybridBacktester:
                 # restore original
                 self.cfg.thompson_sampling.state_file = original_state_file
 
-
     def run(self, trial: optuna.Trial | None = None, pruning_interval: int = 0):
         logger.info("=== Starting Hybrid Adaptive Backtest ===")
         try:
             for sym in self.cfg.symbols:
                 logger.info(f"--- Backtesting Symbol: {sym} ---")
-                
+
                 # Load best feature params from optuna study
                 optuna_params = load_optuna_params(sym, self.cfg)
                 feature_params = optuna_params.get('features', {}) if optuna_params else {}
@@ -480,7 +479,7 @@ class HybridBacktester:
                     sym,
                     feature_cfg=feature_cfg,
                     source=self.cfg.data_source,
-                    min_pct_change=tuned_min_pct_change, # Use tuned min_pct_change
+                    min_pct_change=tuned_min_pct_change,  # Use tuned min_pct_change
                     mta_df=mta_df,
                     inter_market_df=inter_market_df,
                     return_long_short_labels=True,
@@ -515,8 +514,9 @@ class HybridBacktester:
                     )
         except KeyboardInterrupt:
             logger.warning("Backtest interrupted by user. Generating results for completed portion...")
-        
+
         return self._generate_results()
+
 
 if __name__ == "__main__":
     import numpy as np  # type: ignore
@@ -527,7 +527,7 @@ if __name__ == "__main__":
     random.seed(42)
     cfg = Cfg.from_yaml("config.yaml")
     setup_logging(level=cfg.logging["level"], to_file=cfg.logging["to_file"], rotate=cfg.logging["rotate"], retention=cfg.logging["retention"])
-    
+
     mt5_client = None
     if cfg.data_source == "mt5":
         from src.mt5_client import MT5Client
@@ -544,7 +544,6 @@ if __name__ == "__main__":
 
     cfg.thompson_sampling.state_file = f"ts_risk_controller_state_backtest_{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
 
-    
     bt = HybridBacktester(cfg, mt5_client)
     try:
         trades_df, eq_df = bt.run()

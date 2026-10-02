@@ -2,11 +2,12 @@
 import pandas as pd  # type: ignore
 import sys
 import os
-import quantstats as qs # type: ignore
+import quantstats as qs  # type: ignore
+
 
 def analyze_trades(df: pd.DataFrame, name: str, equity_df: pd.DataFrame | None = None):
     """Analyzes a dataframe of trades and prints a summary."""
-    
+
     if df.empty:
         print(f"--- No trades to analyze for: {name} ---")
         return
@@ -79,7 +80,7 @@ def analyze_trades(df: pd.DataFrame, name: str, equity_df: pd.DataFrame | None =
         # Ensure equity_df is sorted by time and index is datetime
         equity_df['time'] = pd.to_datetime(equity_df['time'])
         equity_df = equity_df.set_index('time').sort_index()
-        
+
         # Calculate daily returns
         returns = equity_df['equity'].pct_change().dropna()
 
@@ -95,7 +96,7 @@ def analyze_trades(df: pd.DataFrame, name: str, equity_df: pd.DataFrame | None =
 
             # Sharpe Ratio
             sharpe_ratio = qs.stats.sharpe(returns, annualize=True) if returns.std() > 0 else 0.0
-            
+
             # Max Drawdown
             max_drawdown = qs.stats.max_drawdown(returns)
 
@@ -141,12 +142,12 @@ if __name__ == "__main__":
         try:
             all_files = os.listdir(results_dir)
             trade_files = sorted([
-                os.path.join(results_dir, f) 
+                os.path.join(results_dir, f)
                 for f in all_files
                 if f.startswith('trades_') and f.endswith('.csv')
             ])
             equity_files = sorted([
-                os.path.join(results_dir, f) 
+                os.path.join(results_dir, f)
                 for f in all_files
                 if f.startswith('equity_curve_') and f.endswith('.csv')
             ])
@@ -166,7 +167,7 @@ if __name__ == "__main__":
             if os.path.exists(eq_path):
                 equity_files.append(eq_path)
             else:
-                equity_files.append(None) # Append None if no matching equity file
+                equity_files.append(None)  # Append None if no matching equity file
 
     # Create a mapping from trade file base name to equity file path
     trade_to_equity_map = {}

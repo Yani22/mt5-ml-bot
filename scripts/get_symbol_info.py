@@ -12,6 +12,7 @@ from src.mt5_client import MT5Client
 # Load .env at the global scope, just like main.py
 load_dotenv()
 
+
 def get_symbol_info():
     """
     Connects to MT5 using the project's MT5Client and fetches symbol information.
@@ -30,7 +31,7 @@ def get_symbol_info():
         return
 
     symbol = "AUDUSDm#"
-    
+
     # Get symbol info
     info = mt5.symbol_info(symbol)
     if info is None:
@@ -50,6 +51,7 @@ def get_symbol_info():
 
     # Shut down the connection
     mt5c.shutdown()
+
 
 if __name__ == "__main__":
     get_symbol_info()

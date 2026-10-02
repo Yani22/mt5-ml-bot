@@ -8,7 +8,7 @@ from loguru import logger  # type: ignore
 import yaml
 from functools import partial
 from joblib import Parallel, delayed  # type: ignore
-import traceback # Added for detailed error logging
+import traceback  # Added for detailed error logging
 
 from src.config import Cfg, RiskCfg
 from src.features import FeatureCfg, build_dynamic_features
@@ -21,7 +21,7 @@ from sklearn.metrics import roc_auc_score  # type: ignore
 # --- Detect Colab and set path ---
 # Assumes drive is already mounted if running in Colab.
 try:
-    import google.colab # type: ignore
+    import google.colab  # type: ignore
     # This path should point to the location in your Google Drive where params are stored.
     PARAMS_DIR = "/content/drive/MyDrive/mt5_ml_bot_params/optuna_params"
     IN_COLAB = True
@@ -36,6 +36,7 @@ cfg = Cfg.from_yaml("config.yaml")
 
 with open("config.yaml", "r") as f:
     yaml_cfg = yaml.safe_load(f)
+
 
 def suggest_params(trial, prefix: str, param_ranges: dict):
     params = {}
@@ -52,9 +53,11 @@ def suggest_params(trial, prefix: str, param_ranges: dict):
             params[k] = v
     return params
 
-from src.labels import generate_labels # NEW IMPORT
+
+from src.labels import generate_labels  # NEW IMPORT
 
 # ... (rest of imports) ...
+
 
 def objective(trial, df: pd.DataFrame, static_features: pd.DataFrame, symbol: str):
     try:
@@ -79,7 +82,7 @@ def objective(trial, df: pd.DataFrame, static_features: pd.DataFrame, symbol: st
 
         # --- 2. Build Features for this Trial (using cached static features) ---
         X = build_dynamic_features(df, static_features, feature_cfg, symbol)
-        
+
         # --- Generate Labels for this Trial ---
         y = generate_labels(df, prediction_horizon, min_pct_change)
 
@@ -89,7 +92,7 @@ def objective(trial, df: pd.DataFrame, static_features: pd.DataFrame, symbol: st
         y = y.loc[common_idx]
 
         data = merge_features_labels(df, X, y)
-        
+
         X_train = data.drop(columns=["y", "close", "high", "low", "volume"])
         y_train = data["y"]
 
@@ -101,11 +104,11 @@ def objective(trial, df: pd.DataFrame, static_features: pd.DataFrame, symbol: st
 
         # --- 4. Evaluate Ensemble ---
         ens = Ensemble(cfg, model_params=model_params)
-        
+
         cv_samples_per_split = yaml_cfg.get("cv_samples_per_split", 300)
         n_splits_calculated = min(5, max(2, len(X_train) // cv_samples_per_split))
         logger.debug(f"Calculated n_splits for TimeSeriesSplit: {n_splits_calculated}")
-        
+
         tscv = TimeSeriesSplit(n_splits=n_splits_calculated)
         aucs = []
         for i, (tr_idx, val_idx) in enumerate(tscv.split(X_train)):
@@ -125,11 +128,12 @@ def objective(trial, df: pd.DataFrame, static_features: pd.DataFrame, symbol: st
         return 1 - mean_auc
 
     except optuna.exceptions.TrialPruned as e:
-        raise e # Allow Optuna to handle pruning
+        raise e  # Allow Optuna to handle pruning
     except Exception as e:
         tb_str = traceback.format_exc()
         logger.error(f"--- Trial Failed ---\nError: {e}\nTraceback:\n{tb_str}")
         return float('inf')
+
 
 def run_tuning_for_symbol(sym: str):
     logger.info(f"🔹 Starting combined feature and model tuning for {sym}...")
@@ -137,13 +141,13 @@ def run_tuning_for_symbol(sym: str):
     # --- 1. Get all data and static features from the centralized pipeline ---
     # For tuning, we pass a default FeatureConfig and set build_dynamic=False.
     # The dynamic features will be built inside the objective function for each trial.
-    static_features, _, df = get_training_data( # Unpack X, discard y, get df
-        cfg, 
-        sym, 
-        feature_cfg=FeatureCfg(), # Pass a default/dummy config
+    static_features, _, df = get_training_data(  # Unpack X, discard y, get df
+        cfg,
+        sym,
+        feature_cfg=FeatureCfg(),  # Pass a default/dummy config
         source=cfg.data_source if hasattr(cfg, "data_source") else "csv",
-        build_dynamic=False, # Instruct the pipeline to return intermediate artifacts for tuner
-        return_long_short_labels=False # We will generate labels inside the objective
+        build_dynamic=False,  # Instruct the pipeline to return intermediate artifacts for tuner
+        return_long_short_labels=False  # We will generate labels inside the objective
     )
 
     if df.empty:
@@ -153,12 +157,12 @@ def run_tuning_for_symbol(sym: str):
     # --- 2. Run Optuna Study ---
     objective_partial = partial(objective, df=df, static_features=static_features, symbol=sym)
 
-    study_name = f"feature_model_tuning_{sym.replace('#','_')}_history_{cfg.history_bars}"
+    study_name = f"feature_model_tuning_{sym.replace('#', '_')}_history_{cfg.history_bars}"
     storage_path = f"sqlite:///{os.path.join(PARAMS_DIR, study_name)}.db"
-    
+
     pruner = optuna.pruners.MedianPruner()
     study = optuna.create_study(direction="minimize", study_name=study_name, storage=storage_path, load_if_exists=True, pruner=pruner)
-    
+
     n_trials = yaml_cfg.get("optuna_n_trials", 100)
     study.optimize(objective_partial, n_trials=n_trials)
 
@@ -183,18 +187,18 @@ def run_tuning_for_symbol(sym: str):
                 best_params_structured["models"][model_name] = {}
             best_params_structured["models"][model_name][param_name] = value
 
-    param_file = os.path.join(PARAMS_DIR, f"{sym.replace('#','_')}_best_params.pkl")
+    param_file = os.path.join(PARAMS_DIR, f"{sym.replace('#', '_')}_best_params.pkl")
     with open(param_file, "wb") as f:
         pickle.dump(best_params_structured, f)
 
     logger.info(f"[{sym}] Best combined params saved to {param_file}")
     logger.debug(best_params_structured)
-    
+
     # --- 6. Generate and Save Visualization Plots ---
     try:
         fig = optuna.visualization.plot_optimization_history(study)
         fig.write_image(os.path.join(PARAMS_DIR, f"{study_name}_optimization_history.png"))
-        
+
         fig = optuna.visualization.plot_param_importances(study)
         fig.write_image(os.path.join(PARAMS_DIR, f"{study_name}_param_importances.png"))
     except (ImportError, RuntimeError) as e:

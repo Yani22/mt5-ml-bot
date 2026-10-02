@@ -8,9 +8,10 @@ import os
 from typing import List, Dict, Tuple, Optional, Any
 
 from src.config import Cfg
-from src.trade import SimPosition # For reward normalization
-from src.trade_types import ClosedTrade # Import ClosedTrade
+from src.trade import SimPosition  # For reward normalization
+from src.trade_types import ClosedTrade  # Import ClosedTrade
 from src.linear_thompson import LinearThompson  # new
+
 
 def _json_serial(obj):
     """
@@ -21,8 +22,8 @@ def _json_serial(obj):
     if isinstance(obj, (datetime.datetime, datetime.date)):
         return obj.isoformat()
     if isinstance(obj, (np.integer, np.floating, np.bool_)):
-        return obj.item() # Convert numpy types to native Python types
-    if isinstance(obj, bool): # Redundant if np.bool_ is handled, but safe for pure Python bools
+        return obj.item()  # Convert numpy types to native Python types
+    if isinstance(obj, bool):  # Redundant if np.bool_ is handled, but safe for pure Python bools
         return str(obj)
     raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
 
@@ -33,6 +34,7 @@ class ThompsonBandit:
     and empirical-per-arm variance estimation. This bandit is used to select
     optimal discrete parameters (arms) based on observed rewards.
     """
+
     def __init__(self, num_arms: int, prior_mean: float, prior_var: float, min_var: float = 1e-6):
         self.num_arms = int(num_arms)
         self.prior_mean = float(prior_mean)
@@ -99,12 +101,14 @@ class ThompsonBandit:
         inst.sum_squared_rewards = np.array(state.get("sum_squared_rewards", inst.sum_squared_rewards))
         return inst
 
+
 class SymbolRiskState:
     """
     Manages the Thompson Sampling and adaptive grid state for a single trading symbol.
     This includes the bandits themselves, the current grid values, performance metrics
     like peak equity and consecutive losses, and counters for grid adaptation.
     """
+
     def __init__(self, cfg: Cfg, atr_grid: List[float], min_prob_grid_long: List[float], min_prob_grid_short: List[float]):
         self.cfg = cfg
         ts_cfg = cfg.thompson_sampling
@@ -148,7 +152,7 @@ class SymbolRiskState:
         # Track updates for adaptive grids
         self.atr_updates_since_last_adaptation: int = 0
         self.min_prob_updates_since_last_adaptation: int = 0
-        self.last_reset_time: Optional[datetime.datetime] = None # NEW: To track last reset for cooldown
+        self.last_reset_time: Optional[datetime.datetime] = None  # NEW: To track last reset for cooldown
 
         # Asymmetric Compounding
         self.win_streak: int = 0
@@ -213,7 +217,7 @@ class SymbolRiskState:
         # We must fall back to the initial equity from the main config, not the instance's default.
         inst.peak_equity = state.get("peak_equity", cfg.initial_equity)
         inst.current_equity = state.get("current_equity", cfg.initial_equity)
-        
+
         inst.consecutive_losses = state.get("consecutive_losses", 0)
         inst.recent_returns = deque(state.get("recent_returns", []), maxlen=cfg.thompson_sampling.rule_rolling_window)
         inst.last_atr = state.get("last_atr", 0.0)
@@ -221,13 +225,13 @@ class SymbolRiskState:
         inst.min_prob_updates_since_last_adaptation = state.get("min_prob_updates_since_last_adaptation", 0)
         last_reset_time_str = state.get("last_reset_time")
         inst.last_reset_time = datetime.datetime.fromisoformat(last_reset_time_str) if last_reset_time_str else None
-        
+
         # Asymmetric Compounding
         inst.win_streak = state.get("win_streak", 0)
         inst.loss_streak = state.get("loss_streak", 0)
         inst.current_ac_multiplier = state.get("current_ac_multiplier", 1.0)
         inst.last_trade_was_win = state.get("last_trade_was_win")
-        
+
         if "contextual_bandit" in state and getattr(cfg.thompson_sampling, "contextual_enabled", False):
             # Re-initialize contextual bandit with the correct number of arms from the loaded grid
             ctx_dim = int(getattr(cfg.thompson_sampling, "context_dim", 9))
@@ -235,8 +239,9 @@ class SymbolRiskState:
             inst.contextual_bandit = LinearThompson(num_arms=len(inst.atr_grid_values), dim=ctx_dim, lambda_prior=1.0, noise_var=float(cfg.thompson_sampling.obs_var or 1.0))
             # Now load the state into the correctly sized bandit
             inst.contextual_bandit = LinearThompson.from_state(state["contextual_bandit"])
-            
+
         return inst
+
 
 class RiskController:
     """
@@ -244,6 +249,7 @@ class RiskController:
     It orchestrates the selection of optimal risk parameters, handles dynamic
     grid adaptation, and triggers bandit resets based on performance metrics.
     """
+
     def __init__(self, cfg: Cfg, notifier=None):
         self.cfg = cfg
         self.notifier = notifier
@@ -253,9 +259,9 @@ class RiskController:
             atr_grid = cfg.get_symbol_value(sym, 'atr_grid', cfg.thompson_sampling.atr_grid)
             min_prob_grid_long = cfg.get_symbol_value(sym, 'min_prob_grid_long', cfg.thompson_sampling.min_prob_grid_long)
             min_prob_grid_short = cfg.get_symbol_value(sym, 'min_prob_grid_short', cfg.thompson_sampling.min_prob_grid_short)
-            
+
             self.symbol_states[sym] = SymbolRiskState(cfg, atr_grid, min_prob_grid_long, min_prob_grid_short)
-        
+
         self.state_file = cfg.thompson_sampling.state_file
         self.last_daily_retrain_date: Dict[str, Optional[datetime.date]] = {sym: None for sym in cfg.symbols}
         self.bar_counters: Dict[str, int] = {sym: 0 for sym in cfg.symbols}
@@ -288,7 +294,7 @@ class RiskController:
         ts_cfg = self.cfg.thompson_sampling
 
         # Extract context variables
-        vol = context.get("vol", sym_state.last_atr) # Use last_atr if current vol not provided
+        vol = context.get("vol", sym_state.last_atr)  # Use last_atr if current vol not provided
         equity = context.get("equity", sym_state.current_equity)
         peak_equity = context.get("peak_equity", sym_state.peak_equity)
         max_drawdown = 1.0 - (equity / peak_equity) if peak_equity is not None and peak_equity > 0 else 0.0
@@ -297,8 +303,8 @@ class RiskController:
         rule_scale = 1.0
 
         # 1. Inverse Volatility Scale
-        if vol > 0 and ts_cfg.vol_threshold > 0: # Avoid division by zero
-            inverse_vol_scale = min(1.0, ts_cfg.vol_threshold / vol + 0.5) # Example scaling
+        if vol > 0 and ts_cfg.vol_threshold > 0:  # Avoid division by zero
+            inverse_vol_scale = min(1.0, ts_cfg.vol_threshold / vol + 0.5)  # Example scaling
             rule_scale *= inverse_vol_scale
 
         # 2. Drawdown Scale
@@ -308,11 +314,11 @@ class RiskController:
 
         # 3. Consecutive Loss Scale
         if consecutive_losses > 0 and ts_cfg.consec_loss_cut > 0:
-            consec_scale = max(0.1, 1.0 - ts_cfg.consec_loss_cut * consecutive_losses / 5.0) # Divide by 5 for example
+            consec_scale = max(0.1, 1.0 - ts_cfg.consec_loss_cut * consecutive_losses / 5.0)  # Divide by 5 for example
             rule_scale *= consec_scale
-        
+
         # Ensure rule_scale is within (0, 1]
-        rule_scale = np.clip(rule_scale, 0.01, 1.0) # Min scale of 0.01 to avoid zeroing out
+        rule_scale = np.clip(rule_scale, 0.01, 1.0)  # Min scale of 0.01 to avoid zeroing out
 
         logger.debug(f"[{symbol}] Rule Scale: {rule_scale:.2f} (Vol:{vol:.5f}, DD:{max_drawdown:.2%}, CL:{consecutive_losses})")
         return float(rule_scale)
@@ -333,7 +339,7 @@ class RiskController:
         ts_cfg = self.cfg.thompson_sampling
 
         # Extract context variables
-        vol = context.get("vol", sym_state.last_atr) # Use last_atr if current vol not provided
+        vol = context.get("vol", sym_state.last_atr)  # Use last_atr if current vol not provided
         equity = context.get("equity", sym_state.current_equity)
         peak_equity = context.get("peak_equity", sym_state.peak_equity)
         max_drawdown = 1.0 - (equity / peak_equity) if peak_equity is not None and peak_equity > 0 else 0.0
@@ -342,8 +348,8 @@ class RiskController:
         rule_scale = 1.0
 
         # 1. Inverse Volatility Scale
-        if vol > 0 and ts_cfg.vol_threshold > 0: # Avoid division by zero
-            inverse_vol_scale = min(1.0, ts_cfg.vol_threshold / vol + 0.5) # Example scaling
+        if vol > 0 and ts_cfg.vol_threshold > 0:  # Avoid division by zero
+            inverse_vol_scale = min(1.0, ts_cfg.vol_threshold / vol + 0.5)  # Example scaling
             rule_scale *= inverse_vol_scale
 
         # 2. Drawdown Scale
@@ -353,11 +359,11 @@ class RiskController:
 
         # 3. Consecutive Loss Scale
         if consecutive_losses > 0 and ts_cfg.consec_loss_cut > 0:
-            consec_scale = max(0.1, 1.0 - ts_cfg.consec_loss_cut * consecutive_losses / 5.0) # Divide by 5 for example
+            consec_scale = max(0.1, 1.0 - ts_cfg.consec_loss_cut * consecutive_losses / 5.0)  # Divide by 5 for example
             rule_scale *= consec_scale
-        
+
         # Ensure rule_scale is within (0, 1]
-        rule_scale = np.clip(rule_scale, 0.01, 1.0) # Min scale of 0.01 to avoid zeroing out
+        rule_scale = np.clip(rule_scale, 0.01, 1.0)  # Min scale of 0.01 to avoid zeroing out
 
         logger.debug(f"[{symbol}] Rule Scale: {rule_scale:.2f} (Vol:{vol:.5f}, DD:{max_drawdown:.2%}, CL:{consecutive_losses})")
         return float(rule_scale)
@@ -383,7 +389,7 @@ class RiskController:
                 "trailing_atr_mult": self.cfg.get_symbol_value(symbol, 'trailing_atr_mult', 1.0),
                 "min_prob_long": self.cfg.get_symbol_value(symbol, 'min_prob_long', 0.55),
                 "min_prob_short": self.cfg.get_symbol_value(symbol, 'min_prob_short', 0.55),
-                "atr_idx": -1, # Indicate no TS choice
+                "atr_idx": -1,  # Indicate no TS choice
                 "min_prob_long_idx": -1,
                 "min_prob_short_idx": -1,
             }
@@ -423,10 +429,10 @@ class RiskController:
                 drawdown,
                 hour_sin,
                 hour_cos,
-                adx / 100.0, # Normalize ADX (typically 0-100)
-                macd_diff * 1000.0, # Scale macd_diff for better feature representation
-                volatility_10 * 100.0, # Scale volatility
-                dist_from_ema_200 * 100.0, # Scale distance
+                adx / 100.0,  # Normalize ADX (typically 0-100)
+                macd_diff * 1000.0,  # Scale macd_diff for better feature representation
+                volatility_10 * 100.0,  # Scale volatility
+                dist_from_ema_200 * 100.0,  # Scale distance
             ], dtype=float)
             # ensure dimension matches bandit's dimension; if not, pad/truncate
             ctx_dim = sym_state.contextual_bandit.dim
@@ -479,7 +485,7 @@ class RiskController:
             "is_exploratory": is_exploratory,
             "exploration_risk_mult": exploration_risk_mult,
             "context_vector": x.tolist() if 'x' in locals() else None,
-            "ac_multiplier": sym_state.current_ac_multiplier, # NEW: Asymmetric Compounding Multiplier
+            "ac_multiplier": sym_state.current_ac_multiplier,  # NEW: Asymmetric Compounding Multiplier
         }
 
     def update(self, trade: ClosedTrade):
@@ -492,23 +498,23 @@ class RiskController:
             return
 
         sym_state = self.symbol_states[symbol]
-        reward = trade.pnl / self.cfg.thompson_sampling.reward_normalization_factor # Normalize PnL
+        reward = trade.pnl / self.cfg.thompson_sampling.reward_normalization_factor  # Normalize PnL
 
         # --- Update Core Performance Metrics ---
         if trade.exit_equity is not None:
             sym_state.current_equity = trade.exit_equity
             sym_state.peak_equity = max(sym_state.peak_equity, trade.exit_equity)
-        
+
         sym_state.recent_returns.append(reward)
 
         if trade.pnl <= 0:
             sym_state.consecutive_losses += 1
         else:
             sym_state.consecutive_losses = 0
-        
+
         # --- Update Bandits ---
         # Update ATR bandit
-        if trade.atr_idx is not None and trade.atr_idx != -1: # -1 indicates no TS choice for this parameter
+        if trade.atr_idx is not None and trade.atr_idx != -1:  # -1 indicates no TS choice for this parameter
             if sym_state.contextual_bandit is not None and getattr(self.cfg.thompson_sampling, "contextual_enabled", False):
                 if trade.context_vector is not None:
                     context_vector = np.array(trade.context_vector)
@@ -537,7 +543,7 @@ class RiskController:
                 sym_state.min_prob_bandit_short.update(trade.min_prob_short_idx, reward)
             else:
                 logger.warning(f"[{symbol}] Invalid min_prob_short_idx {trade.min_prob_short_idx} for min_prob_bandit_short with {sym_state.min_prob_bandit_short.num_arms} arms.")
-                    
+
         # Increment adaptation counters
         if trade.atr_idx is not None and trade.atr_idx != -1:
             sym_state.atr_updates_since_last_adaptation += 1
@@ -545,30 +551,30 @@ class RiskController:
             sym_state.min_prob_updates_since_last_adaptation += 1
         if trade.min_prob_short_idx is not None and trade.min_prob_short_idx != -1:
             sym_state.min_prob_updates_since_last_adaptation += 1
-        
+
         logger.debug(f"[{symbol}] Thompson Sampling bandits updated for trade {trade.ticket} with reward {reward:.4f}.")
-                    
+
         # Check and trigger grid adaptation after updating bandits
-        self._check_and_trigger_adaptation(symbol)        
+        self._check_and_trigger_adaptation(symbol)
 
         # --- Asymmetric Compounding Logic ---
         ac_cfg = self.cfg.asymmetric_compounding
         if ac_cfg.enabled:
             is_win = trade.pnl > 0
-            
+
             if sym_state.last_trade_was_win is not None and sym_state.last_trade_was_win != is_win and ac_cfg.reset_on_opposite_outcome:
                 # Outcome changed, reset streaks
                 sym_state.win_streak = 0
                 sym_state.loss_streak = 0
                 logger.debug(f"[{symbol}] Asymmetric Compounding: Streak reset due to opposite outcome.")
-            
+
             if is_win:
                 sym_state.win_streak += 1
                 sym_state.loss_streak = 0
             else:
                 sym_state.loss_streak += 1
                 sym_state.win_streak = 0
-            
+
             sym_state.last_trade_was_win = is_win
 
             # Calculate multiplier
@@ -577,14 +583,13 @@ class RiskController:
                 multiplier = ac_cfg.win_streak_multiplier ** sym_state.win_streak
             elif sym_state.loss_streak > 0:
                 multiplier = ac_cfg.loss_streak_divisor ** sym_state.loss_streak
-            
+
             # Apply max_streak_effect
             multiplier = np.clip(multiplier, 1.0 / ac_cfg.max_streak_effect, ac_cfg.max_streak_effect)
-            
+
             sym_state.current_ac_multiplier = float(multiplier)
             logger.debug(f"[{symbol}] Asymmetric Compounding: Win Streak={sym_state.win_streak}, Loss Streak={sym_state.loss_streak}, AC Multiplier={sym_state.current_ac_multiplier:.2f}")
 
-        
     def save_state(self, open_positions_cache: dict | None = None):
         state_path = self.cfg.thompson_sampling.state_file
         try:
@@ -603,7 +608,9 @@ class RiskController:
             logger.debug(f"RiskController state saved to {state_path}")
         except Exception as e:
             logger.error(f"Failed to save RiskController state: {e}")
-            if self.notifier: self.notifier.send_message(f"<b>ERROR:</b> Failed to save RiskController state: {e}", level="ERROR")
+            if self.notifier:
+                self.notifier.send_message(f"<b>ERROR:</b> Failed to save RiskController state: {e}", level="ERROR")
+
     def load_state(self) -> dict:
         state_path = self.cfg.thompson_sampling.state_file
         if not os.path.exists(state_path):
@@ -616,7 +623,7 @@ class RiskController:
 
             symbol_states_data = state.get("symbol_states", {})
             for sym, sym_state_data in symbol_states_data.items():
-                if sym in self.cfg.symbols: # Only load for active symbols
+                if sym in self.cfg.symbols:  # Only load for active symbols
                     self.symbol_states[sym] = SymbolRiskState.from_state(self.cfg, sym_state_data)
                 else:
                     logger.warning(f"State found for inactive symbol {sym}. Skipping load.")
@@ -633,9 +640,9 @@ class RiskController:
             return {int(k): v for k, v in state.get("open_positions_cache", {}).items()}
         except Exception as e:
             logger.error(f"Failed to load RiskController state from {state_path}: {e}")
-            if self.notifier: self.notifier.send_message(f"<b>ERROR:</b> Failed to load RiskController state from {state_path}: {e}", level="ERROR")
+            if self.notifier:
+                self.notifier.send_message(f"<b>ERROR:</b> Failed to load RiskController state from {state_path}: {e}", level="ERROR")
             return {}
-
 
     def diagnostics(self) -> Dict[str, Any]:
         """
@@ -675,7 +682,8 @@ class RiskController:
         ts_cfg = self.cfg.thompson_sampling
 
         logger.warning(f"[{symbol}] Triggering bandit reset due to performance degradation or market shift.")
-        if self.notifier: self.notifier.send_message(f"<b>RISK ALERT:</b> [{symbol}] Bandit reset triggered!", level="WARNING")
+        if self.notifier:
+            self.notifier.send_message(f"<b>RISK ALERT:</b> [{symbol}] Bandit reset triggered!", level="WARNING")
         # Reset ThompsonBandits to initial state
         sym_state.atr_bandit = ThompsonBandit(
             num_arms=len(ts_cfg.atr_grid),
@@ -712,7 +720,7 @@ class RiskController:
         sym_state.min_prob_updates_since_last_adaptation = 0
 
         # Reset performance metrics for the symbol
-        sym_state.peak_equity = sym_state.current_equity # Reset peak to current equity
+        sym_state.peak_equity = sym_state.current_equity  # Reset peak to current equity
         sym_state.consecutive_losses = 0
         sym_state.recent_returns.clear()
 
@@ -767,7 +775,7 @@ class RiskController:
         if not reset_triggered and ensemble_auc < ts_cfg.reset_on_low_ensemble_auc:
             reset_triggered = True
             trigger_reason = f"Ensemble AUC ({ensemble_auc:.4f}) below {ts_cfg.reset_on_low_ensemble_auc:.4f}"
-        
+
         if reset_triggered:
             logger.warning(f"[{symbol}] Bandit reset triggered: {trigger_reason}")
             self._reset_bandit_state(symbol, current_time)
@@ -791,9 +799,9 @@ class RiskController:
                 # For contextual bandit, we need to find the arm with the highest estimated value
                 # This is a simplification; a more robust approach might involve simulating contexts
                 # For now, we'll use the arm with the highest mean reward from the underlying LinearThompson
-                best_arm_index = np.argmax(sym_state.contextual_bandit.b[:, 0] / np.diag(sym_state.contextual_bandit.A[:, :, 0])) # Simplified
+                best_arm_index = np.argmax(sym_state.contextual_bandit.b[:, 0] / np.diag(sym_state.contextual_bandit.A[:, :, 0]))  # Simplified
             else:
-                best_arm_index = np.argmax(sym_state.atr_bandit.sum_rewards / (sym_state.atr_bandit.counts + 1e-6)) # Avoid div by zero
+                best_arm_index = np.argmax(sym_state.atr_bandit.sum_rewards / (sym_state.atr_bandit.counts + 1e-6))  # Avoid div by zero
 
             old_atr_grid = sym_state.atr_grid_values
             new_atr_grid = self._refine_grid(
@@ -827,10 +835,10 @@ class RiskController:
                     self._transfer_bandit_state(old_bandit, old_atr_grid, new_bandit, new_atr_grid)
                     sym_state.atr_bandit = new_bandit
                 sym_state.atr_grid_values = new_atr_grid
-                sym_state.atr_updates_since_last_adaptation = 0 # Reset counter
+                sym_state.atr_updates_since_last_adaptation = 0  # Reset counter
             else:
                 logger.debug(f"[{symbol}] ATR grid adaptation resulted in no change.")
-                sym_state.atr_updates_since_last_adaptation = 0 # Reset counter even if no change
+                sym_state.atr_updates_since_last_adaptation = 0  # Reset counter even if no change
 
         # --- Min Prob Long Grid Adaptation ---
         if sym_state.min_prob_updates_since_last_adaptation >= ts_cfg.adaptation_interval_updates:
@@ -942,7 +950,7 @@ class RiskController:
             # their statistics will be summed up.
             new_bandit.A[new_idx] += old_bandit.A[old_idx]
             new_bandit.b[new_idx] += old_bandit.b[old_idx]
-        
+
         logger.debug(f"Transferred contextual bandit state from {len(old_grid)} to {len(new_grid)} arms.")
 
     @staticmethod
@@ -983,14 +991,14 @@ class RiskController:
 
         # Ensure bounds are sensible if at edges
         if best_arm_index == 0:
-            lower_bound = best_val - (current_grid[1] - best_val) * 2 # Extend a bit below
+            lower_bound = best_val - (current_grid[1] - best_val) * 2  # Extend a bit below
         if best_arm_index == len(current_grid) - 1:
-            upper_bound = best_val + (best_val - current_grid[-2]) * 2 # Extend a bit above
+            upper_bound = best_val + (best_val - current_grid[-2]) * 2  # Extend a bit above
 
         # Calculate the new, narrower range
         current_range = upper_bound - lower_bound
         new_range = current_range * refinement_factor
-        
+
         # Center the new range around the best_val
         new_lower = best_val - new_range / 2
         new_upper = best_val + new_range / 2
@@ -1007,10 +1015,10 @@ class RiskController:
             return current_grid
 
         # Generate new grid points
-        num_new_points = min(max_grid_size, max(min_grid_size, len(current_grid) + 2)) # Add a few points, but respect max_grid_size
+        num_new_points = min(max_grid_size, max(min_grid_size, len(current_grid) + 2))  # Add a few points, but respect max_grid_size
         new_grid = np.linspace(new_lower, new_upper, num_new_points).tolist()
-        new_grid = sorted(list(set(new_grid + [best_val]))) # Ensure best_val is always in the new grid
-        
+        new_grid = sorted(list(set(new_grid + [best_val])))  # Ensure best_val is always in the new grid
+
         # Ensure grid size constraints are met
         if len(new_grid) < min_grid_size:
             # If after refinement, grid is too small, try to expand it slightly or just return original

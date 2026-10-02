@@ -1,6 +1,7 @@
 # tests/test_config.py
 from src.config import Cfg
 
+
 def test_timeframe_seconds_basic():
     c = Cfg(timeframe="M5")
     assert c.timeframe_seconds() == 5 * 60

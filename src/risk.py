@@ -1,15 +1,20 @@
-from loguru import logger # type: ignore
+from loguru import logger  # type: ignore
+try:
+    import MetaTrader5 as mt5  # type: ignore
+except ImportError:  # not available on Linux; only needed on the live (Windows) path
+    mt5 = None
 from .config import Cfg
-import pandas as pd # type: ignore
-import numpy as np # type: ignore
-from loguru import logger # type: ignore
+import pandas as pd  # type: ignore
+import numpy as np  # type: ignore
+from loguru import logger  # type: ignore
 from .config import Cfg
 import datetime
 from datetime import timezone, timedelta
-from typing import List, Optional # Import Optional
-from .trade import SimPosition # Import SimPosition
-from .notifier import TelegramNotifier # NEW import
+from typing import List, Optional  # Import Optional
+from .trade import SimPosition  # Import SimPosition
+from .notifier import TelegramNotifier  # NEW import
 import threading
+
 
 class RiskManager:
     """
@@ -26,8 +31,8 @@ class RiskManager:
         self.equity_peak: float | None = None
         self.open_positions_cache: dict[str, dict] = {}
         self.cooldown_until: datetime.datetime | None = None
-        self.recently_closed_trades: List[SimPosition] = [] # New: To store closed trades for monitoring
-        self.notifier = notifier # NEW
+        self.recently_closed_trades: List[SimPosition] = []  # New: To store closed trades for monitoring
+        self.notifier = notifier  # NEW
         self.mt5_client = mt5_client
         self.cache_lock = lock
 
@@ -86,15 +91,15 @@ class RiskManager:
 
         pip_size = symbol_info.point
         contract_size = symbol_info.trade_contract_size
-        pip_value = self.get_pip_value(symbol) # Use helper to get value of 1 pip move per lot
+        pip_value = self.get_pip_value(symbol)  # Use helper to get value of 1 pip move per lot
 
         # Get symbol-specific or default risk per trade
         risk_per_trade_base = self.cfg.get_symbol_value(symbol, 'risk_per_trade', 0.005)
         risk_per_trade = self._get_dynamic_value(self.cfg.get_symbol_value(symbol, 'dynamic_risk'), auc_score, risk_per_trade_base)
-        
+
         max_risk_allowed = max(0.0, float(self.risk_cfg.max_portfolio_risk) - float(total_open_risk))
         effective_risk = min(risk_per_trade, max_risk_allowed)
-        
+
         effective_risk *= exploration_mult
         effective_risk *= ac_multiplier
 
@@ -143,7 +148,7 @@ class RiskManager:
         pip_size = symbol_info.point
 
         _sl_mult = sl_mult if sl_mult is not None else self.cfg.get_symbol_value(symbol, 'atr_multiplier_sl', 1.5)
-        
+
         min_rr = self.cfg.get_symbol_value(symbol, "min_risk_reward_ratio", 1.2)
         required_tp_mult = _sl_mult * min_rr
 
@@ -175,7 +180,7 @@ class RiskManager:
         if direction == "long":
             sl = min(sl, price - stops_level * pip_size)
             tp = max(tp, price + stops_level * pip_size)
-        else: # short
+        else:  # short
             sl = max(sl, price + stops_level * pip_size)
             tp = min(tp, price - stops_level * pip_size)
 
@@ -203,7 +208,7 @@ class RiskManager:
 
     def _count_consecutive_losses(self, now: datetime.datetime, lookback_hours: int = 48) -> int:
         if self.cfg.data_source != "mt5":
-            return 0 # Not applicable for CSV backtesting
+            return 0  # Not applicable for CSV backtesting
         """
         Query MT5 deal history in the last `lookback_hours` and compute the number
         of most recent consecutive losing closed trades (profit < 0).
@@ -242,17 +247,18 @@ class RiskManager:
         self.cooldown_until = current_time + timedelta(hours=hours)
         message = f"<b>RISK ALERT:</b> Watchdog triggered cooldown until {self.cooldown_until.isoformat()}"
         logger.warning(message)
-        if self.notifier: self.notifier.send_message(message, level="WARNING")
+        if self.notifier:
+            self.notifier.send_message(message, level="WARNING")
 
     def cooldown_active(self, now: datetime.datetime | None = None) -> bool:
         if self.cooldown_until is None:
             return False
-        
+
         current_time = now if now is not None else datetime.datetime.now(timezone.utc)
 
         if current_time < self.cooldown_until:
             return True
-        
+
         # cooldown finished
         self.cooldown_until = None
         return False
@@ -282,7 +288,8 @@ class RiskManager:
                 if lost >= max_losses:
                     message = f"<b>RISK ALERT:</b> Watchdog: consecutive losses {lost} >= threshold {max_losses}. Triggering cooldown."
                     logger.warning(message)
-                    if self.notifier: self.notifier.send_message(message, level="WARNING")
+                    if self.notifier:
+                        self.notifier.send_message(message, level="WARNING")
                     self._trigger_cooldown(now=now_local)
                     return False
 
@@ -305,7 +312,8 @@ class RiskManager:
             if drawdown >= getattr(self.risk_cfg, "block_on_drawdown", 0.10):
                 message = f"<b>RISK ALERT:</b> Trading blocked: drawdown {drawdown:.3f} >= {self.risk_cfg.block_on_drawdown}"
                 logger.info(message)
-                if self.notifier: self.notifier.send_message(message, level="INFO")
+                if self.notifier:
+                    self.notifier.send_message(message, level="INFO")
                 return False
 
         # 3) Session filter
@@ -335,7 +343,7 @@ class RiskManager:
     # ---------- Manage open positions (unchanged mostly) ----------
     def manage_open_positions(self, symbol: str, current_atr: float):
         if self.cfg.data_source != "mt5":
-            return # Not applicable for CSV backtesting
+            return  # Not applicable for CSV backtesting
         """
         Manages trailing stops for open positions of a given symbol.
         Includes breakeven and ATR trailing logic, adapted for live trading.
@@ -345,7 +353,7 @@ class RiskManager:
         trailing_mult = self.cfg.get_symbol_value(symbol, 'trailing_atr_mult', 0.0)
 
         if not (breakeven_enabled or trailing_mult > 0):
-            return # No trailing logic enabled for this symbol
+            return  # No trailing logic enabled for this symbol
 
         with self.cache_lock:
             positions_to_manage = [p for p in self.open_positions_cache.values() if p.get("symbol") == symbol]
@@ -375,10 +383,10 @@ class RiskManager:
             if breakeven_enabled:
                 sl_mult = self.cfg.get_symbol_value(symbol, 'atr_multiplier_sl', 1.5)
                 one_r_price_move = sl_mult * pos_atr_at_entry
-                
+
                 is_in_profit_for_be = (direction == "long" and exit_price >= entry_price + one_r_price_move) or \
                                      (direction == "short" and exit_price <= entry_price - one_r_price_move)
-                
+
                 is_sl_not_at_be = (direction == "long" and current_sl < entry_price) or \
                                   (direction == "short" and current_sl > entry_price)
 
@@ -389,12 +397,12 @@ class RiskManager:
             if trailing_mult > 0:
                 trailing_atr_dist = current_atr * trailing_mult
                 potential_new_sl = 0.0
-                
+
                 if direction == "long":
                     potential_new_sl = exit_price - trailing_atr_dist
                     if potential_new_sl > new_sl:
                         new_sl = potential_new_sl
-                else: # Short position
+                else:  # Short position
                     potential_new_sl = exit_price + trailing_atr_dist
                     if (new_sl == 0.0) or (potential_new_sl < new_sl):
                         new_sl = potential_new_sl
@@ -424,13 +432,13 @@ class RiskManager:
                 sl_dist_from_market = 0.0
                 if direction == "long":
                     sl_dist_from_market = market_price_for_sl - new_sl
-                else: # short
+                else:  # short
                     sl_dist_from_market = new_sl - market_price_for_sl
-                
+
                 # Check if the new SL is too close to the market price
                 if sl_dist_from_market < effective_min_distance:
                     logger.info(f"[{symbol}] Skipping SL modification for ticket {ticket}. New SL {new_sl:.{price_digits}f} is too close to market price {market_price_for_sl:.{price_digits}f} (within dynamic min distance of {effective_min_distance:.{price_digits}f}).")
-                    continue # Skip to the next position
+                    continue  # Skip to the next position
 
                 request = {
                     "action": mt5.TRADE_ACTION_SLTP,
@@ -438,10 +446,10 @@ class RiskManager:
                     "sl": new_sl,
                     "tp": pos_details.get('tp', 0.0),
                 }
-                
+
                 logger.info(f"[{symbol}] Attempting to modify SL for position {ticket} to {new_sl:.{price_digits}f}")
                 result = self.mt5_client.order_send(request)
-                
+
                 if result and result.retcode == mt5.TRADE_RETCODE_DONE:
                     logger.info(f"[{symbol}] Successfully modified SL for position {ticket}.")
                     with self.cache_lock:

@@ -3,9 +3,10 @@ import pandas as pd  # type: ignore
 import numpy as np  # type: ignore
 import ta  # type: ignore
 from loguru import logger  # type: ignore
-from src.config import FeatureCfg, MtaCfg, InterMarketCfg, PriceActionCfg # Import FeatureConfig from src.config
+from src.config import FeatureCfg, MtaCfg, InterMarketCfg, PriceActionCfg  # Import FeatureConfig from src.config
 
 _TF_DELTA = {"M1": "1min", "M5": "5min", "M15": "15min", "M30": "30min", "H1": "1h", "H4": "4h", "D1": "1D"}
+
 
 def add_contextual_features(df: pd.DataFrame, mta_df: pd.DataFrame = None, inter_market_df: pd.DataFrame = None, mta_cfg: "MtaCfg" = None, im_cfg: "InterMarketCfg" = None) -> pd.DataFrame:
     """
@@ -39,6 +40,7 @@ def add_contextual_features(df: pd.DataFrame, mta_df: pd.DataFrame = None, inter
 
     return df
 
+
 def build_static_features(df: pd.DataFrame, symbol: str = None, pa_cfg: "PriceActionCfg" = None) -> pd.DataFrame:
     """
     Builds features that do not depend on tunable hyperparameters.
@@ -46,7 +48,7 @@ def build_static_features(df: pd.DataFrame, symbol: str = None, pa_cfg: "PriceAc
     """
     logger.debug(f"[{symbol}] Building static features...")
     X = pd.DataFrame(index=df.index)
-    
+
     # --- MACD ---
     macd = ta.trend.MACD(df["close"])
     X["macd"] = macd.macd()
@@ -92,7 +94,7 @@ def build_static_features(df: pd.DataFrame, symbol: str = None, pa_cfg: "PriceAc
         # Time since N-bar high/low
         rolling_high = df["high"].rolling(window=pa_cfg.swing_lookback).max()
         rolling_low = df["low"].rolling(window=pa_cfg.swing_lookback).min()
-        
+
         is_new_high = df["high"] == rolling_high
         is_new_low = df["low"] == rolling_low
 
@@ -119,6 +121,7 @@ def build_static_features(df: pd.DataFrame, symbol: str = None, pa_cfg: "PriceAc
 
     return X
 
+
 def build_dynamic_features(df: pd.DataFrame, static_features: pd.DataFrame, cfg: FeatureCfg, symbol: str = None) -> pd.DataFrame:
     """
     Builds features that depend on tunable hyperparameters, using pre-calculated static features.
@@ -140,7 +143,7 @@ def build_dynamic_features(df: pd.DataFrame, static_features: pd.DataFrame, cfg:
         X["bb_high"] = bb.bollinger_hband()
         X["bb_low"] = bb.bollinger_lband()
         X["bb_width"] = (X["bb_high"] - X["bb_low"]) / df["close"]
-        
+
         # --- Regime Detection & Mean-Reversion Features (Dynamic) ---
         adx_indicator = ta.trend.ADXIndicator(df['high'], df['low'], df['close'], window=cfg.adx_period)
         X["adx"] = adx_indicator.adx()
@@ -168,7 +171,9 @@ def build_dynamic_features(df: pd.DataFrame, static_features: pd.DataFrame, cfg:
 
     return X
 
-from src.config import Cfg # Import Cfg
+
+from src.config import Cfg  # Import Cfg
+
 
 def build_features(df: pd.DataFrame, feature_cfg: FeatureCfg, main_cfg: Cfg, symbol: str = None, mta_df: pd.DataFrame = None, inter_market_df: pd.DataFrame = None) -> pd.DataFrame:
     """
@@ -181,11 +186,12 @@ def build_features(df: pd.DataFrame, feature_cfg: FeatureCfg, main_cfg: Cfg, sym
 
     static_X = build_static_features(df, symbol, pa_cfg=pa_cfg)
     dynamic_X = build_dynamic_features(df, static_X, cfg=feature_cfg, symbol=symbol)
-    
+
     # Add contextual features
     dynamic_X = add_contextual_features(dynamic_X, mta_df=mta_df, inter_market_df=inter_market_df, mta_cfg=mta_cfg, im_cfg=im_cfg)
-    
+
     return dynamic_X
+
 
 def make_labels(df: pd.DataFrame, horizon: int) -> pd.Series:
     fwd = df["close"].pct_change(horizon).shift(-horizon)

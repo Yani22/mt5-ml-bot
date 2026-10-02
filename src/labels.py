@@ -1,5 +1,6 @@
 import pandas as pd  # type: ignore
 
+
 def generate_labels(df: pd.DataFrame, horizon: int, min_pct_change: float = 0.0) -> pd.Series:
     """
     Generates binary labels based on forward percentage change, with a minimum threshold.
@@ -12,6 +13,7 @@ def generate_labels(df: pd.DataFrame, horizon: int, min_pct_change: float = 0.0)
     y = (fwd > min_pct_change).astype(int)
 
     return y
+
 
 def generate_long_short_labels(df: pd.DataFrame, horizon: int, min_pct_change: float = 0.0) -> tuple[pd.Series, pd.Series]:
     """

@@ -6,7 +6,7 @@ import glob
 from typing import Any, Dict
 from loguru import logger  # type: ignore
 import numpy as np  # type: ignore
-import datetime # Import datetime module
+import datetime  # Import datetime module
 
 
 def _load_json(path: str) -> Dict[str, Any]:
@@ -101,7 +101,7 @@ def _merge_bandit_states(lstate: Dict[str, Any], bstate: Dict[str, Any], warmsta
         l_band = lstate.get(bandit_key)
 
         if not b_band:
-            continue # Nothing to merge from backtest
+            continue  # Nothing to merge from backtest
 
         if not l_band:
             # If live bandit state doesn't exist, create it from backtest state
@@ -114,26 +114,27 @@ def _merge_bandit_states(lstate: Dict[str, Any], bstate: Dict[str, Any], warmsta
         for key in ["counts", "sum_rewards", "sum_squared_rewards"]:
             if key in b_band:
                 merged_band[key] = _merge_numeric_lists(l_band.get(key, []), b_band.get(key, []), warmstart_weight)
-        
+
         # Merge context matrices
         if "A" in b_band:
             merged_band["A"] = _merge_matrix(l_band.get("A", []), b_band.get("A", []), warmstart_weight)
         if "b" in b_band:
             merged_band["b"] = _merge_matrix(l_band.get("b", []), b_band.get("b", []), warmstart_weight)
-        
+
         # Copy meta fields if they are missing in the live bandit state
         for meta in ["num_arms", "prior_mean", "prior_var", "min_var", "dim", "lambda_prior", "noise_var"]:
             if meta not in merged_band and meta in b_band:
                 merged_band[meta] = b_band[meta]
-        
+
         merged[bandit_key] = merged_band
 
     # Grid values: prefer live, but take backtest if live is missing
     for grid_key in ["atr_grid_values", "min_prob_grid_long_values", "min_prob_grid_short_values"]:
         if grid_key not in merged and grid_key in bstate:
             merged[grid_key] = bstate[grid_key]
-    
+
     return merged
+
 
 def merge_warmstart(backtest_state_path: str | None, live_state_path: str, warmstart_weight: float = 1.0) -> None:
     """

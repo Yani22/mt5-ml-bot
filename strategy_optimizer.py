@@ -3,10 +3,10 @@ import optuna  # type: ignore
 import numpy as np  # type: ignore
 from loguru import logger  # type: ignore
 import os
-import copy # Import copy module for deepcopy
+import copy  # Import copy module for deepcopy
 from sklearn.metrics import roc_auc_score  # type: ignore
 from backtester import HybridBacktester
-from src.config import Cfg, RiskCfg # Import Cfg and RiskCfg
+from src.config import Cfg, RiskCfg  # Import Cfg and RiskCfg
 from src.utils import setup_logging
 
 # --- Load Configuration ---
@@ -21,6 +21,7 @@ STORAGE_PATH = "sqlite:///optuna_results/strategy_optimization_v2.db"
 PARAMS_OUTPUT_DIR = "optuna_results/strategy_params"
 PARAMS_OUTPUT_FILE = os.path.join(PARAMS_OUTPUT_DIR, "best_strategy_params.json")
 
+
 def run_backtest_for_trial(trial: optuna.Trial, params):
     """
     Runs a full backtest for a given set of strategy parameters.
@@ -28,12 +29,12 @@ def run_backtest_for_trial(trial: optuna.Trial, params):
     """
     # Create a deep copy of the base Cfg object for this trial
     trial_cfg_obj = copy.deepcopy(base_cfg_obj)
-    
+
     # --- Temporarily disable safety features for pure optimization ---
     logger.info("Temporarily disabling safety features (drawdown blocks, watchdog) for this optimization trial.")
     trial_cfg_obj.risk.block_on_drawdown = 1.0  # Set to 100% to effectively disable
     if hasattr(trial_cfg_obj, 'watchdog'):
-        trial_cfg_obj.watchdog.enabled = False # Explicitly disable watchdog
+        trial_cfg_obj.watchdog.enabled = False  # Explicitly disable watchdog
         trial_cfg_obj.watchdog.max_consecutive_losses = 0  # Redundant if disabled, but for clarity
         trial_cfg_obj.watchdog.cooldown_hours = 0.0
 
@@ -48,9 +49,9 @@ def run_backtest_for_trial(trial: optuna.Trial, params):
     # Instantiate HybridBacktester with the trial-specific Cfg object
     # The backtester will now use its updated internal logic to fetch the correct data
     bt = HybridBacktester(trial_cfg_obj)
-    
+
     # Run backtester, passing the actual trial object for pruning
-    pruning_interval = trial_cfg_obj.optuna_pruning_interval # Use configurable pruning interval
+    pruning_interval = trial_cfg_obj.optuna_pruning_interval  # Use configurable pruning interval
     trades_df, eq_df = bt.run(trial=trial, pruning_interval=pruning_interval)
 
     # Save the state of the risk controller for this specific trial
@@ -70,7 +71,7 @@ def run_backtest_for_trial(trial: optuna.Trial, params):
 
     # Calculate Sharpe Ratio as the objective metric from the equity curve
     returns = eq_df["equity"].pct_change().dropna()
-    
+
     # Avoid division by zero; if std is 0, Sharpe is 0.
     # Annualize Sharpe Ratio based on timeframe
     timeframe_minutes = trial_cfg_obj.timeframe_minutes()
@@ -78,14 +79,15 @@ def run_backtest_for_trial(trial: optuna.Trial, params):
         if returns.std() != 0:
             logger.error("timeframe_minutes is None, cannot annualize Sharpe Ratio. Check config.yaml timeframe setting.")
             raise ValueError("Invalid timeframe configuration for Sharpe Ratio annualization.")
-        annualization_factor = 0.0 # If std is 0, Sharpe is 0 anyway
+        annualization_factor = 0.0  # If std is 0, Sharpe is 0 anyway
     else:
         # Assuming 252 trading days in a year, and 24*60 minutes in a day
         annualization_factor = np.sqrt(252 * (24 * 60 / timeframe_minutes))
     sharpe_ratio = returns.mean() / returns.std() * annualization_factor if returns.std() != 0 else 0.0
-    
+
     logger.info(f"Trial completed. Sharpe Ratio: {sharpe_ratio:.4f}")
     return sharpe_ratio
+
 
 def objective(trial: optuna.Trial):
     """
@@ -94,7 +96,7 @@ def objective(trial: optuna.Trial):
     """
     # No longer suggesting risk parameters, as they are handled by RiskController
     # Optuna can still be used to optimize other parameters if needed, or just run a single backtest.
-    params = {} # Empty params, as RiskController handles risk parameters
+    params = {}  # Empty params, as RiskController handles risk parameters
 
     # --- Feature Tuning (e.g., roc_lags) ---
     if trial_cfg_obj.features.roc_lags_options:
@@ -114,6 +116,7 @@ def objective(trial: optuna.Trial):
         # Prune the trial by returning a very low value
         return -1.0
 
+
 def main():
     """
     Main function to run the Optuna study.
@@ -121,7 +124,7 @@ def main():
     setup_logging()
     logger.info(f"Starting Optuna study '{STUDY_NAME}' with {base_cfg_obj.optuna_n_trials} trials.")
     logger.info(f"Storage: {STORAGE_PATH}")
-    
+
     study = optuna.create_study(
         study_name=STUDY_NAME,
         storage=STORAGE_PATH,
@@ -130,12 +133,12 @@ def main():
         pruner=optuna.pruners.MedianPruner(
             n_startup_trials=10,  # Run 10 trials fully before starting pruning
             n_warmup_steps=500,   # A trial must complete 500 bars before being pruned
-            interval_steps=base_cfg_obj.optuna_pruning_interval # Align with backtester's pruning interval
+            interval_steps=base_cfg_obj.optuna_pruning_interval  # Align with backtester's pruning interval
         )
     )
-    
+
     study.optimize(objective, n_trials=N_TRIALS, n_jobs=base_cfg_obj.n_jobs)
-    
+
     logger.info("Optimization finished.")
     logger.info(f"Best trial number: {study.best_trial.number}")
     # The best parameters from Optuna are no longer directly risk parameters
@@ -169,6 +172,7 @@ def main():
         logger.error(f"Could not find state file for best trial: {best_trial_state_file}")
     except Exception as e:
         logger.error(f"An error occurred while saving the best trial's state: {e}")
+
 
 if __name__ == "__main__":
     main()

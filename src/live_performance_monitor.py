@@ -4,21 +4,22 @@ from loguru import logger  # type: ignore
 import datetime
 from collections import deque
 from typing import List, Optional, Tuple
-import json # NEW
-import os # NEW
+import json  # NEW
+import os  # NEW
 
 from src.config import Cfg
-from src.trade_types import ClosedTrade # Import the new ClosedTrade dataclass
+from src.trade_types import ClosedTrade  # Import the new ClosedTrade dataclass
+
 
 class LivePerformanceMonitor:
     def __init__(self, cfg: Cfg):
         self.cfg = cfg
-        self.closed_trades: deque[ClosedTrade] = deque() # Use deque for efficient appending/popping
+        self.closed_trades: deque[ClosedTrade] = deque()  # Use deque for efficient appending/popping
         self.equity_curve: deque[Tuple[datetime.datetime, float]] = deque()
-        self.peak_equity: float = cfg.initial_equity # Assuming initial_equity is set in Cfg or passed
+        self.peak_equity: float = cfg.initial_equity  # Assuming initial_equity is set in Cfg or passed
         self.current_equity: float = cfg.initial_equity
         self.last_check_time: Optional[datetime.datetime] = None
-        self.last_ensemble_auc: float = 0.0 # To track the latest AUC from retraining
+        self.last_ensemble_auc: float = 0.0  # To track the latest AUC from retraining
 
         # Ensure initial_equity is set in Cfg or handle it
         if not hasattr(cfg, 'initial_equity'):
@@ -75,7 +76,7 @@ class LivePerformanceMonitor:
 
             equity_curve_data = [(ts.isoformat(), eq) for ts, eq in self.equity_curve]
 
-            self.last_check_time = datetime.datetime.now(datetime.timezone.utc) # Update last_check_time before saving
+            self.last_check_time = datetime.datetime.now(datetime.timezone.utc)  # Update last_check_time before saving
 
             state = {
                 "closed_trades": closed_trades_data,
@@ -142,4 +143,4 @@ class LivePerformanceMonitor:
         except Exception as e:
             logger.error(f"Failed to load LivePerformanceMonitor state from {state_path}: {e}")
             # Optionally, re-initialize to a clean state if loading fails
-            self.__init__(self.cfg) # Re-initialize to default state
+            self.__init__(self.cfg)  # Re-initialize to default state

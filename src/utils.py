@@ -11,7 +11,7 @@ from src.ensemble import Ensemble
 from src.config import Cfg
 from src import data_manager
 from src.data import merge_features_labels
-from src.time_utils import timeframe_to_seconds, timeframe_to_mt5_timeframe # NEW IMPORT
+from src.time_utils import timeframe_to_seconds, timeframe_to_mt5_timeframe  # NEW IMPORT
 import glob
 import numpy as np
 import csv
@@ -30,12 +30,14 @@ METRICS_HEADERS = [
     "rule_scale", "reward", "equity", "peak_equity", "drawdown", "ensemble_auc"
 ]
 
+
 def _initialize_metrics_csv():
     if not os.path.exists(METRICS_CSV_FILE):
         with open(METRICS_CSV_FILE, 'w', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(METRICS_HEADERS)
         logger.info(f"Initialized metrics CSV file: {METRICS_CSV_FILE}")
+
 
 def log_metrics_to_csv(data: Dict[str, Any]):
     with open(METRICS_CSV_FILE, 'a', newline='') as f:
@@ -44,6 +46,7 @@ def log_metrics_to_csv(data: Dict[str, Any]):
         writer.writerow(row)
         f.flush()
         os.fsync(f.fileno())
+
 
 def setup_logging(level="INFO", to_file=True, rotate="10 MB", retention="7 days"):
     logger.remove()
@@ -55,9 +58,10 @@ def setup_logging(level="INFO", to_file=True, rotate="10 MB", retention="7 days"
         os.makedirs("logs", exist_ok=True)
         logger.add("logs/bot.log", level=level, rotation=rotate, retention=retention, enqueue=True)
 
+
 def load_optuna_params(symbol: str, cfg: Cfg) -> dict | None:
     # symbol names in params are saved without '#'
-    file_path = os.path.join(PARAMS_DIR, f"{symbol.replace('#','')}_best_params.pkl")
+    file_path = os.path.join(PARAMS_DIR, f"{symbol.replace('#', '')}_best_params.pkl")
     if not os.path.exists(file_path):
         logger.warning(f"[{symbol}] No Optuna params found at {file_path}, using defaults from config.")
         return None
@@ -81,6 +85,7 @@ def load_optuna_params(symbol: str, cfg: Cfg) -> dict | None:
 
     logger.debug(f"[{symbol}] Loaded Optuna best params from {file_path}")
     return loaded_params
+
 
 def get_training_data(cfg: Cfg, symbol: str, feature_cfg: FeatureCfg, count: int | None = None, source: str = "csv", load_all_data: bool = False, build_dynamic: bool = True, min_pct_change: float = 0.0, prediction_horizon: int = 0, mta_df: pd.DataFrame | None = None, inter_market_df: pd.DataFrame | None = None, return_long_short_labels: bool = False):
     """
@@ -134,10 +139,10 @@ def get_training_data(cfg: Cfg, symbol: str, feature_cfg: FeatureCfg, count: int
 
     # --- 3. Build Feature Set ---
     logger.info(f"[{symbol}] Building full feature set...")
-    
+
     # Build all features using the unified build_features function
     X = build_features(df.copy(), feature_cfg, cfg, symbol=symbol, mta_df=mta_df, inter_market_df=inter_market_df)
-    
+
     if return_long_short_labels:
         y_long, y_short = generate_long_short_labels(df, prediction_horizon, min_pct_change)
         # Align X and y by index
@@ -158,11 +163,11 @@ def get_training_data(cfg: Cfg, symbol: str, feature_cfg: FeatureCfg, count: int
         if return_long_short_labels:
             return X, y_long, y_short, df
         else:
-            return X, y, df # Return X, y, df for consistency
+            return X, y, df  # Return X, y, df for consistency
 
     # For trainer/backtester, X and y are already built
     if return_long_short_labels:
-        data = merge_features_labels(df, X, y_long) # merge with y_long for consistency
+        data = merge_features_labels(df, X, y_long)  # merge with y_long for consistency
     else:
         data = merge_features_labels(df, X, y)
 
@@ -171,17 +176,18 @@ def get_training_data(cfg: Cfg, symbol: str, feature_cfg: FeatureCfg, count: int
             return pd.DataFrame(), X if X is not None else pd.DataFrame(), pd.Series(dtype="float64"), pd.Series(dtype="float64")
         else:
             return pd.DataFrame(), X if X is not None else pd.DataFrame(), y if y is not None else pd.Series(dtype="float64")
-    
+
     logger.info(f"[{symbol}] Data pipeline complete. Final shape: {data.shape}")
     if return_long_short_labels:
         return data, X, y_long, y_short
     else:
         return data, X, y
 
+
 def load_ensemble(cfg: Cfg, symbol: str, model_type: str, model_params: dict | None = None) -> Ensemble:
     # New: ensemble is saved in a directory, not a single file
-    model_dir_path = os.path.join(MODEL_DIR, f"{symbol.replace('#','')}_ensemble_{model_type}")
-    
+    model_dir_path = os.path.join(MODEL_DIR, f"{symbol.replace('#', '')}_ensemble_{model_type}")
+
     # Load model_params if not provided
     if model_params is None:
         model_params = load_optuna_params(symbol, cfg)
@@ -198,15 +204,17 @@ def load_ensemble(cfg: Cfg, symbol: str, model_type: str, model_params: dict | N
     ens = Ensemble(cfg, model_params=model_params)
     return ens
 
+
 def save_ensemble(ensemble: Ensemble, symbol: str, model_type: str):
     # New: save to a directory
-    model_dir_path = os.path.join(MODEL_DIR, f"{symbol.replace('#','')}_ensemble_{model_type}")
+    model_dir_path = os.path.join(MODEL_DIR, f"{symbol.replace('#', '')}_ensemble_{model_type}")
     try:
         # Use the new instance method to save
         ensemble.save(model_dir_path)
         logger.info(f"[{symbol}] Ensemble model saved to directory {model_dir_path}")
     except Exception as e:
         logger.error(f"[{symbol}] Failed to save ensemble: {e}")
+
 
 def safe_retrain_ensemble(cfg: Cfg, symbol: str, ens_old: Ensemble, X_train: pd.DataFrame, y_train: pd.Series, prices: pd.Series, dry_run: bool = False, model_type: str = "long", model_params: dict | None = None) -> Ensemble:
     """
@@ -227,7 +235,7 @@ def safe_retrain_ensemble(cfg: Cfg, symbol: str, ens_old: Ensemble, X_train: pd.
         The retrained ensemble if it's better than the old one, otherwise the old ensemble.
     """
     logger.info(f"[{symbol}] Starting safe retraining...")
-    
+
     old_auc = getattr(ens_old, "ensemble_cv_auc_", getattr(ens_old, "cv_auc_", None))
 
     # Create a new ensemble to avoid feature mismatch issues
@@ -256,16 +264,17 @@ def safe_retrain_ensemble(cfg: Cfg, symbol: str, ens_old: Ensemble, X_train: pd.
         logger.exception(f"[{symbol}] Retraining failed: {e}")
         return ens_old
 
+
 def log_symbol_specific_configs(cfg: "Cfg"):
     """Logs the resolved symbol-specific configurations to verify overrides."""
     logger.info("--- Verifying Symbol-Specific Configurations ---")
     logger.info(f"Thompson Sampling Enabled: {cfg.thompson_sampling.enabled}")
-    
+
     # List of all keys that can be overridden per symbol
     keys_to_check = [
-        'min_prob_long', 'min_prob_short', 'atr_multiplier_sl', 
-        'atr_multiplier_tp', 'trailing_atr_mult', 'min_ensemble_auc', 
-        'min_auc_improvement', 'atr_grid', 'min_prob_grid_long', 
+        'min_prob_long', 'min_prob_short', 'atr_multiplier_sl',
+        'atr_multiplier_tp', 'trailing_atr_mult', 'min_ensemble_auc',
+        'min_auc_improvement', 'atr_grid', 'min_prob_grid_long',
         'min_prob_grid_short'
     ]
 
@@ -284,7 +293,7 @@ def log_symbol_specific_configs(cfg: "Cfg"):
 
             # Determine if an override was used. This is a heuristic for logging.
             is_override = " (Override)" if resolved_value != global_default and global_default is not None else " (Default)"
-            
+
             # For list (grid) comparison, the above is not sufficient. Let's refine.
             if isinstance(resolved_value, list):
                 if sorted(resolved_value) != sorted(global_default):
@@ -293,6 +302,7 @@ def log_symbol_specific_configs(cfg: "Cfg"):
                     is_override = " (Default)"
 
             logger.info(f"  > {key}: {resolved_value}{is_override}")
+
 
 def log_startup_summary(cfg: "Cfg"):
     """Logs a summary of key configuration settings at startup."""
@@ -305,6 +315,7 @@ def log_startup_summary(cfg: "Cfg"):
     logger.info(f"Max Portfolio Risk: {cfg.risk.max_portfolio_risk}")
     logger.info(f"Dynamic Risk Enabled: {cfg.risk.dynamic_risk['enabled']}")
     logger.info("--- End of Summary ---")
+
 
 def ensure_min_grid_size(thresholds: list[float], best_thr: float, min_size: int = 5, spread: float = 0.02) -> list[float]:
     """Ensures a list of thresholds has at least min_size elements, expanding around best_thr if needed."""

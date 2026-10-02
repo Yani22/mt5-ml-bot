@@ -3,6 +3,7 @@ import requests
 from loguru import logger  # type: ignore
 from src.config import Cfg
 
+
 class TelegramNotifier:
     def __init__(self, cfg: Cfg):
         self.cfg = cfg
@@ -25,12 +26,12 @@ class TelegramNotifier:
         payload = {
             "chat_id": self.chat_id,
             "text": full_message,
-            "parse_mode": "HTML" # Allows basic formatting like bold, italics
+            "parse_mode": "HTML"  # Allows basic formatting like bold, italics
         }
 
         try:
             response = requests.post(self.base_url, data=payload)
-            response.raise_for_status() # Raise an exception for HTTP errors
+            response.raise_for_status()  # Raise an exception for HTTP errors
             logger.debug(f"Telegram message sent: {message}")
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to send Telegram message: {e}")

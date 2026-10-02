@@ -1,4 +1,4 @@
-#src/data_manager.py
+# src/data_manager.py
 from __future__ import annotations
 import os
 import tempfile
@@ -13,10 +13,12 @@ from src.labels import generate_labels
 import time
 from src.mt5_client import MT5Client
 
+
 def ensure_dir(path: str):
     if path is None:
         return
     os.makedirs(path, exist_ok=True)
+
 
 class DataManager:
     def __init__(self, cfg: Cfg):
@@ -37,15 +39,14 @@ class DataManager:
                 logger.info("MT5Client connected successfully in DataManager.")
                 break
             else:
-                logger.warning(f"MT5Client connection attempt {i+1}/{max_retries} failed in DataManager. Retrying in 5 seconds...")
+                logger.warning(f"MT5Client connection attempt {i + 1}/{max_retries} failed in DataManager. Retrying in 5 seconds...")
                 time.sleep(5)
         if not self.mt5_client.is_connected():
             logger.error("Failed to connect MT5Client in DataManager after multiple retries.")
             # Optionally, raise an exception or handle this failure more gracefully
 
-
     def _local_csv_path(self, symbol: str, timeframe: str) -> str:
-        fname = f"{symbol.replace('#','')}_{timeframe}.csv"
+        fname = f"{symbol.replace('#', '')}_{timeframe}.csv"
         return os.path.join(self.raw_data_dir, fname)
 
     def _atomic_write_df(self, df: pd.DataFrame, path: str, fmt: str = "csv"):
@@ -108,8 +109,8 @@ class DataManager:
 
     def _fetch_bars_from_mt5_chunked(self, symbol: str, timeframe: str, count: int) -> pd.DataFrame:
         import MetaTrader5 as mt5  # type: ignore
-        import datetime # NEW
-        from src.time_utils import timeframe_to_seconds # NEW
+        import datetime  # NEW
+        from src.time_utils import timeframe_to_seconds  # NEW
 
         TF_MAP = {
             "M1": getattr(mt5, "TIMEFRAME_M1", None),
@@ -133,7 +134,7 @@ class DataManager:
             if rates is None or len(rates) == 0:
                 logger.warning(f"[{symbol}] MT5 returned no bars.")
                 return pd.DataFrame()
-            
+
             df = pd.DataFrame(rates)
             if "time" not in df.columns:
                 logger.warning(f"[{symbol}] fetched data missing 'time' column — returning empty DataFrame")
@@ -141,13 +142,13 @@ class DataManager:
             df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
             df = df.set_index("time").sort_index()
             df = df.rename(columns={"tick_volume": "volume"})
-            
+
             # Drop the last bar if it's the currently forming one
             # This ensures all data used is from fully closed bars
             if not df.empty:
                 df = df.iloc[:-1]
 
-            return df[["open","high","low","close","volume"]].copy()
+            return df[["open", "high", "low", "close", "volume"]].copy()
         except Exception as e:
             logger.exception(f"[{symbol}] Error fetching bars: {e}")
             return pd.DataFrame()
@@ -155,10 +156,10 @@ class DataManager:
     def bootstrap_history(self, symbol: str, initial_bars: int, timeframe: Optional[str] = None):
         target_timeframe = timeframe if timeframe else self.cfg.timeframe
         path = self._local_csv_path(symbol, target_timeframe)
-        
+
         # 1. Load existing full local history
         current_local_history = self.load_local_history(symbol, target_timeframe)
-        
+
         # 2. Fetch a small chunk of the absolute latest data from MT5 and append it
         # This ensures the local history is fresh before checking its length.
         logger.info(f"[{symbol}] Bootstrapping: Fetching latest 200 bars from MT5 to refresh local history for {target_timeframe}.")
@@ -174,7 +175,7 @@ class DataManager:
         if len(current_local_history) < initial_bars:
             bars_to_fetch_more = initial_bars - len(current_local_history)
             logger.info(f"[{symbol}] Bootstrapping: Local history for {target_timeframe} still short. Have={len(current_local_history)}, Need={initial_bars}, Fetching={bars_to_fetch_more} more bars.")
-            
+
             # Fetch the remaining required bars. Start from the end of current_local_history if possible.
             # For simplicity, we'll fetch the total initial_bars again, and append_new_bars will handle duplicates.
             # A more optimized approach would be to fetch from a specific date/time.
@@ -193,7 +194,7 @@ class DataManager:
 
         # 2. Fetch only a small number of recent bars to get the absolute latest data.
         # This is more efficient than fetching the entire history every time.
-        recent_data = self._fetch_bars_from_mt5_chunked(symbol, self.cfg.timeframe, 200) # Fetch last 200 bars
+        recent_data = self._fetch_bars_from_mt5_chunked(symbol, self.cfg.timeframe, 200)  # Fetch last 200 bars
 
         # 3. Combine and de-duplicate.
         if not recent_data.empty:
@@ -224,7 +225,6 @@ class DataManager:
                 # Load the full (updated) local history for feature building
                 mta_df = self.load_local_history(symbol, self.cfg.context_features.mta.timeframe, count=self.cfg.history_bars)
 
-
         inter_market_df = None
         if self.cfg.context_features.inter_market.enabled:
             im_sym = self.cfg.context_features.inter_market.symbol
@@ -242,7 +242,7 @@ class DataManager:
 
         # 3. Build features. For live data, labels are not needed.
         X = build_features(data.copy(), feature_cfg, self.cfg, symbol=symbol, mta_df=mta_df, inter_market_df=inter_market_df)
-        
+
         # Create an empty dataframe for y to match function signature, it's not used in live trading.
         y = pd.DataFrame()
 
@@ -254,7 +254,7 @@ class DataManager:
 
         # Drop the last row to ensure we only use closed bars
         if not data.empty:
-            pass # Removed redundant iloc[:-1] calls to fix data misalignment
+            pass  # Removed redundant iloc[:-1] calls to fix data misalignment
 
         return data, X, y
 
@@ -269,7 +269,7 @@ class DataManager:
             mta_df = self.load_local_history(symbol, self.cfg.context_features.mta.timeframe, count=count)
             if mta_df.empty:
                 logger.warning(f"[{symbol}] No MTA data loaded for timeframe {self.cfg.context_features.mta.timeframe}. Disabling MTA features.")
-                self.cfg.context_features.mta.enabled = False # Temporarily disable to prevent errors
+                self.cfg.context_features.mta.enabled = False  # Temporarily disable to prevent errors
                 mta_df = None
             else:
                 logger.info(f"[{symbol}] Successfully loaded MTA data for timeframe {self.cfg.context_features.mta.timeframe}.")
@@ -281,7 +281,7 @@ class DataManager:
             inter_market_df = self.load_local_history(im_sym, self.cfg.timeframe, count=count)
             if inter_market_df.empty:
                 logger.warning(f"[{symbol}] No Inter-Market data loaded for symbol {im_sym}. Disabling Inter-Market features.")
-                self.cfg.context_features.inter_market.enabled = False # Temporarily disable to prevent errors
+                self.cfg.context_features.inter_market.enabled = False  # Temporarily disable to prevent errors
                 inter_market_df = None
             else:
                 logger.info(f"[{symbol}] Successfully loaded Inter-Market data for symbol {im_sym}.")
@@ -292,7 +292,7 @@ class DataManager:
         common_idx = X.index.intersection(y.index)
         X = X.loc[common_idx]
         y = y.loc[common_idx]
-        data = data.loc[common_idx] # Align data here
+        data = data.loc[common_idx]  # Align data here
 
         logger.debug(f"[{symbol}] load_cached returning X with shape: {X.shape}")
 

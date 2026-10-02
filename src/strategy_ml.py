@@ -27,6 +27,7 @@ except Exception:
 # Raised for production / retrain safety
 MIN_SAMPLES_FOR_FIT = 1000
 
+
 class MLStrategy:
     def __init__(self, model="lgbm", random_state: int = 42, calibrate: bool = True, cv_samples_per_split: int = 300, **kwargs):
         self.model_name = model.lower()
@@ -36,7 +37,6 @@ class MLStrategy:
         model_params = kwargs.copy()
         device = model_params.pop("device", "cpu")
         self._calibrator = None
-
 
         if self.model_name == "rf":
             base = RandomForestClassifier(
@@ -102,7 +102,7 @@ class MLStrategy:
         # Save the core model
         if self.model_name == "xgb":
             self._pipe.named_steps['clf'].save_model(model_file)
-        else: # rf, sgd, etc.
+        else:  # rf, sgd, etc.
             with open(model_file, "wb") as f:
                 pickle.dump(self._pipe, f)
 
@@ -110,7 +110,7 @@ class MLStrategy:
         if self._calibrator:
             with open(calibrator_file, "wb") as f:
                 pickle.dump(self._calibrator, f)
-        
+
         # Save metadata
         meta = {"cv_auc_": getattr(self, "cv_auc_", 0.5)}
         with open(meta_file, "wb") as f:
@@ -131,10 +131,10 @@ class MLStrategy:
         # Load the core model
         if self.model_name == "xgb":
             self._pipe.named_steps['clf'].load_model(model_file)
-        else: # rf, sgd, etc.
+        else:  # rf, sgd, etc.
             with open(model_file, "rb") as f:
                 self._pipe = pickle.load(f)
-        
+
         # Load calibrator if it exists
         if os.path.exists(calibrator_file):
             with open(calibrator_file, "rb") as f:
@@ -147,7 +147,7 @@ class MLStrategy:
             with open(meta_file, "rb") as f:
                 meta = pickle.load(f)
             self.cv_auc_ = meta.get("cv_auc_", 0.5)
-        
+
         logger.info(f"Loaded model {self.model_name} from {path}")
 
     def _sanitize(self, X: pd.DataFrame) -> pd.DataFrame:
