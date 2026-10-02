@@ -29,6 +29,7 @@ from typing import List
 
 import threading
 from src.live_guard import require_live_permission
+from src.state_paths import apply_mode_state_paths
 from src.symbol_processor import SymbolProcessor
 from src.retraining import _check_and_trigger_retraining, _handle_model_acceptance
 from src.utils import _initialize_metrics_csv
@@ -111,6 +112,7 @@ def run(dry_run: bool = True):
     require_live_permission(dry_run)
     RECONNECTION_RETRY_SECONDS = 60
     cfg = Cfg.from_yaml("config.yaml")
+    apply_mode_state_paths(cfg, dry_run)  # dry-run learning must not seed live bandit/monitor state
     setup_logging(level=cfg.logging['level'])
 
     cfg.dashboard_every_bars = getattr(cfg, "dashboard_every_bars", 10)
