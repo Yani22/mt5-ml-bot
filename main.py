@@ -28,6 +28,7 @@ import numpy as np
 from typing import List
 
 import threading
+from src.live_guard import require_live_permission
 from src.symbol_processor import SymbolProcessor
 from src.retraining import _check_and_trigger_retraining, _handle_model_acceptance
 from src.utils import _initialize_metrics_csv
@@ -105,8 +106,9 @@ def _process_closed_trades(exe, live_monitor, risk_controller, ens_per_symbol_lo
             logger.info(f"Global equity updated to: {account_info.equity}")
 
 
-def run(dry_run: bool = False):
+def run(dry_run: bool = True):
     """ Production-ready main loop for hybrid adaptive MT5 ML bot. """
+    require_live_permission(dry_run)
     RECONNECTION_RETRY_SECONDS = 60
     cfg = Cfg.from_yaml("config.yaml")
     setup_logging(level=cfg.logging['level'])
@@ -343,6 +345,6 @@ def run(dry_run: bool = False):
 
 
 if __name__ == "__main__":
-    # Default to dry-run to be safe; change to False when you are ready.
+    # Dry-run by default. Live orders need run(dry_run=False) AND ALLOW_LIVE_TRADING=1 in the environment.
     run(dry_run=True)
     # run(dry_run=False)
