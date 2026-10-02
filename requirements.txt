@@ -1,16 +1,15 @@
-pandas>=2.2
-numpy>=1.26
-scikit-learn>=1.5
-lightgbm>=4.3
-xgboost>=2.1
-ta>=0.11
-scipy>=1.13
-joblib>=1.4
-pyyaml>=6.0
-python-dotenv>=1.0
-MetaTrader5>=5.0 # this would failed in ubuntu
-loguru>=0.7
-optuna>=3.6
-quantstats>=0.0.62
-IPython
-ruamel.yaml
+# Pinned to the versions the tests pass on (Python 3.14).
+pandas==3.0.6
+numpy==2.5.3
+scikit-learn==1.9.1
+lightgbm==4.7.0
+xgboost==3.4.1
+ta==0.11.0
+joblib==1.6.0
+pyyaml==6.0.3
+python-dotenv==1.2.4
+loguru==0.7.3
+optuna==5.0.0
+quantstats==0.0.86
+# Windows only (no Linux wheel); CI and Linux installs filter this line out.
+MetaTrader5>=5.0
