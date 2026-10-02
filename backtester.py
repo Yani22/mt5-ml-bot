@@ -28,6 +28,8 @@ class HybridBacktester:
         log_symbol_specific_configs(self.cfg)  # NEW
         self.equity = cfg.backtesting.initial_equity
         self.initial_equity = cfg.backtesting.initial_equity  # Store initial equity for drawdown pruning
+        self.signals = 0  # trade signals that reached position sizing
+        self.skipped_for_size = 0  # ...of which sizing rejected (lot below broker minimum or risk caps)
         self.consecutive_losses = 0  # NEW: Efficiently track consecutive losses
         self.positions: list[SimPosition] = []
         self.equity_curve = []
@@ -325,6 +327,7 @@ class HybridBacktester:
                     logger.info(f"[{sym}] Short trade blocked due to low ensemble confidence (AUC={ens_short.ensemble_cv_auc_:.4f} < {min_ensemble_auc:.4f}).")
 
             if direction:
+                self.signals += 1
                 total_open_risk = sum(p.entry_equity * p.risk_fraction for p in self.positions if p.status == "open")
 
                 # Determine pip_value for position sizing
@@ -354,6 +357,7 @@ class HybridBacktester:
                         f"[{sym}][{bar_time}] Opened {direction} position at {price:.5f}. "f"Lots: {lots:.2f}, SL: {sl:.5f}, TP: {tp:.5f}, AUC: {auc_score:.4f}"
                     )
                 else:
+                    self.skipped_for_size += 1
                     logger.info(f"[{sym}] Trade skipped due to risk limits or position size zero.")
             else:
                 logger.info(f"[{sym}] No trade signal. Probs: (Long: {prob_long:.3f}, Short: {prob_short:.3f}) ")
@@ -405,6 +409,11 @@ class HybridBacktester:
             logger.exception(f"Failed to generate QuantStats report: {e}")
 
         logger.info(f"=== Hybrid Adaptive Backtest Complete. Final Equity: {self.equity:.2f} === ")
+        if self.signals and self.skipped_for_size / self.signals > 0.2:
+            logger.warning(
+                f"{self.skipped_for_size}/{self.signals} signals were skipped at sizing (lot below the broker minimum or risk caps). "
+                f"initial_equity={self.initial_equity} is probably too small for this symbol; results will not match a real account."
+            )
         logger.info("Results saved to 'results/' directory.")
 
         # NEW: Generate Thompson Sampling parameter evolution report

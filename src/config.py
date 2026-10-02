@@ -26,7 +26,6 @@ class InterMarketCfg:
 @dataclass
 class BacktestingCfg:
     initial_equity: float = 10000.0
-    simulation_volume_min: float = 0.01
     enable_retraining: bool = True
 
 
