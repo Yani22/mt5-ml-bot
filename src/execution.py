@@ -21,6 +21,15 @@ import datetime
 from .notifier import TelegramNotifier
 
 
+# MT5 trade server return codes (MQL5 docs, "Return Codes of the Trade Server")
+RETCODE_DONE = 10009
+RETCODE_DONE_PARTIAL = 10010
+FILLED_RETCODES = (RETCODE_DONE, RETCODE_DONE_PARTIAL)
+# Rejections that guarantee nothing was executed: requote, prices changed, no quotes, too frequent requests.
+# Only these may be sent again; any other result (none, an exception, timeout, a rejection) is sent once.
+RETRY_SAFE_RETCODES = (10004, 10020, 10021, 10024)
+
+
 @dataclass
 class OrderResult:
     ok: bool
@@ -248,19 +257,59 @@ class Execution:
         return out
 
     def _send_order_with_retry(self, request: dict, retries: int = -1, delay: float = 1.0):
+        """Sends the order, again only after a return code that guarantees it was not executed (RETRY_SAFE_RETCODES).
+        A missing result, an exception, a timeout or any other code stops after one send: the order may exist at the broker,
+        and the caller looks for it instead (_find_new_position). Returns the last real result, or None."""
         num_retries = self.risk.cfg.trading_costs.defaults.retry_order_send if retries == -1 else retries
         last = None
         for attempt in range(1, num_retries + 1):
             try:
-                result = self.mt5_client.order_send(request)
-                last = result
-                if result is not None and getattr(result, "retcode", None) == 10009:
-                    return result
-                logger.warning(f"Order send failed attempt {attempt}/{retries}: {result}")
+                last = self.mt5_client.order_send(request)
             except Exception as e:
-                logger.exception(f"Order send exception attempt {attempt}: {e}")
-            time.sleep(delay)
+                logger.exception(f"Order send exception on attempt {attempt}; not sending again, the order may exist: {e}")
+                return None
+            retcode = getattr(last, "retcode", None)
+            if retcode in FILLED_RETCODES:
+                return last
+            if retcode in RETRY_SAFE_RETCODES and attempt < num_retries:
+                logger.warning(f"Order send rejected (retcode {retcode}) on attempt {attempt}/{num_retries}; sending again.")
+                time.sleep(delay)
+                continue
+            logger.warning(f"Order send not filled (result {last}); not sending again.")
+            return last
         return last
+
+    def _own_positions(self, request: dict) -> Optional[Dict[int, float]]:
+        """ticket -> volume of this bot's open positions on the request's symbol and side; None if they cannot be listed.
+        Order and position type enums share their buy/sell values in MT5, so the request type is compared directly."""
+        try:
+            positions = self.mt5_client.positions_get(symbol=request["symbol"])
+        except Exception:
+            return None
+        if positions is None:
+            return None
+        return {p.ticket: float(p.volume) for p in positions
+                if getattr(p, "magic", None) == request["magic"] and getattr(p, "type", None) == request["type"]}
+
+    def _find_new_position(self, request: dict, before: Optional[Dict[int, float]]):
+        """After an order whose outcome is unknown: (ticket, filled volume) of a position that is new since `before`
+        (a new ticket, or a netting position whose volume grew), else None. With a snapshot, a ticket missing from it is new even if
+        reconcile has meanwhile adopted it into the cache (risk 0, no ATR): the caller then overwrites that entry. Without a snapshot,
+        tickets the bot already tracks cannot be told apart from the new one and are skipped."""
+        now = self._own_positions(request)
+        if now is None:
+            return None
+        if before is None:
+            with self.risk.cache_lock:
+                known = set(self.risk.open_positions_cache)
+            before = {ticket: volume for ticket, volume in now.items() if ticket in known}
+        for ticket, volume in now.items():
+            if ticket in before:
+                if volume > before[ticket] + 1e-9:
+                    return ticket, volume - before[ticket]
+            else:
+                return ticket, volume
+        return None
 
     def check_closed_trades(self, latest_prices: Dict[str, float], now_utc: datetime.datetime) -> List[ClosedTrade]:
         """
@@ -523,26 +572,37 @@ class Execution:
             return OrderResult(True, simulated_ticket, "Dry-run prepared")
 
         logger.debug(f"[{symbol}] Sending order request: {request}")
+        before = self._own_positions(request)  # for recovery only; sending does not depend on it
         res = self._send_order_with_retry(request)
-        if res is None or getattr(res, "retcode", None) != self.mt5_client.TRADE_RETCODE_DONE:
-            error_msg = f"<b>CRITICAL:</b> Order failed for {symbol} after retries: {res}"
-            logger.error(error_msg)
-            if self.notifier:
-                self.notifier.send_message(error_msg, level="CRITICAL")
-            return OrderResult(False, getattr(res, "order", None) if res else None, f"Order failed: {res}")
-
-        deal_ticket = getattr(res, "deal", None)
-        if not deal_ticket:
-            logger.error(f"Order for {symbol} succeeded but no deal ticket returned. Cannot track position.")
-            return OrderResult(False, None, "Order sent but no deal ticket.")
-
-        # Fetch the deal to get the position_id, which is the reliable key
-        deals = self.mt5_client.history_deals_get(ticket=deal_ticket)
-        if not deals:
-            logger.error(f"Could not fetch deal info for deal {deal_ticket}. Cannot track position.")
-            return OrderResult(False, None, "Failed to fetch deal info.")
-
-        position_id = deals[0].position_id
+        retcode = getattr(res, "retcode", None)
+        position_id = None
+        if retcode in FILLED_RETCODES:
+            if retcode == RETCODE_DONE_PARTIAL and getattr(res, "volume", 0):
+                lots = float(res.volume)  # partial fill: track what was actually filled
+                logger.warning(f"[{symbol}] Order only partly filled: {lots} lots.")
+            deal_ticket = getattr(res, "deal", None)
+            deals = self.mt5_client.history_deals_get(ticket=deal_ticket) if deal_ticket else None
+            if deals:
+                position_id = deals[0].position_id
+            else:
+                logger.error(f"[{symbol}] Order filled but the deal {deal_ticket} could not be fetched; looking for the position.")
+        if position_id is None:
+            found = self._find_new_position(request, before)
+            if found is None:
+                known_failure = res is not None and retcode not in (None, 10008, 10011, 10012, 10031, *FILLED_RETCODES)
+                if known_failure:
+                    error_msg = f"<b>CRITICAL:</b> Order failed for {symbol}: {res}"
+                else:
+                    error_msg = (f"<b>CRITICAL:</b> Order outcome UNKNOWN for {symbol} ({res}). Not sent again: "
+                                 f"check the terminal for a position and close it by hand if it is unwanted.")
+                logger.error(error_msg)
+                if self.notifier:
+                    self.notifier.send_message(error_msg, level="CRITICAL")
+                return OrderResult(False, getattr(res, "order", None) if res else None, f"Order failed: {res}")
+            position_id, found_lots = found
+            if retcode not in FILLED_RETCODES or retcode == RETCODE_DONE_PARTIAL:
+                lots = found_lots
+            logger.warning(f"[{symbol}] Order result was {res}, but position {position_id} ({lots} lots) is at the broker; tracking it.")
 
         logger.info(f"[{symbol}][{now_utc.strftime('%Y-%m-%d %H:%M:%S%z')}] Opened {direction} position at {price:.5f}. Lots: {lots:.2f}, SL: {sl:.5f}, TP: {tp:.5f}, AUC: {auc_score:.4f}")
         if self.notifier:
@@ -577,13 +637,13 @@ class Execution:
                     "atr_idx": atr_idx,
                     "min_prob_long_idx": min_prob_long_idx,
                     "min_prob_short_idx": min_prob_short_idx,
-                    "adx": float(X["adx"].iloc[-1]) if "adx" in X.columns else 0.0,
-                    "macd_diff": float(X["macd_diff"].iloc[-1]) if "macd_diff" in X.columns else 0.0,
-                    "volatility_10": float(X["volatility_10"].iloc[-1]) if "volatility_10" in X.columns else 0.0,
-                    "dist_from_ema_200": float(X["dist_from_ema_200"].iloc[-1]) if "dist_from_ema_200" in X.columns else 0.0,
+                    "adx": float(X["adx"].iloc[-1]) if X is not None and "adx" in X.columns else 0.0,
+                    "macd_diff": float(X["macd_diff"].iloc[-1]) if X is not None and "macd_diff" in X.columns else 0.0,
+                    "volatility_10": float(X["volatility_10"].iloc[-1]) if X is not None and "volatility_10" in X.columns else 0.0,
+                    "dist_from_ema_200": float(X["dist_from_ema_200"].iloc[-1]) if X is not None and "dist_from_ema_200" in X.columns else 0.0,
                     # Add inter_market_feature and mta_feature to open_positions_cache
-                    "inter_market_feature": float(X["inter_market_feature"].iloc[-1]) if "inter_market_feature" in X.columns else 0.0,
-                    "mta_feature": float(X["mta_feature"].iloc[-1]) if "mta_feature" in X.columns else 0.0,
+                    "inter_market_feature": float(X["inter_market_feature"].iloc[-1]) if X is not None and "inter_market_feature" in X.columns else 0.0,
+                    "mta_feature": float(X["mta_feature"].iloc[-1]) if X is not None and "mta_feature" in X.columns else 0.0,
                     "context_vector": context_vector  # NEW: Store the context dictionary
                 }
         except Exception as e:
