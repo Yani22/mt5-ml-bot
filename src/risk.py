@@ -236,7 +236,8 @@ class RiskManager:
             # get only deals with non-zero profit (closed)
             profits = []
             for d in recs:
-                p = float(getattr(d, "profit", 0.0))
+                # net of commission, swap and fee, so a breakeven exit that only paid costs counts as a loss
+                p = sum(float(getattr(d, f, 0.0) or 0.0) for f in ("profit", "commission", "swap", "fee"))
                 # skip 0-profit deals (e.g., internal adjustments)
                 if abs(p) > 1e-9:
                     profits.append(p)

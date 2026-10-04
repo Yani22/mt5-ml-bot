@@ -173,18 +173,16 @@ class Execution:
                         exit_time_dt = datetime.datetime.now(datetime.timezone.utc)
 
                         if deals:
-                            final_profit_sum = 0.0
                             latest_exit_time = 0
                             latest_exit_price = 0.0
 
                             for deal in sorted(deals, key=lambda d: d.time):
                                 if deal.entry == mt5.DEAL_ENTRY_OUT:
-                                    final_profit_sum += deal.profit
                                     if deal.time > latest_exit_time:
                                         latest_exit_time = deal.time
                                         latest_exit_price = deal.price
 
-                            pnl = final_profit_sum
+                            pnl = self._position_net_pnl(deals)
                             if latest_exit_time > 0:
                                 exit_time_dt = datetime.datetime.fromtimestamp(latest_exit_time, tz=datetime.timezone.utc)
                                 exit_price = latest_exit_price
@@ -284,6 +282,17 @@ class Execution:
             logger.warning(f"Order send not filled (result {last}); not sending again.")
             return last
         return last
+
+    @staticmethod
+    def _deal_net(deal) -> float:
+        """profit + commission + swap + fee of one deal, all in account currency (deal.profit is only the price move; the
+        cost fields may be missing on older terminals)."""
+        return sum(float(getattr(deal, field, 0.0) or 0.0) for field in ("profit", "commission", "swap", "fee"))
+
+    @classmethod
+    def _position_net_pnl(cls, deals) -> float:
+        """Net result of a closed position: every deal of the position (the entry deal usually carries the commission)."""
+        return sum(cls._deal_net(d) for d in deals)
 
     def _filling_type(self, symbol: str) -> int:
         """ORDER_FILLING_* value the symbol allows: IOC if allowed, else FOK, else RETURN (allowed in every execution mode except
@@ -479,13 +488,11 @@ class Execution:
                         continue
 
                     # Find the closing deal to get the final profit and exit details
-                    final_profit = 0.0
+                    final_profit = self._position_net_pnl(deals)  # deal.profit alone excludes commission, swap and fee
                     last_exit_time = None
                     last_exit_price = None
                     for deal in sorted(deals, key=lambda d: d.time):
                         if deal.entry == mt5.DEAL_ENTRY_OUT:
-                            # MT5 deal.profit already includes commission and swap.
-                            final_profit += deal.profit
                             last_exit_time = deal.time
                             last_exit_price = deal.price
                     if last_exit_time is None:
