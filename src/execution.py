@@ -30,6 +30,12 @@ FILLED_RETCODES = (RETCODE_DONE, RETCODE_DONE_PARTIAL)
 RETRY_SAFE_RETCODES = (10004, 10020, 10021, 10024)
 
 
+# Filling policy. SymbolInfo.filling_mode is a bitmask of SYMBOL_FILLING_* flags; the request's type_filling takes
+# ORDER_FILLING_* values. They are different enums (MQL5 docs, order and symbol properties).
+SYMBOL_FILLING_FOK, SYMBOL_FILLING_IOC = 1, 2
+ORDER_FILLING_FOK, ORDER_FILLING_IOC, ORDER_FILLING_RETURN = 0, 1, 2
+
+
 @dataclass
 class OrderResult:
     ok: bool
@@ -278,6 +284,23 @@ class Execution:
             logger.warning(f"Order send not filled (result {last}); not sending again.")
             return last
         return last
+
+    def _filling_type(self, symbol: str) -> int:
+        """ORDER_FILLING_* value the symbol allows: IOC if allowed, else FOK, else RETURN (allowed in every execution mode except
+        market execution). If the symbol info or its filling_mode is missing, IOC, which is what the bot always sent."""
+        try:
+            info = self.mt5_client.symbol_info(symbol)
+        except Exception:
+            info = None
+        mode = getattr(info, "filling_mode", None)
+        if mode is None:
+            return ORDER_FILLING_IOC
+        mode = int(mode)
+        if mode & SYMBOL_FILLING_IOC:
+            return ORDER_FILLING_IOC
+        if mode & SYMBOL_FILLING_FOK:
+            return ORDER_FILLING_FOK
+        return ORDER_FILLING_RETURN
 
     def _own_positions(self, request: dict) -> Optional[Dict[int, float]]:
         """ticket -> volume of this bot's open positions on the request's symbol and side; None if they cannot be listed.
@@ -531,7 +554,7 @@ class Execution:
             "magic": self.risk.cfg.magic_number,
             "comment": "ml-bot",
             "type_time": self.mt5_client.ORDER_TIME_GTC,
-            "type_filling": self.mt5_client.ORDER_FILLING_IOC,
+            "type_filling": self._filling_type(symbol),
         }
 
         if self.dry_run:
