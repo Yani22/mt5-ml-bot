@@ -69,3 +69,22 @@ def test_symbol_info_without_tick_fields_keeps_the_old_value():
     legacy = NS(point=1e-5, trade_contract_size=100_000, digits=5, trade_stops_level=0,
                 volume_min=0.01, volume_step=0.01, volume_max=100)
     assert make_rm(legacy).get_pip_value("EURUSD#") == pytest.approx(1.0)
+
+
+# ---- the backtester books money through one helper, in account currency ---------------------------------------
+
+def test_money_of_a_price_move_is_in_account_currency_for_a_jpy_pair():
+    rm = make_rm(info(point=0.001, tick_size=0.001, tick_value=2 / 3))
+    # 0.5 lots, price up 1.500 JPY = 1500 points x $0.667 x 0.5 = $500; the quote-currency formula gave 75,000 JPY
+    assert rm.move_value("USDJPY#", 1.500, 0.5) == pytest.approx(500.0)
+    assert rm.move_value("USDJPY#", -0.150, 1.0) == pytest.approx(-100.0)
+
+
+def test_money_of_a_price_move_matches_contract_size_for_a_usd_quoted_pair():
+    rm = make_rm(info(point=1e-5, tick_size=1e-5, tick_value=1.0))
+    assert rm.move_value("EURUSD#", 0.0010, 2.0) == pytest.approx(0.0010 * 2.0 * 100_000)
+
+
+def test_money_of_a_price_move_is_zero_when_the_tick_value_is_unusable():
+    rm = make_rm(info(point=0.001, tick_size=0.001, tick_value=0.0))
+    assert rm.move_value("USDJPY#", 1.5, 0.5) == 0.0

@@ -71,6 +71,14 @@ class RiskManager:
             return 0.0
         return symbol_info.point * tick_value / tick_size
 
+    def move_value(self, symbol: str, price_diff: float, lots: float) -> float:
+        """Money (account currency) gained by a price move of price_diff (signed) on `lots`; 0 when the tick value is unusable."""
+        pip_size = self.get_pip_size(symbol)
+        pip_value = self.get_pip_value(symbol)
+        if pip_size <= 0 or pip_value <= 0:
+            return 0.0
+        return float(price_diff) / pip_size * pip_value * float(lots)
+
     # ---------- Dynamic value helpers ----------
     def _get_dynamic_value(self, dynamic_cfg: dict | None, auc_score: float, default_val: float) -> float:
         if not dynamic_cfg or not dynamic_cfg.get("enabled"):

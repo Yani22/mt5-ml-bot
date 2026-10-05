@@ -90,7 +90,6 @@ class HybridBacktester:
         """Check open positions for SL/TP, calculate PnL, and update equity using sequential reconstruction."""
         closed_trades_this_cycle = []
 
-        contract_size = self.risk_manager.get_contract_size(sym)
         pip_value = self.risk_manager.get_pip_value(sym)
 
         # Get commission and slippage from config for backtesting PnL calculation
@@ -115,7 +114,7 @@ class HybridBacktester:
                     exit_reason = "Take Profit"
 
             if exit_reason:
-                gross_pnl = ((price - pos.entry_price) * pos.lots * contract_size) if pos.direction == "long" else ((pos.entry_price - price) * pos.lots * contract_size)
+                gross_pnl = self.risk_manager.move_value(sym, (price - pos.entry_price) if pos.direction == "long" else (pos.entry_price - price), pos.lots)
 
                 # Calculate slippage cost for backtesting
                 backtest_slippage_cost_value = 0.0
@@ -156,7 +155,7 @@ class HybridBacktester:
                     volatility_10=getattr(pos, 'volatility_10', 0.0),
                     dist_from_ema_200=getattr(pos, 'dist_from_ema_200', 0.0),
                     context_vector=getattr(pos, 'trade_context', None),  # NEW: Pass stored context vector
-                    risk_amount=pos.lots * abs(pos.entry_price - pos.sl) * contract_size,
+                    risk_amount=self.risk_manager.move_value(sym, abs(pos.entry_price - pos.sl), pos.lots),
                     sl_atr_mult=(abs(pos.entry_price - pos.sl) / pos.atr) if pos.atr else None
                 )
 
@@ -506,14 +505,13 @@ class HybridBacktester:
 
                 # --- Close any positions left open for the current symbol ---
                 logger.info(f"Closing any remaining open positions for {sym}...")
-                contract_size = self.risk_manager.get_contract_size(sym)
                 pip_value = self.risk_manager.get_pip_value(sym)
                 cost_pips_per_lot = getattr(self.cfg.risk, 'transaction_cost_pips', 0.0)
                 cost_per_lot = cost_pips_per_lot * pip_value
                 for pos in [p for p in self.positions if p.symbol == sym and p.status == "open"]:
                     last_row = data.iloc[-1]
                     last_price = last_row["close"]
-                    gross_pnl = ((last_price - pos.entry_price) * pos.lots * contract_size) if pos.direction == "long" else ((pos.entry_price - last_price) * pos.lots * contract_size)
+                    gross_pnl = self.risk_manager.move_value(sym, (last_price - pos.entry_price) if pos.direction == "long" else (pos.entry_price - last_price), pos.lots)
                     transaction_cost = cost_per_lot * pos.lots
                     net_pnl = gross_pnl - transaction_cost
 
