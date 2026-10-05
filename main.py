@@ -31,7 +31,7 @@ import threading
 from src.live_guard import require_live_permission
 from src.state_paths import apply_mode_state_paths
 from src.symbol_processor import SymbolProcessor, stop_symbol_threads
-from src.retraining import _check_and_trigger_retraining, _handle_model_acceptance
+from src.retraining import _check_and_trigger_retraining, _handle_model_acceptance, retraining_status_for
 from src.utils import _initialize_metrics_csv
 
 
@@ -237,7 +237,7 @@ def run(dry_run: bool = True):
                 # Reconcile open positions with MT5 to ensure accuracy
                 exe.reconcile_open_positions_with_mt5()
 
-                retraining_status = {sym: False for sym in cfg.symbols}  # Track if retraining is active
+                retraining_status = retraining_status_for(cfg.symbols, retraining_processes)  # a child that outlived the reconnect stays tracked (K22)
                 trading_blocked_by_low_new_model_auc = {sym: False for sym in cfg.symbols}  # Track if trading is blocked due to low new model AUC
                 last_diagnostics_log_time = 0.0  # For throttling diagnostics logging
                 # Initialize last_retrain_date from RiskController's loaded state

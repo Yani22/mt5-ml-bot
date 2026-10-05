@@ -15,6 +15,12 @@ from src.risk_controller import RiskController
 from src.utils import load_ensemble, safe_retrain_ensemble
 
 
+def retraining_status_for(symbols, retraining_processes) -> Dict[str, bool]:
+    """Per-symbol "a retrain child is being tracked" flags, derived from the process table so a reconnect cannot forget a child
+    that is still running (it would be started again) or has finished and still waits for model acceptance."""
+    return {sym: sym in retraining_processes for sym in symbols}
+
+
 def run_retraining_in_background(cfg, sym, feature_cfg, dry_run, notifier, optuna_params_per_symbol):
     """
     A wrapper function to run the entire retraining pipeline for both long and short models in a separate process.
