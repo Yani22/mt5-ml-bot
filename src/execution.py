@@ -420,10 +420,11 @@ class Execution:
                             gross_pnl = (entry_price - exit_price) / pip_size * pip_value * lots
 
                         # Apply transaction costs (spread and commission)
-                        spread_pips = getattr(self.risk.cfg.trading_costs.defaults, 'spread_pips', 0.0)
+                        # One spread per round trip (bar-close prices are bid-only), in pips -> account currency.
+                        spread_pips = float(self.risk.cfg.get_symbol_value(symbol, 'spread_pips', self.risk.cfg.trading_costs.defaults.spread_pips))
                         commission_per_lot = getattr(self.risk.cfg.trading_costs.defaults, 'commission_per_trade', 0.0)
 
-                        transaction_cost = (spread_pips * pip_value * lots) + (commission_per_lot * lots)
+                        transaction_cost = self.risk.pips_to_money(symbol, spread_pips, lots) + (commission_per_lot * lots)
                         pnl = gross_pnl - transaction_cost
 
                         # Get current equity for the ClosedTrade object (simulated)

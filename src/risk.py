@@ -72,6 +72,16 @@ class RiskManager:
             return 0.0
         return symbol_info.point * tick_value / tick_size
 
+    def pips_to_money(self, symbol: str, pips: float, lots: float) -> float:
+        """Account-currency value of `pips` pips on `lots`. A pip is 10 points on 3 and 5 digit symbols and 1 point otherwise
+        (so for gold and indices a "pip" is one point). 0 when the tick value is unusable."""
+        info = self.mt5_client.symbol_info(symbol)
+        pip_value = self.get_pip_value(symbol)
+        if not info or pip_value <= 0:
+            return 0.0
+        points_per_pip = 10 if getattr(info, "digits", None) in (3, 5) else 1
+        return float(pips) * points_per_pip * pip_value * float(lots)
+
     def move_value(self, symbol: str, price_diff: float, lots: float) -> float:
         """Money (account currency) gained by a price move of price_diff (signed) on `lots`; 0 when the tick value is unusable."""
         pip_size = self.get_pip_size(symbol)

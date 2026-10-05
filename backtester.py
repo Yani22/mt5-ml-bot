@@ -87,16 +87,21 @@ class HybridBacktester:
 
             pos.sl = new_sl
 
+    def _close_costs(self, sym: str, lots: float) -> float:
+        """Money (account currency) a round trip costs, charged when the position closes: one spread (the bars are bid-only and
+        entry and exit both use the close, so a long or a short pays exactly one), slippage, and commission. Spread and slippage
+        are in pips. `risk.transaction_cost_pips` is no longer read."""
+        costs = self.cfg.trading_costs.defaults
+        spread_pips = float(self.cfg.get_symbol_value(sym, "spread_pips", costs.spread_pips))
+        slippage_pips = float(costs.slippage_pips)
+        if costs.adaptive_slippage:
+            slippage_pips *= costs.adaptive_slippage_multiplier
+        pips = spread_pips + slippage_pips
+        return self.risk_manager.pips_to_money(sym, pips, lots) + costs.commission_per_trade * lots
+
     def _update_positions(self, sym, row):
         """Check open positions for SL/TP, calculate PnL, and update equity using sequential reconstruction."""
         closed_trades_this_cycle = []
-
-        pip_value = self.risk_manager.get_pip_value(sym)
-
-        # Get commission and slippage from config for backtesting PnL calculation
-        commission_per_trade = self.cfg.trading_costs.defaults.commission_per_trade
-        slippage_pips = self.cfg.trading_costs.defaults.slippage_pips
-        adaptive_slippage_multiplier = self.cfg.trading_costs.defaults.adaptive_slippage_multiplier
 
         # This loop identifies trades that close on the current bar
         for pos in [p for p in self.positions if p.symbol == sym and p.status == "open"]:
@@ -117,16 +122,7 @@ class HybridBacktester:
             if exit_reason:
                 gross_pnl = self.risk_manager.move_value(sym, (price - pos.entry_price) if pos.direction == "long" else (pos.entry_price - price), pos.lots)
 
-                # Calculate slippage cost for backtesting
-                backtest_slippage_cost_value = 0.0
-                if self.cfg.trading_costs.defaults.adaptive_slippage:
-                    # In backtesting, we use slippage_pips as a base for adaptive calculation
-                    backtest_slippage_cost_value = (slippage_pips * pip_value * pos.lots) * adaptive_slippage_multiplier
-                else:
-                    backtest_slippage_cost_value = slippage_pips * pip_value * pos.lots
-
-                # Calculate total transaction cost for backtesting
-                transaction_cost = (commission_per_trade * pos.lots) + backtest_slippage_cost_value
+                transaction_cost = self._close_costs(sym, pos.lots)
                 net_pnl = gross_pnl - transaction_cost
 
                 # Determine the exit equity for this specific trade
@@ -173,6 +169,23 @@ class HybridBacktester:
                     f"[{sym}] Closed {pos.direction} position at {pos.exit_price:.5f}. "
                     f"Entry: {pos.entry_price:.5f}, PnL: {pos.pnl:.2f}, Final Equity: {self.equity:.2f}"
                 )
+
+    def _force_close_open_positions(self, sym: str, data: pd.DataFrame):
+        """Close any positions left open for `sym` at the last bar of `data`."""
+        logger.info(f"Closing any remaining open positions for {sym}...")
+        for pos in [p for p in self.positions if p.symbol == sym and p.status == "open"]:
+            last_row = data.iloc[-1]
+            last_price = last_row["close"]
+            gross_pnl = self.risk_manager.move_value(sym, (last_price - pos.entry_price) if pos.direction == "long" else (pos.entry_price - last_price), pos.lots)
+            transaction_cost = self._close_costs(sym, pos.lots)
+            net_pnl = gross_pnl - transaction_cost
+
+            pos.close(last_price, last_row.name, net_pnl, self.equity + net_pnl)
+            self.equity += net_pnl
+            logger.info(
+                f"[{pos.symbol}] Force-closed open {pos.direction} position at final price {last_price:.5f}. "
+                f"PnL: {net_pnl:.2f}, Final Equity: {self.equity:.2f}"
+            )
 
     def _perform_retraining(self, sym: str, bar_time: pd.Timestamp, i: int, data: pd.DataFrame, X: pd.DataFrame, y_long: pd.Series, y_short: pd.Series):
         """
@@ -501,24 +514,7 @@ class HybridBacktester:
 
                 logger.info(f"--- Completed Backtest for Symbol: {sym} ---")
 
-                # --- Close any positions left open for the current symbol ---
-                logger.info(f"Closing any remaining open positions for {sym}...")
-                pip_value = self.risk_manager.get_pip_value(sym)
-                cost_pips_per_lot = getattr(self.cfg.risk, 'transaction_cost_pips', 0.0)
-                cost_per_lot = cost_pips_per_lot * pip_value
-                for pos in [p for p in self.positions if p.symbol == sym and p.status == "open"]:
-                    last_row = data.iloc[-1]
-                    last_price = last_row["close"]
-                    gross_pnl = self.risk_manager.move_value(sym, (last_price - pos.entry_price) if pos.direction == "long" else (pos.entry_price - last_price), pos.lots)
-                    transaction_cost = cost_per_lot * pos.lots
-                    net_pnl = gross_pnl - transaction_cost
-
-                    pos.close(last_price, last_row.name, net_pnl, self.equity + net_pnl)
-                    self.equity += net_pnl
-                    logger.info(
-                        f"[{pos.symbol}] Force-closed open {pos.direction} position at final price {last_price:.5f}. "
-                        f"PnL: {net_pnl:.2f}, Final Equity: {self.equity:.2f}"
-                    )
+                self._force_close_open_positions(sym, data)
         except KeyboardInterrupt:
             logger.warning("Backtest interrupted by user. Generating results for completed portion...")
 

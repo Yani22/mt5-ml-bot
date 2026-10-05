@@ -118,6 +118,7 @@ class MonitoringCfg:
 @dataclass
 class TradingCostsDefaultsCfg:
     slippage_pips: float = 0.5
+    spread_pips: float = 1.0   # backtester: one spread charged per round trip (bars are bid-only); symbol_overrides can set it per symbol
     commission_per_trade: float = 0.0
     adaptive_slippage: bool = True
     retry_order_send: int = 3
