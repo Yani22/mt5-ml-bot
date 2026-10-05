@@ -73,6 +73,7 @@ class RiskCfg:
     min_prob_short: float = 0.55
     block_on_drawdown: float = 0.10
     transaction_cost_pips: float = 1.5
+    max_spread_atr: float = 1.0  # skip entries when spread / decision-bar ATR is above this; 0 = off (symbol_overrides can set it)
     session_filter: Optional[Dict[str, str]] = None
     min_ensemble_auc: float = 0.55
     min_auc_improvement: float = 0.005

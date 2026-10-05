@@ -1,4 +1,5 @@
 # src/symbol_processor.py
+import math
 import pandas as pd
 from loguru import logger
 import datetime
@@ -161,6 +162,8 @@ class SymbolProcessor:
             if not tick:
                 logger.warning(f"[{self.symbol}] Could not get tick info for spread. Skipping trade.")
                 return
+            if not self._spread_ok(tick, atr):
+                return
             spread_pips = (tick.ask - tick.bid) / self.mt5_client.symbol_info(self.symbol).point
             spread_value = spread_pips * self.mt5_client.symbol_info(self.symbol).point
 
@@ -217,6 +220,26 @@ class SymbolProcessor:
             )
         # The 'else' branch for 'if prob_long/prob_short >= ...' is now implicitly handled higher up by a 'return'
         # if 'direction' remains None. Thus, no final 'else' for logging 'No trade signal' is needed here.
+
+    def _spread_ok(self, tick, atr) -> bool:
+        """False while the spread is more than `max_spread_atr` times the decision bar's ATR (0 turns the check off).
+        A crossed, missing or non-finite quote, or a non-positive ATR, also blocks the entry."""
+        cap = float(self.risk_manager.cfg.get_symbol_value(self.symbol, 'max_spread_atr', 1.0) or 0.0)
+        if cap <= 0:
+            return True
+        try:
+            spread = float(tick.ask) - float(tick.bid)
+            atr = float(atr)
+        except (TypeError, ValueError):
+            spread, atr = float("nan"), float("nan")
+        if not (math.isfinite(spread) and math.isfinite(atr)) or spread < 0 or atr <= 0:
+            logger.info(f"[{self.symbol}] Entry skipped: unusable quote or ATR (ask={getattr(tick, 'ask', None)}, "
+                        f"bid={getattr(tick, 'bid', None)}, atr={atr}).")
+            return False
+        if spread > cap * atr + 1e-12:
+            logger.info(f"[{self.symbol}] Entry skipped: spread {spread:.6f} is {spread / atr:.2f} ATR (cap {cap:.2f}).")
+            return False
+        return True
 
     def run_loop(self):
         logger.info(f"[{self.symbol}] Starting processing loop.")
