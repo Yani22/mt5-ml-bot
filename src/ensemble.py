@@ -21,53 +21,21 @@ def custom_pnl(
     y_true: pd.Series,
     y_pred: pd.Series,
     prices: pd.Series,
-    spread_pips: float = 2.0,
-    slippage_pips: float = 0.5,
-    commission_per_trade: float = 0.0,
-    lot_size: float = 1.0,
-    pip_value: float = 0.0001,
+    cfg: "Cfg",
+    model_type: str = "long",
+    **trading_costs
 ) -> float:
-    """
-    Simulate forex PnL given predictions, accounting for spread, commission, slippage.
-    y_true: true labels (0/1)
-    y_pred: binary predictions (0/1) or probabilities (>=0.5 => long)
-    prices: Series of close prices aligned with y_true / y_pred (same index)
-    """
+    """Sum of the net fractional returns of the trades the 0/1 signals in `y_pred` would take (see `net_trade_returns`): the
+    forward move over `cfg.prediction_horizon` bars for the model's side, one trade per holding period, one round-trip cost.
+    A 0 is no trade. `y_true` is unused and kept for the metric call signature."""
     if prices is None or len(prices) != len(y_pred):
         raise ValueError(f"Prices and predictions must be same length: {len(prices)} vs {len(y_pred)}")
+    horizon = cfg.prediction_horizon
+    if not horizon:
+        raise ValueError("cfg.prediction_horizon must be set to calculate custom_pnl")
 
-    pnl = []
-    spread = spread_pips * pip_value
-    slippage = slippage_pips * pip_value
-
-    # iterate from i=1 so we have entry from previous bar
-    for i in range(1, len(prices)):
-        signal = 1 if y_pred.iloc[i] >= 0.5 else -1
-
-        entry_price = prices.iloc[i - 1]
-        exit_price = prices.iloc[i]
-
-        # adjust for slippage
-        if signal == 1:  # long
-            entry_price_adj = entry_price + slippage
-            exit_price_adj = exit_price - slippage
-        else:  # short
-            entry_price_adj = entry_price - slippage
-            exit_price_adj = exit_price + slippage
-
-        price_diff = exit_price_adj - entry_price_adj
-        pip_diff = price_diff / pip_value
-
-        ret = signal * pip_diff
-        # subtract spread
-        ret -= spread_pips
-        # subtract commission (scaled by lot size; assume commission_per_trade is total cost)
-        # normalize commission: if lot_size small, scale accordingly
-        if lot_size > 0:
-            ret -= commission_per_trade * (lot_size / max(lot_size, 1.0))
-        pnl.append(ret * lot_size)
-
-    total = float(np.sum(pnl))
+    pnl = net_trade_returns(y_pred, prices, horizon, model_type, **trading_costs)
+    total = float(pnl.sum())
     logger.debug(f"custom_pnl: total={total:.6f}, trades={len(pnl)}")
     return total
 
@@ -562,10 +530,7 @@ class Ensemble:
                 score = recall_score(y_true, preds)
             elif self.threshold_metric == "custom_pnl":
                 try:
-                    import inspect
-                    sig = inspect.signature(custom_pnl)
-                    valid_args = {k: v for k, v in self.trading_costs.items() if k in sig.parameters}
-                    score = custom_pnl(y_true, preds, prices, **valid_args)
+                    score = custom_pnl(y_true, preds, prices, self.cfg, model_type=model_type, **self.trading_costs)
                 except Exception as e:
                     logger.warning(f"Threshold evaluation custom_pnl failed at thr={thr}: {e}")
                     continue
