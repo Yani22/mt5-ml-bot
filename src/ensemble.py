@@ -8,6 +8,7 @@ from typing import Dict, Optional, List, Tuple
 from .strategy_ml import MLStrategy
 from .model_integrity import sign as sign_model_dir, verify as verify_model_dir
 from .config import Cfg
+from .costs import round_trip_pips
 from sklearn.isotonic import IsotonicRegression  # type: ignore
 from loguru import logger  # type: ignore
 from sklearn.metrics import roc_auc_score, f1_score, precision_score, recall_score  # type: ignore
@@ -71,6 +72,57 @@ def custom_pnl(
     return total
 
 
+_warned_non_forex_pips = False
+
+
+def infer_pip_size(prices: pd.Series) -> float:
+    """Pip size guessed from the price level, because the threshold search does not know the symbol: below 20 (EURUSD-like,
+    5 digits) 0.0001, 20 to 1000 (JPY-like, 3 digits) 0.01. Anything above looks like gold or an index, where an FX pip means
+    nothing: warn once and use 0.0001. An explicit `pip_size` in the cost dict always wins."""
+    global _warned_non_forex_pips
+    level = float(pd.Series(prices).dropna().median())
+    if level < 20:
+        return 0.0001
+    if level < 1000:
+        return 0.01
+    if not _warned_non_forex_pips:
+        _warned_non_forex_pips = True
+        logger.warning(f"Threshold search: prices around {level:.0f} do not look like forex, so FX pip costs are not meaningful "
+                       f"(using a pip of 0.0001); pass pip_size in the trading costs for this symbol.")
+    return 0.0001
+
+
+def net_trade_returns(y_pred: pd.Series, prices: pd.Series, horizon: int, model_type: str = "long", **trading_costs) -> pd.Series:
+    """Net fractional return of every trade the signals in `y_pred` (0/1) would take, holding `horizon` bars.
+
+    Each trade is counted once: the next signal is taken only `horizon` or more bars after the last one taken (one position
+    per symbol at a time). The cost is one round trip (spread plus slippage, in pips) as a fraction of the entry price, so it
+    is in the same units as the return. Commission is money per lot and there is no lot size here, so it is left out.
+    """
+    future_prices = prices.shift(-horizon)
+
+    # Correctly calculate forward returns based on model type
+    if model_type == "long":
+        forward_returns = (future_prices - prices) / prices
+    else:  # short
+        forward_returns = (prices - future_prices) / prices
+
+    # y_pred is already the binary signal; bars without a known exit (the last `horizon`) cannot be traded
+    signalled = (y_pred == 1).reindex(forward_returns.index, fill_value=False) & forward_returns.notna()
+    taken, last = [], None
+    for pos in np.flatnonzero(signalled.to_numpy()):
+        if last is None or pos - last >= horizon:
+            taken.append(pos)
+            last = pos
+    returns, entries = forward_returns.iloc[taken], prices.iloc[taken]
+
+    pip_size = trading_costs.get("pip_size") or trading_costs.get("pip_value") or infer_pip_size(prices)
+    cost_pips = round_trip_pips(trading_costs.get("spread_pips", 1.0), trading_costs.get("slippage_pips", 0.0),
+                                bool(trading_costs.get("adaptive_slippage", False)),
+                                trading_costs.get("adaptive_slippage_multiplier", 1.0))
+    return returns - cost_pips * pip_size / entries
+
+
 def calculate_sharpe_ratio(
     y_true: pd.Series,
     y_pred: pd.Series,  # These are binary 0/1 signals
@@ -87,24 +139,7 @@ def calculate_sharpe_ratio(
     if not horizon:
         raise ValueError("cfg.prediction_horizon must be set to calculate sharpe ratio")
 
-    future_prices = prices.shift(-horizon)
-
-    # Correctly calculate forward returns based on model type
-    if model_type == "long":
-        forward_returns = (future_prices - prices) / prices
-    else:  # short
-        forward_returns = (prices - future_prices) / prices
-
-    # y_pred is already the binary signal, so we can use it directly
-    trade_returns = forward_returns[y_pred == 1]
-
-    # Simplified cost calculation
-    spread_pips = trading_costs.get("spread_pips", 2.0)
-    # NOTE: This uses global pip_size, as symbol is not available here. A minor inaccuracy.
-    pip_size = trading_costs.get("pip_value", 0.0001)
-    cost_per_trade = spread_pips * pip_size
-
-    pnl = trade_returns - cost_per_trade
+    pnl = net_trade_returns(y_pred, prices, horizon, model_type, **trading_costs)
 
     if pnl.std() == 0 or pnl.empty:
         return 0.0
@@ -115,7 +150,7 @@ def calculate_sharpe_ratio(
         annualization_factor = 1.0
     else:
         bars_per_year = 252 * (24 * 60 / timeframe_minutes)
-        annualization_factor = np.sqrt(bars_per_year)
+        annualization_factor = np.sqrt(bars_per_year / horizon)   # one return per trade of `horizon` bars, not per bar
 
     sharpe = (pnl.mean() / pnl.std()) * annualization_factor
     logger.debug(f"sharpe_ratio: calculated={sharpe:.4f}, returns={len(pnl)}")

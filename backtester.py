@@ -11,6 +11,7 @@ import numpy as np  # type: ignore
 from src.config import Cfg
 from src.features import FeatureCfg
 from src.risk import RiskManager
+from src.costs import round_trip_pips
 from src.decision import choose_direction
 from src.utils import get_training_data, load_ensemble, save_ensemble, setup_logging, safe_retrain_ensemble, load_optuna_params, log_symbol_specific_configs
 from src.trade import SimPosition
@@ -93,10 +94,7 @@ class HybridBacktester:
         are in pips. `risk.transaction_cost_pips` is no longer read."""
         costs = self.cfg.trading_costs.defaults
         spread_pips = float(self.cfg.get_symbol_value(sym, "spread_pips", costs.spread_pips))
-        slippage_pips = float(costs.slippage_pips)
-        if costs.adaptive_slippage:
-            slippage_pips *= costs.adaptive_slippage_multiplier
-        pips = spread_pips + slippage_pips
+        pips = round_trip_pips(spread_pips, costs.slippage_pips, costs.adaptive_slippage, costs.adaptive_slippage_multiplier)
         return self.risk_manager.pips_to_money(sym, pips, lots) + costs.commission_per_trade * lots
 
     def _update_positions(self, sym, row):
