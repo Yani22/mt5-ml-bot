@@ -66,7 +66,7 @@ class SymbolProcessor:
         # Fetch initial history
         data, _, _ = self.data_manager.fetch_live(self.symbol, self.feature_cfg)  # data, X, y are returned, but we only need data here
         if data.empty:
-            logger.warning(f"[{self.symbol}] No data fetched for live trading. Skipping symbol.")
+            logger.warning(f"[{self.symbol}] No fresh data for this bar. Skipping it.")
             return None, None, None
 
         # Load context data

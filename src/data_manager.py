@@ -227,15 +227,20 @@ class DataManager:
         recent_data = self._fetch_bars_from_mt5_chunked(symbol, self.cfg.timeframe, 200)  # Fetch last 200 bars
 
         # 3. Combine and de-duplicate.
-        if not recent_data.empty:
-            data = pd.concat([data, recent_data])
-            data = data[~data.index.duplicated(keep='last')].sort_index()
+        if recent_data.empty:
+            # Deciding on the cached history would pair an old bar with a live tick: skip this bar instead.
+            last_cached = data.index[-1] if not data.empty else "none"
+            logger.warning(f"[{symbol}] No recent bars from MT5; the cache ends at {last_cached} and would be stale. "
+                           f"Skipping this bar.")
+            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        data = pd.concat([data, recent_data])
+        data = data[~data.index.duplicated(keep='last')].sort_index()
 
-            # Save the newly fetched recent data to local history if enabled
-            if self.cfg.fetch.save_raw_data_locally:
-                # Append only the new recent_data to avoid re-writing entire history
-                # The append_new_bars method handles merging with existing data
-                self.append_new_bars(symbol, recent_data)
+        # Save the newly fetched recent data to local history if enabled
+        if self.cfg.fetch.save_raw_data_locally:
+            # Append only the new recent_data to avoid re-writing entire history
+            # The append_new_bars method handles merging with existing data
+            self.append_new_bars(symbol, recent_data)
 
         if data.empty:
             return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
@@ -282,9 +287,10 @@ class DataManager:
         X = X.loc[common_idx]
         data = data.loc[common_idx]
 
-        # Drop the last row to ensure we only use closed bars
-        if not data.empty:
-            pass  # Removed redundant iloc[:-1] calls to fix data misalignment
+        # The decision bar is the last row; if the feature build dropped the newest bar, the decision would be on an old one.
+        if data.empty or data.index[-1] != recent_data.index[-1]:
+            logger.warning(f"[{symbol}] Features do not reach the newest bar ({recent_data.index[-1]}); skipping this bar.")
+            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
         return data, X, y
 
