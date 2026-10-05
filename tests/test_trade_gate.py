@@ -38,10 +38,11 @@ class FakeClient:
 
 
 class FakeEnsemble:
-    ensemble_cv_auc_ = 0.6
+    def __init__(self, prob=0.9, auc=0.6):
+        self.prob, self.ensemble_cv_auc_ = prob, auc
 
     def predict_proba(self, X):
-        return pd.Series([0.9], index=X.index)
+        return pd.Series([self.prob], index=X.index)
 
 
 class FakeRiskController:
@@ -84,7 +85,7 @@ def make_sp(rm, equity=EQUITY, peak=EQUITY):
     sp.risk_manager = rm
     sp.monitor = NS(current_equity=equity, peak_equity=peak)
     sp.execution = RecordingExecution()
-    sp.ens_long = sp.ens_short = FakeEnsemble()
+    sp.ens_long, sp.ens_short = FakeEnsemble(), FakeEnsemble(prob=0.1)   # long signals, short does not
     return sp
 
 

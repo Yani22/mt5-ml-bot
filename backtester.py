@@ -11,6 +11,7 @@ import numpy as np  # type: ignore
 from src.config import Cfg
 from src.features import FeatureCfg
 from src.risk import RiskManager
+from src.decision import choose_direction
 from src.utils import get_training_data, load_ensemble, save_ensemble, setup_logging, safe_retrain_ensemble, load_optuna_params, log_symbol_specific_configs
 from src.trade import SimPosition
 from src.risk_controller import RiskController
@@ -313,15 +314,12 @@ class HybridBacktester:
             min_prob_long_idx = dynamic_risk_params.get("min_prob_long_idx", -1)
             min_prob_short_idx = dynamic_risk_params.get("min_prob_short_idx", -1)
 
-            direction = None
-            auc_score = 0.5
-            if prob_long >= min_prob_long and ens_long.ensemble_cv_auc_ >= min_ensemble_auc:
-                direction = "long"
-                auc_score = ens_long.ensemble_cv_auc_
-            elif prob_short >= min_prob_short and ens_short.ensemble_cv_auc_ >= min_ensemble_auc:
-                direction = "short"
-                auc_score = ens_short.ensemble_cv_auc_
-            else:
+            direction, auc_score, conflict = choose_direction(
+                prob_long, prob_short, min_prob_long, min_prob_short,
+                ens_long.ensemble_cv_auc_, ens_short.ensemble_cv_auc_, min_ensemble_auc)
+            if conflict:
+                logger.info(f"[{sym}] Conflicting signals skipped: prob_long={prob_long:.3f} and prob_short={prob_short:.3f}.")
+            elif direction is None:
                 if prob_long >= min_prob_long and ens_long.ensemble_cv_auc_ < min_ensemble_auc:
                     logger.info(f"[{sym}] Long trade blocked due to low ensemble confidence (AUC={ens_long.ensemble_cv_auc_:.4f} < {min_ensemble_auc:.4f}).")
                 if prob_short >= min_prob_short and ens_short.ensemble_cv_auc_ < min_ensemble_auc:

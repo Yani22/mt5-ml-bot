@@ -88,10 +88,11 @@ def test_exploration_multiplier_still_scales_risk_down_under_the_cap():
 # ---- the live caller must size on the stop it sends -----------------------------------------------------------
 
 class FakeEnsemble:
-    ensemble_cv_auc_ = 0.6
+    def __init__(self, prob=0.9):
+        self.prob, self.ensemble_cv_auc_ = prob, 0.6
 
     def predict_proba(self, X):
-        return pd.Series([0.9], index=X.index)
+        return pd.Series([self.prob], index=X.index)
 
 
 class FakeRiskController:
@@ -116,7 +117,7 @@ def test_symbol_processor_sizes_on_the_bandit_stop_not_the_config_stop():
     sp.risk_manager = make_rm()
     sp.monitor = NS(current_equity=EQUITY, peak_equity=EQUITY)
     sp.execution = RecordingExecution()
-    sp.ens_long = sp.ens_short = FakeEnsemble()
+    sp.ens_long, sp.ens_short = FakeEnsemble(), FakeEnsemble(prob=0.1)
     idx = pd.date_range("2026-01-05", periods=3, freq="5min")
     X = pd.DataFrame({"atr_14": 0.0010}, index=idx)
     data = pd.DataFrame({"close": 1.1000}, index=idx)

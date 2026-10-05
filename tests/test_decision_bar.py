@@ -3,7 +3,7 @@ the bars are fetched), so the decision must read its LAST row, not the one befor
 import pandas as pd
 import pytest
 
-from test_trade_gate import make_rm, make_sp
+from test_trade_gate import FakeEnsemble, make_rm, make_sp
 
 
 class FeatureEnsemble:
@@ -23,7 +23,7 @@ def decide(sp, f, atr):
 
 def make():
     sp = make_sp(make_rm())
-    sp.ens_long = sp.ens_short = FeatureEnsemble()
+    sp.ens_long, sp.ens_short = FeatureEnsemble(), FakeEnsemble(prob=0.1)
     return sp
 
 

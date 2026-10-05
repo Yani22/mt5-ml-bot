@@ -16,6 +16,7 @@ from src.live_performance_monitor import LivePerformanceMonitor
 from src.execution import Execution
 from src.utils import load_ensemble, load_optuna_params, timeframe_to_mt5_timeframe, log_symbol_specific_configs, log_metrics_to_csv
 from src.risk import RiskManager  # NEW
+from src.decision import choose_direction
 
 
 # The bars handed to the decision already end at the bar that just closed (the forming bar is dropped when bars are
@@ -144,15 +145,14 @@ class SymbolProcessor:
         min_prob_long_idx = dynamic_risk_params.get("min_prob_long_idx", -1)
         min_prob_short_idx = dynamic_risk_params.get("min_prob_short_idx", -1)
 
-        direction = None
-        auc_score = 0.5
-        if prob_long >= min_prob_long and self.ens_long.ensemble_cv_auc_ >= min_ensemble_auc:
-            direction = "long"
-            auc_score = self.ens_long.ensemble_cv_auc_
-        elif prob_short >= min_prob_short and self.ens_short.ensemble_cv_auc_ >= min_ensemble_auc:
-            direction = "short"
-            auc_score = self.ens_short.ensemble_cv_auc_
-        else:
+        direction, auc_score, conflict = choose_direction(
+            prob_long, prob_short, min_prob_long, min_prob_short,
+            self.ens_long.ensemble_cv_auc_, self.ens_short.ensemble_cv_auc_, min_ensemble_auc)
+        if conflict:
+            logger.info(f"[{self.symbol}] Conflicting signals skipped: prob_long={prob_long:.3f} and prob_short={prob_short:.3f} "
+                        f"both pass their thresholds and AUC gates.")
+            return
+        if direction is None:
             logger.info(f"[{self.symbol}] No trade signal details: min_prob_long={min_prob_long:.3f}, min_prob_short={min_prob_short:.3f}, min_ensemble_auc={min_ensemble_auc:.3f}, ens_long_auc={self.ens_long.ensemble_cv_auc_:.3f}, ens_short_auc={self.ens_short.ensemble_cv_auc_:.3f})")
             if prob_long >= min_prob_long and self.ens_long.ensemble_cv_auc_ < min_ensemble_auc:
                 logger.info(f"[{self.symbol}] Long trade blocked due to low ensemble confidence (AUC={self.ens_long.ensemble_cv_auc_:.4f} < {min_ensemble_auc:.4f}).")
