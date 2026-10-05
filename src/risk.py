@@ -56,7 +56,20 @@ class RiskManager:
         if not symbol_info:
             logger.warning(f"[{symbol}] Could not get symbol info. Returning default pip value.")
             return 1.0
-        return symbol_info.point * symbol_info.trade_contract_size
+        if not (hasattr(symbol_info, "trade_tick_value") and hasattr(symbol_info, "trade_tick_size")):
+            # Older stand-ins without tick data: point * contract size is in the quote currency (right for USD-quoted pairs only).
+            return symbol_info.point * symbol_info.trade_contract_size
+        # Money per point per lot in ACCOUNT currency. A missing or zero tick value (symbol not in Market Watch, cross rate
+        # not quoted) returns 0 so sizing skips the trade; falling back to the quote-currency value would be ~150x off for JPY.
+        try:
+            tick_value = float(symbol_info.trade_tick_value)
+            tick_size = float(symbol_info.trade_tick_size)
+        except (TypeError, ValueError):
+            return 0.0
+        if tick_value <= 0 or tick_size <= 0:
+            logger.warning(f"[{symbol}] Tick value ({tick_value}) or tick size ({tick_size}) unusable; no pip value.")
+            return 0.0
+        return symbol_info.point * tick_value / tick_size
 
     # ---------- Dynamic value helpers ----------
     def _get_dynamic_value(self, dynamic_cfg: dict | None, auc_score: float, default_val: float) -> float:
