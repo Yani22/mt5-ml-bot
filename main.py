@@ -12,7 +12,7 @@ from src.mt5_client import MT5Client, teardown_connection
 from src.risk import RiskManager
 from src.execution import Execution
 from src.utils import setup_logging, get_training_data, load_ensemble, save_ensemble, safe_retrain_ensemble, load_optuna_params, log_symbol_specific_configs, log_startup_summary, timeframe_to_seconds, ensure_min_grid_size, timeframe_to_mt5_timeframe, _initialize_metrics_csv, log_metrics_to_csv, METRICS_CSV_FILE, METRICS_HEADERS
-from src.live_performance_monitor import LivePerformanceMonitor
+from src.live_performance_monitor import LivePerformanceMonitor, equity_from_account
 from src.notifier import TelegramNotifier
 
 from src.risk_controller import RiskController
@@ -173,18 +173,21 @@ def run(dry_run: bool = True):
 
                 # Get initial equity from MT5 account info
                 account_info = mt5c.account_info()
-                initial_equity = getattr(account_info, "equity", 100.0) if account_info else 100.0
+                initial_equity = equity_from_account(account_info)
+                if initial_equity is None:  # never start on a made-up equity: it skews drawdown and sizing (K15)
+                    logger.error("MT5 gave no usable account equity. Retrying in 60 seconds...")
+                    notifier.send_message("<b>CRITICAL:</b> MT5 account info unavailable. Retrying...", level="CRITICAL")
+                    time.sleep(RECONNECTION_RETRY_SECONDS)
+                    continue
                 cfg.initial_equity = initial_equity  # Set initial equity in Cfg for the monitor
 
                 live_monitor = LivePerformanceMonitor(cfg)
-                if account_info:
-                    live_monitor.account_id = f"{getattr(account_info, 'login', None)}@{getattr(account_info, 'server', None)}"
+                live_monitor.account_id = f"{getattr(account_info, 'login', None)}@{getattr(account_info, 'server', None)}"
                 live_monitor.load_state()  # Load previous state on startup
 
                 # Immediately after loading state, sync the current_equity with the live account value
                 # This ensures the bot starts with the ground truth from the broker.
-                if account_info:
-                    live_monitor.sync_equity(account_info.equity)
+                live_monitor.sync_equity(initial_equity)
 
                 # --- Load Ensembles and Feature Configs ---
                 ens_per_symbol_long = {}

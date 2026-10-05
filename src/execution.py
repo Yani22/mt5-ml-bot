@@ -121,7 +121,6 @@ class Execution:
         return self.check_closed_trades(prices, datetime.datetime.now(datetime.timezone.utc))
 
     def reconcile_open_positions_with_mt5(self) -> List[ClosedTrade]:
-        import MetaTrader5 as mt5
         """
         Robustly reconciles the internal position cache with the broker's state.
         This function uses a simple procedural approach to avoid race conditions and logical errors.
@@ -131,6 +130,8 @@ class Execution:
         """
         if self.dry_run:
             return self._close_simulated_positions()
+
+        import MetaTrader5 as mt5  # live path only: the package does not exist on Linux
 
         with self.risk.cache_lock:
             logger.info("Checking for open positions and reconciling cache with MT5...")

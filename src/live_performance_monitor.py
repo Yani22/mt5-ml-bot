@@ -5,10 +5,21 @@ import datetime
 from collections import deque
 from typing import List, Optional, Tuple
 import json  # NEW
+import math
 import os  # NEW
 
 from src.config import Cfg
 from src.trade_types import ClosedTrade  # Import the new ClosedTrade dataclass
+
+
+def equity_from_account(account_info) -> Optional[float]:
+    """The account's equity, or None when the terminal gave no usable value (no account info, no `equity` attribute, zero,
+    negative or non-finite). Callers must not invent a starting equity: a made-up one skews drawdown and sizing."""
+    try:
+        equity = float(getattr(account_info, "equity", None))
+    except (TypeError, ValueError):
+        return None
+    return equity if math.isfinite(equity) and equity > 0 else None
 
 
 class LivePerformanceMonitor:
