@@ -226,7 +226,7 @@ def atr_frame():
 def test_live_processor_manages_positions_with_the_last_closed_bar_atr():
     sp = make_sp(dry_run=False)
     sp._manage_positions(atr_frame())
-    assert sp.risk_manager.calls == [(SYMBOL, pytest.approx(0.0020))]    # iloc[-2], same bar as the decision
+    assert sp.risk_manager.calls == [(SYMBOL, pytest.approx(0.0010))]    # the last closed bar (B12), same bar as the decision
 
 
 def test_dry_run_processor_never_manages_positions():

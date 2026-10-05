@@ -18,6 +18,11 @@ from src.utils import load_ensemble, load_optuna_params, timeframe_to_mt5_timefr
 from src.risk import RiskManager  # NEW
 
 
+# The bars handed to the decision already end at the bar that just closed (the forming bar is dropped when bars are
+# fetched), so the decision and position management both read the LAST row.
+DECISION_BAR = -1
+
+
 class SymbolProcessor:
     def __init__(self, cfg: Cfg, symbol: str, mt5_client: MT5Client, risk_controller: RiskController, risk_manager: RiskManager, monitor: LivePerformanceMonitor, execution: Execution, dry_run: bool):
         self.cfg = cfg
@@ -77,12 +82,12 @@ class SymbolProcessor:
         return data, X, y
 
     def _manage_positions(self, X: pd.DataFrame):
-        """Breakeven/trailing for this symbol's open positions, on the last closed bar's ATR (same bar as the decision).
+        """Breakeven/trailing for this symbol's open positions, on the decision bar's ATR.
         Live only: dry-run positions are simulated and never sent to the broker."""
         if self.dry_run or X is None or len(X) < 2:
             return
         try:
-            self.risk_manager.manage_open_positions(self.symbol, float(X["atr_14"].iloc[-2]))
+            self.risk_manager.manage_open_positions(self.symbol, float(X["atr_14"].iloc[DECISION_BAR]))
         except Exception as e:
             logger.exception(f"[{self.symbol}] Position management failed: {e}")
 
@@ -107,9 +112,10 @@ class SymbolProcessor:
             logger.warning(f"[{self.symbol}] Not enough data for trade decision (need at least 2 bars). Skipping.")
             return
 
-        last_closed_features = X.iloc[[-2]]
-        last_closed_price = data["close"].iloc[-2]
-        atr = X["atr_14"].iloc[-2]
+        last_closed_features = X.iloc[[DECISION_BAR]]
+        last_closed_price = data["close"].iloc[DECISION_BAR]
+        atr = X["atr_14"].iloc[DECISION_BAR]
+        logger.info(f"[{self.symbol}] Deciding on the bar that closed at {X.index[DECISION_BAR]}.")
 
         prob_long = self.ens_long.predict_proba(last_closed_features).iloc[0]
         prob_short = self.ens_short.predict_proba(last_closed_features).iloc[0]
