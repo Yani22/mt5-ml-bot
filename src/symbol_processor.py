@@ -1,5 +1,6 @@
 # src/symbol_processor.py
 import math
+import threading
 import pandas as pd
 from loguru import logger
 import datetime
@@ -35,6 +36,7 @@ class SymbolProcessor:
         self.dry_run = dry_run
         self.data_manager = DataManager(cfg)
         self.execution = execution
+        self.stop_event = threading.Event()  # set by stop(): the run loop and any pending order check it
 
         self.ens_long: Ensemble | None = None
         self.ens_short: Ensemble | None = None
@@ -203,6 +205,10 @@ class SymbolProcessor:
                 logger.info(f"[{self.symbol}] Trade skipped due to risk limits or position size zero (calculated lots: {lots:.4f}).")
                 return  # Exit early, as no trade can be executed with zero lots
 
+            if self.stop_event.is_set():
+                logger.info(f"[{self.symbol}] Stopped: not sending the order.")
+                return
+
             # Execute trade
             order_result = self.execution.trade(
                 symbol=self.symbol,
@@ -247,14 +253,20 @@ class SymbolProcessor:
             return False
         return True
 
+    def stop(self):
+        """Ask this symbol's thread to finish. Python threads cannot be killed, so the loop checks the event."""
+        self.stop_event.set()
+
     def run_loop(self):
         logger.info(f"[{self.symbol}] Starting processing loop.")
-        while True:
+        while not self.stop_event.is_set():
             try:
                 # Wait for a new bar
-                if not self.mt5_client.wait_for_new_bar(self.symbol, self.mt5_timeframe):
+                if not self.mt5_client.wait_for_new_bar(self.symbol, self.mt5_timeframe, stop_event=self.stop_event):
+                    if self.stop_event.is_set():
+                        break
                     logger.warning(f"[{self.symbol}] Timeout or error waiting for new bar. Retrying...")
-                    time.sleep(self.cfg.timeframe_minutes() * 60 / 2)  # Wait half a bar duration before retrying
+                    self.stop_event.wait(self.cfg.timeframe_minutes() * 60 / 2)  # Wait half a bar duration before retrying
                     continue
 
                 logger.info(f"[{self.symbol}] New *closed* bar detected.")
@@ -263,7 +275,7 @@ class SymbolProcessor:
                 # Fetch and prepare data
                 data, X, y = self._fetch_and_prepare_data()
                 if data is None:
-                    time.sleep(self.cfg.timeframe_minutes() * 60)  # Wait a full bar duration before retrying
+                    self.stop_event.wait(self.cfg.timeframe_minutes() * 60)  # Wait a full bar duration before retrying
                     continue
 
                 # Move stops on open positions, then make trade decisions
@@ -272,6 +284,27 @@ class SymbolProcessor:
 
             except Exception as e:
                 logger.exception(f"[{self.symbol}] Error in processing loop: {e}")
-                time.sleep(self.cfg.timeframe_minutes() * 60)  # Wait a full bar duration on error to avoid rapid error looping
+                self.stop_event.wait(self.cfg.timeframe_minutes() * 60)  # Wait a full bar duration on error to avoid rapid error looping
 
-            time.sleep(1)  # Small sleep to prevent busy-waiting, though wait_for_new_bar should handle most of this
+            self.stop_event.wait(1)  # Small pause to prevent busy-waiting, though wait_for_new_bar should handle most of this
+        logger.info(f"[{self.symbol}] Processing loop stopped.")
+
+
+def stop_symbol_threads(symbol_threads, timeout=10.0):
+    """Stops every symbol processor, then waits up to `timeout` seconds IN TOTAL for their threads. Returns the symbols whose
+    thread is still running (they exit at their next stop check; a thread cannot be killed). Each entry is a dict with
+    "symbol", "thread" and "processor"."""
+    for entry in symbol_threads:
+        try:
+            entry["processor"].stop()
+        except Exception:
+            logger.exception(f"Could not signal {entry.get('symbol')} to stop.")
+    deadline = time.monotonic() + timeout
+    still_running = []
+    for entry in symbol_threads:
+        entry["thread"].join(max(0.0, deadline - time.monotonic()))
+        if entry["thread"].is_alive():
+            still_running.append(entry["symbol"])
+    if still_running:
+        logger.warning(f"Symbol threads still running after {timeout:.0f}s (they stop at their next check): {still_running}")
+    return still_running

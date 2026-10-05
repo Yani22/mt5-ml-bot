@@ -215,8 +215,8 @@ class MT5Client:
         except Exception:
             return None
 
-    def wait_for_new_bar(self, symbol: str, timeframe: int = mt5.TIMEFRAME_M1, timeout_multiplier: float = 1.5):
-        """Waits for a new bar to appear for a given symbol and timeframe."""
+    def wait_for_new_bar(self, symbol: str, timeframe: int = mt5.TIMEFRAME_M1, timeout_multiplier: float = 1.5, stop_event=None):
+        """Waits for a new bar to appear for a given symbol and timeframe. Returns False early once `stop_event` is set."""
         if not self._connected:
             logger.warning("wait_for_new_bar: Not connected to MT5.")
             return False
@@ -236,10 +236,15 @@ class MT5Client:
         start_time = time.time()
 
         while time.time() - start_time < dynamic_timeout:
+            if stop_event is not None and stop_event.is_set():
+                return False
             new_bar = self.get_rates(symbol, timeframe, 1)
             if new_bar is not None and len(new_bar) > 0 and new_bar[0][0] > last_bar_time:
                 return True
-            time.sleep(1)
+            if stop_event is not None:
+                stop_event.wait(1)
+            else:
+                time.sleep(1)
 
         logger.warning(f"wait_for_new_bar: Timeout waiting for new bar for {symbol} after {dynamic_timeout}s.")
         return False

@@ -213,6 +213,7 @@ class RecordingRiskManager:
 
 def make_sp(dry_run):
     sp = object.__new__(SymbolProcessor)
+    sp.stop_event = threading.Event()
     sp.symbol, sp.dry_run = SYMBOL, dry_run
     sp.risk_manager = RecordingRiskManager()
     return sp

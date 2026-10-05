@@ -80,6 +80,7 @@ def make_rm(cfg=None, client=None):
 
 def make_sp(rm, equity=EQUITY, peak=EQUITY):
     sp = object.__new__(SymbolProcessor)
+    sp.stop_event = threading.Event()
     sp.symbol, sp.dry_run = "EURUSD#", True
     sp.mt5_client, sp.risk_controller = rm.mt5_client, FakeRiskController()
     sp.risk_manager = rm

@@ -30,7 +30,7 @@ from typing import List
 import threading
 from src.live_guard import require_live_permission
 from src.state_paths import apply_mode_state_paths
-from src.symbol_processor import SymbolProcessor
+from src.symbol_processor import SymbolProcessor, stop_symbol_threads
 from src.retraining import _check_and_trigger_retraining, _handle_model_acceptance
 from src.utils import _initialize_metrics_csv
 
@@ -153,6 +153,7 @@ def run(dry_run: bool = True):
     try:
         # Outer loop for MT5 reconnection attempts
         while True:
+            symbol_threads = []  # the except path below must never act on a list from an earlier iteration
             try:
                 # --- MT5 Connection ---
                 mt5c = MT5Client(
@@ -303,12 +304,17 @@ def run(dry_run: bool = True):
             except Exception as e:
                 logger.exception(f"MT5 connection lost or critical error in trading loop: {e}. Attempting to reconnect...")
                 notifier.send_message(f"<b>CRITICAL:</b> MT5 connection lost or critical error: {e}. Attempting to reconnect...", level="CRITICAL")
+                # Stop the old symbol threads first (K7): otherwise they keep looping next to the new ones after a reconnect.
                 try:
-                    # Shutdown all symbol-specific MT5 clients before attempting main reconnection
-                    for symbol_data in symbol_threads:
-                        symbol_data["mt5_client"].shutdown()
+                    stop_symbol_threads(symbol_threads)
                 except Exception:
-                    logger.exception("Failed to shutdown symbol MT5 clients after error.")
+                    logger.exception("Failed to stop symbol threads after error.")
+                # Shutdown all symbol-specific MT5 clients before attempting main reconnection
+                for symbol_data in symbol_threads:
+                    try:
+                        symbol_data["mt5_client"].shutdown()
+                    except Exception:
+                        logger.exception(f"Failed to shutdown MT5 client for {symbol_data['symbol']} after error.")
                 try:
                     mt5c.shutdown()  # Ensure old main connection is closed
                 except Exception:
@@ -324,6 +330,10 @@ def run(dry_run: bool = True):
         logger.info("Shutting down MT5 clients and saving final states...")
         # Ensure symbol_threads is defined even if an error occurred before its initialization
         if 'symbol_threads' in locals():
+            try:
+                stop_symbol_threads(symbol_threads)
+            except Exception:
+                logger.exception("Failed to stop symbol threads on shutdown.")
             for symbol_data in symbol_threads:
                 try:
                     symbol_data["mt5_client"].shutdown()

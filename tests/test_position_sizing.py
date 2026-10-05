@@ -112,6 +112,7 @@ class RecordingExecution:
 
 def test_symbol_processor_sizes_on_the_bandit_stop_not_the_config_stop():
     sp = object.__new__(SymbolProcessor)
+    sp.stop_event = threading.Event()
     sp.symbol, sp.dry_run = "EURUSD#", True
     sp.mt5_client, sp.risk_controller = FakeClient(), FakeRiskController()
     sp.risk_manager = make_rm()
