@@ -1,5 +1,6 @@
 # src/data_manager.py
 from __future__ import annotations
+import math
 import os
 import tempfile
 import pandas as pd  # type: ignore
@@ -132,8 +133,17 @@ class DataManager:
             # Use copy_rates_from_pos to get the latest 'count' bars
             rates = mt5.copy_rates_from_pos(symbol, tf, 0, int(count))
             if rates is None or len(rates) == 0:
-                logger.warning(f"[{symbol}] MT5 returned no bars.")
+                try:
+                    last_error = mt5.last_error()
+                except Exception:
+                    last_error = "unavailable"
+                logger.warning(f"[{symbol}] MT5 returned no {timeframe} bars (terminal error: {last_error}).")
                 return pd.DataFrame()
+            if len(rates) < int(count):
+                # Raw length, before the forming bar is dropped below. The terminal only serves bars within its chart history.
+                logger.info(f"[{symbol}] MT5 returned {len(rates)} {timeframe} bars, {int(count)} were asked for "
+                            f"(first {pd.to_datetime(rates[0]['time'], unit='s', utc=True)}, last {pd.to_datetime(rates[-1]['time'], unit='s', utc=True)}): the terminal's 'Max bars in chart' "
+                            f"or the broker's history is limiting it.")
 
             df = pd.DataFrame(rates)
             if "time" not in df.columns:
@@ -187,6 +197,26 @@ class DataManager:
                 logger.warning(f"[{symbol}] Bootstrap failed to fetch additional bars for {target_timeframe}. Local history might still be insufficient.")
         else:
             logger.debug(f"[{symbol}] Local history for {target_timeframe} OK ({len(current_local_history)} rows).")
+
+        # 4. Warn once if the history is still below what this timeframe needs (K13). The terminal only serves bars within its
+        # "Max bars in chart" history, so a request for `initial_bars` can silently come back far shorter.
+        need = self._bars_needed(initial_bars, target_timeframe)
+        have = len(self.load_local_history(symbol, target_timeframe))
+        if have < need:
+            logger.warning(f"[{symbol}] Local {target_timeframe} history has {have} bars, below the {need} needed "
+                           f"({initial_bars} {self.cfg.timeframe} bars span that window). The terminal's 'Max bars in chart' "
+                           f"(Tools > Options > Charts) or the broker's history may be capping it: raise it to at least {need} "
+                           f"and restart the terminal, or features and training will use a shorter window than configured.")
+
+    def _bars_needed(self, initial_bars: int, timeframe: str) -> int:
+        """Bars of `timeframe` that span the same period as `initial_bars` bars of the primary timeframe, never more than the
+        `initial_bars` that are asked for (a finer context timeframe cannot be judged against more than was requested)."""
+        from src.time_utils import timeframe_to_seconds
+        try:
+            primary, target = timeframe_to_seconds(self.cfg.timeframe), timeframe_to_seconds(timeframe)
+            return max(1, min(int(initial_bars), math.ceil(initial_bars * primary / target)))
+        except Exception:
+            return int(initial_bars)
 
     def fetch_live(self, symbol: str, feature_cfg: FeatureCfg) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         # 1. Load the bulk of the history from the local cache first.
