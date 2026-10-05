@@ -54,6 +54,8 @@ def make_notifier():
 
 
 def test_the_telegram_post_has_a_finite_timeout(monkeypatch):
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
     seen = {}
 
     def fake_post(url, **kw):
@@ -67,6 +69,9 @@ def test_the_telegram_post_has_a_finite_timeout(monkeypatch):
 
 
 def test_a_telegram_timeout_is_swallowed(monkeypatch):
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+
     def fake_post(url, **kw):
         raise requests.exceptions.Timeout("slow")
 
