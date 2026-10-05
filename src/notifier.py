@@ -3,6 +3,9 @@ import requests
 from loguru import logger  # type: ignore
 from src.config import Cfg
 
+# (connect, read) seconds. Callers wait for the send, so an outage must not block them for longer than this.
+TELEGRAM_TIMEOUT = (3.05, 10)
+
 
 class TelegramNotifier:
     def __init__(self, cfg: Cfg):
@@ -30,7 +33,7 @@ class TelegramNotifier:
         }
 
         try:
-            response = requests.post(self.base_url, data=payload)
+            response = requests.post(self.base_url, data=payload, timeout=TELEGRAM_TIMEOUT)
             response.raise_for_status()  # Raise an exception for HTTP errors
             logger.debug(f"Telegram message sent: {message}")
         except requests.exceptions.RequestException as e:

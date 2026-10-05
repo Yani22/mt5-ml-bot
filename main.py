@@ -264,8 +264,7 @@ def run(dry_run: bool = True):
                 while True:
                     # Periodically save global states and check thread health
                     live_monitor.save_state()
-                    with lock:
-                        risk_controller.save_state(exe.risk.open_positions_cache)
+                    risk_controller.save_state(exe.risk.cache_snapshot())  # snapshot under the lock; the save and any alert run outside it
 
                     # --- Centralized Reconciliation ---
                     # This is the single point of truth for reconciling closed positions
@@ -340,8 +339,7 @@ def run(dry_run: bool = True):
         if risk_controller and exe:  # Check if exe is also defined
             try:
                 # Use the latest open positions cache from the live monitor, as it's the aggregate from all threads
-                with lock:
-                    risk_controller.save_state(exe.risk.open_positions_cache)  # Save final state
+                risk_controller.save_state(exe.risk.cache_snapshot())  # Save final state
             except Exception:
                 logger.exception("Failed to save RiskController state on shutdown.")
         logger.info("MT5 ML Bot shutdown complete.")

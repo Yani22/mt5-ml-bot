@@ -245,9 +245,12 @@ class Execution:
 
             except Exception as e:
                 logger.exception(f"Failed to reconcile positions with MT5: {e}")
-                if self.notifier:
-                    self.notifier.send_message(f"<b>ERROR:</b> Failed to reconcile cache with MT5: {e}", level="ERROR")
-                return []
+                failure = e
+
+        # Notify after the cache lock is released: the send is a network call.
+        if self.notifier:
+            self.notifier.send_message(f"<b>ERROR:</b> Failed to reconcile cache with MT5: {failure}", level="ERROR")
+        return []
 
     @staticmethod
     def _stop_fields(price, sl, lots, atr, pip_size, pip_value) -> Dict[str, Any]:

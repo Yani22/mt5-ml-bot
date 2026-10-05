@@ -8,6 +8,7 @@ import pandas as pd  # type: ignore
 import numpy as np  # type: ignore
 from loguru import logger  # type: ignore
 from .config import Cfg
+import copy
 import datetime
 import math
 from datetime import timezone, timedelta
@@ -296,6 +297,17 @@ class RiskManager:
         # cooldown finished
         self.cooldown_until = None
         return False
+
+    def total_open_risk(self) -> float:
+        """Money at risk in all tracked open positions. Takes `cache_lock`: the caller must not hold it (it is not reentrant)."""
+        with self.cache_lock:
+            return float(sum(p["risk"] for p in self.open_positions_cache.values()))
+
+    def cache_snapshot(self) -> dict:
+        """A deep copy of the open-position cache, taken under `cache_lock` (the caller must not hold it), so it can be
+        serialised or sent somewhere slow without holding the lock."""
+        with self.cache_lock:
+            return copy.deepcopy(self.open_positions_cache)
 
     # ---------- Exposed check for trading permission ----------
     def max_positions_reached(self) -> bool:

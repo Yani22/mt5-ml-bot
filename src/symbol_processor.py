@@ -174,7 +174,7 @@ class SymbolProcessor:
             spread_value = spread_pips * self.mt5_client.symbol_info(self.symbol).point
 
             # Calculate total open risk from the risk_manager's cache
-            total_open_risk = sum(p["risk"] for p in self.risk_manager.open_positions_cache.values())
+            total_open_risk = self.risk_manager.total_open_risk()
 
             # Determine pip_value and pip_size
             pip_value = self.risk_manager.get_pip_value(self.symbol)
