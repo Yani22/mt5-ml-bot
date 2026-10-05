@@ -145,4 +145,6 @@ if __name__ == "__main__":
     finally:
         # Shutdown MT5 connection
         mt5_client.shutdown()
+        from src.mt5_client import teardown_connection
+        teardown_connection()  # close the process's MT5 connection (a client's shutdown only releases it)
         print("MT5 connection shut down.")

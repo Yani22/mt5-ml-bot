@@ -189,7 +189,10 @@ def test_mt5_client_shutdown(mock_mt5):
     client.shutdown()
     assert not client.is_connected()
     from MetaTrader5 import shutdown
-    shutdown.assert_called_once()
+    shutdown.assert_not_called()          # B14: releasing a client leaves the shared connection open ...
+    from src.mt5_client import teardown_connection
+    teardown_connection()
+    shutdown.assert_called_once()         # ... and teardown_connection() closes it
 
 
 def test_mt5_client_connection_failure(mock_mt5):

@@ -1,11 +1,40 @@
 # src/mt5_client.py
 from __future__ import annotations
+import threading
 import time
 import datetime
 from typing import Optional
 import MetaTrader5 as mt5  # type: ignore
 from loguru import logger
 from src.time_utils import timeframe_to_seconds
+
+
+# The MetaTrader5 package keeps ONE connection per process. The bot makes many MT5Client objects (main, one per symbol, one
+# per DataManager), so they share it: the first connect() initialises and logs in, later ones reuse it while it is healthy,
+# a client's shutdown() only releases that client, and teardown_connection() (called by main on a reconnect and at exit)
+# closes the real connection and makes every client attached before it read as disconnected.
+_state_lock = threading.Lock()
+_generation = 0         # bumped by teardown_connection(); a client attached in an older generation is disconnected
+_initialized = False    # this process has initialised the terminal connection (read and written under _state_lock)
+
+
+def teardown_connection() -> None:
+    """Close the real terminal connection and disconnect every client attached so far."""
+    global _generation, _initialized
+    with _state_lock:
+        try:
+            mt5.shutdown()
+        except Exception as e:
+            logger.warning(f"MT5Client: exception during teardown: {e}")
+        _initialized = False
+        _generation += 1
+
+
+def _reset_shared_state() -> None:
+    """Tests only: forget the process-wide connection state."""
+    global _generation, _initialized
+    with _state_lock:
+        _generation, _initialized = 0, False
 
 
 class MT5Client:
@@ -26,7 +55,7 @@ class MT5Client:
         self.path = path
         self.max_retries = max_retries
         self.retry_delay = retry_delay
-        self._connected = False
+        self._attached_generation: Optional[int] = None  # see the `_connected` property
 
         # attempt coercion to int but keep original if not possible
         self.login = None
@@ -37,79 +66,108 @@ class MT5Client:
                 # could be string-based login – keep the raw value for mt5.login
                 self.login = login
 
+    @property
+    def _connected(self) -> bool:
+        """True while this client is attached to the process's connection and no teardown has happened since."""
+        return self._attached_generation is not None and self._attached_generation == _generation
+
+    @_connected.setter
+    def _connected(self, value: bool) -> None:
+        self._attached_generation = _generation if value else None
+
+    @staticmethod
+    def _shared_connection_is_healthy() -> bool:
+        try:
+            return mt5.terminal_info() is not None and mt5.account_info() is not None
+        except Exception:
+            return False
+
     def connect(self) -> bool:
         last_err = None
         for attempt in range(1, self.max_retries + 1):
-            try:
-                logger.debug(f"MT5Client: initialize() attempt {attempt}/{self.max_retries} (path={self.path})")
-                ok = mt5.initialize(path=self.path) if self.path else mt5.initialize()
-                if not ok:
-                    last_err = mt5.last_error()
-                    logger.error(f"MT5 initialize() failed: {last_err}")
-                    mt5.shutdown()
-                    time.sleep(self.retry_delay)
-                    continue
-
-                if self.login is not None and self.password and self.server:
-                    logger.debug("MT5Client: attempting explicit mt5.login()")
-                    authorized = mt5.login(login=self.login, password=self.password, server=self.server)
-                    if not authorized:
-                        last_err = mt5.last_error()
-                        logger.error(f"MT5 login failed: {last_err}")
-                        mt5.shutdown()
-                        time.sleep(self.retry_delay)
-                        continue
-                    logger.debug("MT5 login OK")
-                else:
-                    # No creds: validate terminal login
-                    acct = mt5.account_info()
-                    if acct is None:
-                        last_err = mt5.last_error()
-                        logger.error("MT5 terminal not logged in and no credentials were provided.")
-                        mt5.shutdown()
-                        time.sleep(self.retry_delay)
-                        continue
-                    logger.info(f"MT5 terminal already logged in (account={acct.login})")
-
-                # verify account_info now
-                account_info = mt5.account_info()
-                if account_info is None:
-                    last_err = mt5.last_error()
-                    logger.error("MT5 connected but account_info() returned None.")
-                    mt5.shutdown()
-                    time.sleep(self.retry_delay)
-                    continue
-
-                logger.info(f"MT5 connected successfully (account={account_info.login})")
-                self._connected = True
+            with _state_lock:   # one attempt at a time; the retry sleep below is outside the lock
+                ok, last_err = self._attempt(attempt)
+            if ok:
                 return True
-
-            except Exception as exc:
-                last_err = exc
-                logger.exception(f"MT5Client: unexpected error on connect: {exc}")
-                try:
-                    mt5.shutdown()
-                except Exception:
-                    pass
-                time.sleep(self.retry_delay)
+            time.sleep(self.retry_delay)
 
         logger.critical(f"MT5Client: failed to connect after {self.max_retries} attempts. Last error: {last_err}")
         return False
+
+    def _attempt(self, attempt: int):
+        """One connect attempt, called with _state_lock held. Returns (connected, last_error)."""
+        global _initialized
+        if _initialized and self._shared_connection_is_healthy():
+            logger.debug("MT5Client: reusing the process's existing MT5 connection.")
+            self._connected = True
+            return True, None
+        # Nothing healthy to share: (re)initialise. No mt5.shutdown() first: a false "unhealthy" reading must not cut off
+        # threads that still have a working connection.
+        last_err = None
+        try:
+            logger.debug(f"MT5Client: initialize() attempt {attempt}/{self.max_retries} (path={self.path})")
+            ok = mt5.initialize(path=self.path) if self.path else mt5.initialize()
+            if not ok:
+                last_err = mt5.last_error()
+                logger.error(f"MT5 initialize() failed: {last_err}")
+                _initialized = False
+                mt5.shutdown()
+                return False, last_err
+
+            if self.login is not None and self.password and self.server:
+                logger.debug("MT5Client: attempting explicit mt5.login()")
+                authorized = mt5.login(login=self.login, password=self.password, server=self.server)
+                if not authorized:
+                    last_err = mt5.last_error()
+                    logger.error(f"MT5 login failed: {last_err}")
+                    _initialized = False
+                    mt5.shutdown()
+                    return False, last_err
+                logger.debug("MT5 login OK")
+            else:
+                # No creds: validate terminal login
+                acct = mt5.account_info()
+                if acct is None:
+                    last_err = mt5.last_error()
+                    logger.error("MT5 terminal not logged in and no credentials were provided.")
+                    _initialized = False
+                    mt5.shutdown()
+                    return False, last_err
+                logger.info(f"MT5 terminal already logged in (account={acct.login})")
+
+            # verify account_info now
+            account_info = mt5.account_info()
+            if account_info is None:
+                last_err = mt5.last_error()
+                logger.error("MT5 connected but account_info() returned None.")
+                _initialized = False
+                mt5.shutdown()
+                return False, last_err
+
+            logger.info(f"MT5 connected successfully (account={account_info.login})")
+            _initialized = True
+            self._connected = True
+            return True, None
+
+        except Exception as exc:
+            logger.exception(f"MT5Client: unexpected error on connect: {exc}")
+            _initialized = False
+            try:
+                mt5.shutdown()
+            except Exception:
+                pass
+            return False, exc
 
     def is_connected(self) -> bool:
         return bool(self._connected)
 
     def shutdown(self) -> None:
-        try:
-            if self._connected:
-                logger.info("MT5Client: shutting down connection.")
-            else:
-                logger.info("MT5Client: shutdown() called but client not connected.")
-            mt5.shutdown()
-        except Exception as e:
-            logger.warning(f"MT5Client: exception during shutdown: {e}")
-        finally:
-            self._connected = False
+        """Release this client. The shared MT5 connection stays open for the other clients; teardown_connection() closes it."""
+        if self._connected:
+            logger.info("MT5Client: releasing this client (the shared MT5 connection stays open).")
+        else:
+            logger.info("MT5Client: shutdown() called but client not connected.")
+        self._connected = False
 
     def account_info(self):
         if not self._connected:

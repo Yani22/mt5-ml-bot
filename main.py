@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from loguru import logger
 import pandas as pd
 from src.config import Cfg, FeatureCfg
-from src.mt5_client import MT5Client
+from src.mt5_client import MT5Client, teardown_connection
 from src.risk import RiskManager
 from src.execution import Execution
 from src.utils import setup_logging, get_training_data, load_ensemble, save_ensemble, safe_retrain_ensemble, load_optuna_params, log_symbol_specific_configs, log_startup_summary, timeframe_to_seconds, ensure_min_grid_size, timeframe_to_mt5_timeframe, _initialize_metrics_csv, log_metrics_to_csv, METRICS_CSV_FILE, METRICS_HEADERS
@@ -319,6 +319,10 @@ def run(dry_run: bool = True):
                     mt5c.shutdown()  # Ensure old main connection is closed
                 except Exception:
                     logger.exception("Failed to shutdown main mt5 client after error.")
+                try:
+                    teardown_connection()  # close the real connection; every old client (also the DataManager ones) now reads disconnected
+                except Exception:
+                    logger.exception("Failed to tear down the MT5 connection after error.")
                 time.sleep(RECONNECTION_RETRY_SECONDS)  # Wait before retrying connection
 
     except KeyboardInterrupt:
@@ -339,6 +343,11 @@ def run(dry_run: bool = True):
                     symbol_data["mt5_client"].shutdown()
                 except Exception:
                     logger.exception(f"Failed to shutdown MT5 client for {symbol_data['symbol']} cleanly.")
+
+        try:
+            teardown_connection()
+        except Exception:
+            logger.exception("Failed to tear down the MT5 connection on shutdown.")
 
         if live_monitor:
             try:

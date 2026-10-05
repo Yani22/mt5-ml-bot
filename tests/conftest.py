@@ -21,3 +21,18 @@ except ImportError:
         "TIMEFRAME_M5", "TIMEFRAME_MN1", "TIMEFRAME_W1", "TRADE_ACTION_DEAL",
         "TRADE_ACTION_SLTP", "TRADE_RETCODE_DONE")):
         setattr(_stub, _name, _i)
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _reset_shared_mt5_connection():
+    """src.mt5_client keeps process-wide connection state; do not let it leak between tests."""
+    from src import mt5_client
+    reset = getattr(mt5_client, "_reset_shared_state", None)
+    if reset:
+        reset()
+    yield
+    if reset:
+        reset()

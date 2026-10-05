@@ -565,3 +565,5 @@ if __name__ == "__main__":
             logger.exception("Final persist of bandit state failed.")
         if mt5_client:
             mt5_client.shutdown()
+            from src.mt5_client import teardown_connection
+            teardown_connection()  # close the process's MT5 connection (a client's shutdown only releases it)
