@@ -141,7 +141,6 @@ def run(dry_run: bool = True):
 
     retraining_processes = {}
     retraining_status = {sym: False for sym in cfg.symbols}  # Track if retraining is active
-    trading_blocked_by_low_new_model_auc = {sym: False for sym in cfg.symbols}  # Track if trading is blocked due to low new model AUC
     last_diagnostics_log_time = 0.0  # For throttling diagnostics logging
     last_retrain_date = {sym: None for sym in cfg.symbols}  # Track last retraining date per symbol
 
@@ -238,7 +237,6 @@ def run(dry_run: bool = True):
                 exe.reconcile_open_positions_with_mt5()
 
                 retraining_status = retraining_status_for(cfg.symbols, retraining_processes)  # a child that outlived the reconnect stays tracked (K22)
-                trading_blocked_by_low_new_model_auc = {sym: False for sym in cfg.symbols}  # Track if trading is blocked due to low new model AUC
                 last_diagnostics_log_time = 0.0  # For throttling diagnostics logging
                 # Initialize last_retrain_date from RiskController's loaded state
                 last_retrain_date = risk_controller.last_daily_retrain_date
