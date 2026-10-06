@@ -156,3 +156,127 @@ def test_a_session_filter_of_quoted_times_loads(tmp_path):
 
 def test_the_tracked_config_still_loads():
     Cfg.from_yaml(str(ROOT / "config.yaml"))
+
+
+# ---- symbol_overrides: each value is checked against the setting it overrides --------------------------------------
+
+def test_a_string_for_a_float_override_stops_the_load(tmp_path):
+    with pytest.raises(ConfigError, match=r"symbol_overrides\.USDJPY#\.min_ensemble_auc"):
+        load(tmp_path, 'symbols: [USDJPY#]\nsymbol_overrides:\n  USDJPY#:\n    min_ensemble_auc: "0.0"\n')
+
+
+def test_a_string_inside_an_override_grid_stops_the_load(tmp_path):
+    with pytest.raises(ConfigError, match=r"symbol_overrides\.USDJPY#\.atr_grid"):
+        load(tmp_path, 'symbols: [USDJPY#]\nsymbol_overrides:\n  USDJPY#:\n    atr_grid: [1.0, "1.5"]\n')
+
+
+def test_a_quoted_false_for_a_bool_override_stops_the_load(tmp_path):
+    with pytest.raises(ConfigError, match=r"symbol_overrides\.USDJPY#\.breakeven_at_1R"):
+        load(tmp_path, 'symbols: [USDJPY#]\nsymbol_overrides:\n  USDJPY#:\n    breakeven_at_1R: "false"\n')
+
+
+def test_a_cost_override_is_checked_too(tmp_path):
+    with pytest.raises(ConfigError, match=r"symbol_overrides\.USDJPY#\.spread_pips"):
+        load(tmp_path, 'symbols: [USDJPY#]\nsymbol_overrides:\n  USDJPY#:\n    spread_pips: "2.2"\n')
+
+
+def test_an_override_block_that_is_not_a_mapping_stops_the_load(tmp_path):
+    with pytest.raises(ConfigError, match=r"symbol_overrides\.USDJPY#"):
+        load(tmp_path, "symbols: [USDJPY#]\nsymbol_overrides:\n  USDJPY#: 0.0\n")
+
+
+def test_valid_overrides_still_load(tmp_path):
+    cfg = load(tmp_path, "symbols: [USDJPY#]\nsymbol_overrides:\n  USDJPY#:\n    min_ensemble_auc: 0\n"
+                         "    atr_grid: [1, 1.5]\n    max_spread_atr: 0\n    breakeven_at_1R: false\n    spread_pips: 2.2\n"
+                         '    retrain_time_utc: "01:02"\n')
+    assert cfg.get_symbol_value("USDJPY#", "min_ensemble_auc") == 0
+    assert cfg.get_symbol_value("USDJPY#", "retrain_time_utc") == "01:02"
+
+
+def test_a_list_of_times_is_accepted_for_the_retrain_override(tmp_path):
+    cfg = load(tmp_path, 'symbols: [USDJPY#]\nsymbol_overrides:\n  USDJPY#:\n    retrain_time_utc: ["01:02", "13:02"]\n')
+    assert cfg.get_symbol_value("USDJPY#", "retrain_time_utc") == ["01:02", "13:02"]
+
+
+def test_an_override_key_that_has_no_config_block_but_is_read_is_accepted(tmp_path):
+    cfg = load(tmp_path, "symbols: [USDJPY#]\nsymbol_overrides:\n  USDJPY#:\n    min_risk_reward_ratio: 1.5\n")
+    assert cfg.get_symbol_value("USDJPY#", "min_risk_reward_ratio") == 1.5
+
+
+def test_a_misspelled_override_key_stops_the_load(tmp_path):
+    with pytest.raises(ConfigError, match=r"min_ensemble_aux.*did you mean `min_ensemble_auc`"):
+        load(tmp_path, "symbols: [USDJPY#]\nsymbol_overrides:\n  USDJPY#:\n    min_ensemble_aux: 0.0\n")
+
+
+def test_a_risk_setting_that_nothing_reads_per_symbol_is_refused_as_an_override(tmp_path):
+    # block_on_drawdown is a RiskCfg field, but it is read from the global block only
+    with pytest.raises(ConfigError, match="block_on_drawdown"):
+        load(tmp_path, "symbols: [USDJPY#]\nsymbol_overrides:\n  USDJPY#:\n    block_on_drawdown: 0.1\n")
+
+
+def test_an_unused_setting_is_refused_as_an_override(tmp_path):
+    with pytest.raises(ConfigError, match="min_auc_improvement"):
+        load(tmp_path, "symbols: [USDJPY#]\nsymbol_overrides:\n  USDJPY#:\n    min_auc_improvement: 0.01\n")
+
+
+def _keys_read_per_symbol():
+    """Every key the code passes to `get_symbol_value`, found by parsing the source (tests and .venv left out)."""
+    import ast
+    constant, dynamic = set(), []
+    for path in ROOT.rglob("*.py"):
+        rel = path.relative_to(ROOT).parts
+        if rel[0] in (".venv", "tests") or "site-packages" in rel:
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "get_symbol_value":
+                arg = node.args[1] if len(node.args) > 1 else None
+                if isinstance(arg, ast.Constant):
+                    constant.add(arg.value)
+                else:
+                    dynamic.append(f"{'/'.join(rel)}:{node.lineno}")
+    return constant, dynamic
+
+
+def test_every_key_the_code_reads_per_symbol_can_be_overridden():
+    from src.config import OVERRIDABLE
+    constant, _ = _keys_read_per_symbol()
+    assert constant - set(OVERRIDABLE) == set()
+
+
+def test_every_overridable_key_is_read_somewhere():
+    from src.config import OVERRIDABLE
+    constant, _ = _keys_read_per_symbol()
+    assert set(OVERRIDABLE) - constant == set()
+
+
+def test_the_only_per_symbol_read_with_a_computed_key_is_the_startup_log():
+    _, dynamic = _keys_read_per_symbol()
+    assert [d.split(":")[0] for d in dynamic] == ["src/utils.py"]
+
+
+# ---- the dicts inside the risk block ------------------------------------------------------------------------------
+
+def test_a_quoted_false_inside_dynamic_risk_stops_the_load(tmp_path):
+    with pytest.raises(ConfigError, match=r"risk\.dynamic_risk\.enabled"):
+        load(tmp_path, 'risk:\n  dynamic_risk:\n    enabled: "false"\n')
+
+
+def test_a_string_inside_dynamic_tp_stops_the_load(tmp_path):
+    with pytest.raises(ConfigError, match=r"risk\.dynamic_tp\.base_tp_mult"):
+        load(tmp_path, 'risk:\n  dynamic_tp:\n    base_tp_mult: "2.0"\n')
+
+
+def test_an_unquoted_session_time_stops_the_load(tmp_path):
+    # YAML 1.1 reads an unquoted 10:30 as the integer 630
+    with pytest.raises(ConfigError, match=r"risk\.session_filter\.start"):
+        load(tmp_path, 'risk:\n  session_filter:\n    start: 10:30\n    end: "23:59"\n')
+
+
+def test_a_dynamic_risk_override_is_checked_too(tmp_path):
+    with pytest.raises(ConfigError, match=r"symbol_overrides\.USDJPY#\.dynamic_risk\.enabled"):
+        load(tmp_path, 'symbols: [USDJPY#]\nsymbol_overrides:\n  USDJPY#:\n    dynamic_risk:\n      enabled: "false"\n')
+
+
+def test_dynamic_risk_with_real_types_loads(tmp_path):
+    cfg = load(tmp_path, "risk:\n  dynamic_risk:\n    enabled: false\n    base_risk: 0.01\n    max_risk: 1\n")
+    assert cfg.risk.dynamic_risk["enabled"] is False

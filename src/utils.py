@@ -10,7 +10,7 @@ import pandas as pd  # type: ignore
 from src.features import FeatureCfg, build_static_features, build_dynamic_features, add_contextual_features, build_features
 from src.labels import generate_labels, generate_long_short_labels
 from src.ensemble import Ensemble
-from src.config import Cfg, ConfigError
+from src.config import Cfg, ConfigError, check_tuned_params
 from src import data_manager
 from src.data import merge_features_labels
 from src.time_utils import timeframe_to_seconds, timeframe_to_mt5_timeframe  # NEW IMPORT
@@ -105,6 +105,8 @@ def load_optuna_params(symbol: str, cfg: Cfg) -> dict | None:
         logger.warning(f"[{symbol}] Optuna params format unexpected; using empty model params.")
         # Ensure min_pct_change is always present, even if optuna_params is empty
         return {"lgbm": {}, "xgb": {}, "rf": {}, "logreg": {}, "features": {"min_pct_change": cfg.features.min_pct_change}}
+
+    check_tuned_params(loaded_params, file_path)
 
     # Ensure min_pct_change is always present in features, falling back to cfg default
     if "features" not in loaded_params:

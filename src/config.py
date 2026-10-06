@@ -50,7 +50,10 @@ def _type_ok(value, hint):
         args = typing.get_args(hint)
         return isinstance(value, list) and all(_type_ok(v, args[0]) for v in value) if args else isinstance(value, list)
     if origin in (dict, Dict):
-        return isinstance(value, dict)
+        args = typing.get_args(hint)
+        if not isinstance(value, dict):
+            return False
+        return all(_type_ok(k, args[0]) and _type_ok(v, args[1]) for k, v in value.items()) if args else True
     if hint is bool:
         return isinstance(value, bool)
     if hint is int:
@@ -62,8 +65,13 @@ def _type_ok(value, hint):
     return True  # a nested dataclass or another type is checked where it is built
 
 
-def _refuse_wrong_type(value, hint, where):
+def _refuse_wrong_type(value, hint, where, source="config.yaml"):
     if not _type_ok(value, hint):
+        if isinstance(value, dict):  # name the entry that is wrong, not the whole dict
+            for arg in (typing.get_args(hint) if typing.get_origin(hint) is typing.Union else (hint,)):
+                if typing.get_origin(arg) in (dict, Dict) and typing.get_args(arg):
+                    for k, v in value.items():
+                        _refuse_wrong_type(v, typing.get_args(arg)[1], f"{where}.{k}", source)
         note = ""
         if isinstance(value, str) and hint in (float, int, Optional[int]):
             try:
@@ -71,13 +79,222 @@ def _refuse_wrong_type(value, hint, where):
                 note = " (quoted, or an exponent with no decimal point such as 1e-4: write 0.0001 or 1.0e-4)"
             except ValueError:
                 pass
-        raise ConfigError(f"config.yaml: `{where}` must be {_type_name(hint)}, got {value!r} ({type(value).__name__}){note}")
+        raise ConfigError(f"{source}: `{where}` must be {_type_name(hint)}, got {value!r} ({type(value).__name__}){note}")
+
+
+# the inner keys of the free-form dicts in RiskCfg get the type of their default; a key the default lacks is left as written
+_INNER_DICTS = ("dynamic_risk", "dynamic_tp")
+
+
+def _refuse_wrong_inner_types(cls, key, value, where):
+    inner_types = {k: type(v) for k, v in cls().__dict__[key].items()}
+    for inner_key, inner_value in value.items():
+        if inner_key in inner_types:
+            _refuse_wrong_type(inner_value, float if inner_types[inner_key] is float else inner_types[inner_key],
+                               f"{where}.{inner_key}")
 
 
 def _refuse_wrong_types(cls, raw, name):
     hints = typing.get_type_hints(cls)
     for key, value in raw.items():
         _refuse_wrong_type(value, hints[key], f"{name}.{key}")
+        if cls is RiskCfg and key in _INNER_DICTS:
+            _refuse_wrong_inner_types(RiskCfg, key, value, f"{name}.{key}")
+
+
+# The settings the code reads per symbol (`Cfg.get_symbol_value` with a constant key), each with the type it must have.
+# tests/test_config_types.py parses the source and checks this list both ways: a key read but missing here would stop a
+# valid override, a key listed here that nothing reads would be an override that does nothing.
+OVERRIDABLE = {
+    "min_prob_long": float,
+    "min_prob_short": float,
+    "atr_multiplier_sl": float,
+    "atr_multiplier_tp": float,
+    "trailing_atr_mult": float,
+    "breakeven_at_1R": bool,
+    "min_ensemble_auc": float,
+    "max_spread_atr": float,
+    "risk_per_trade": float,
+    "min_risk_reward_ratio": float,  # no config block has it; risk.py falls back to 1.2
+    "dynamic_risk": Dict[str, Any],
+    "dynamic_tp": Dict[str, Any],
+    "atr_grid": List[float],
+    "min_prob_grid_long": List[float],
+    "min_prob_grid_short": List[float],
+    "vol_threshold": float,
+    "spread_pips": float,
+    # an override may be one "HH:MM" string; the global setting is turned into a list by from_yaml
+    "retrain_time_utc": typing.Union[str, List[str], None],
+}
+
+
+def _refuse_wrong_override_types(overrides):
+    if not isinstance(overrides, dict):
+        raise ConfigError(f"config.yaml: `symbol_overrides` must be a mapping of symbol to settings, got {type(overrides).__name__}")
+    for symbol, settings in overrides.items():
+        if not isinstance(settings, dict):
+            raise ConfigError(f"config.yaml: `symbol_overrides.{symbol}` must be a mapping of settings, got {settings!r}")
+        for key, value in settings.items():
+            if key not in OVERRIDABLE:
+                close = difflib.get_close_matches(str(key), list(OVERRIDABLE), n=1)
+                raise ConfigError(f"config.yaml: `symbol_overrides.{symbol}` has `{key}`, which no code reads per symbol, so it would do "
+                                  f"nothing" + (f" (did you mean `{close[0]}`?)" if close else "") +
+                                  f". Settings that can be overridden: {', '.join(OVERRIDABLE)}")
+            _refuse_wrong_type(value, OVERRIDABLE[key], f"symbol_overrides.{symbol}.{key}")
+            if key in _INNER_DICTS:
+                _refuse_wrong_inner_types(RiskCfg, key, value, f"symbol_overrides.{symbol}.{key}")
+
+
+# The parameters `MLStrategy` takes from `models[].defaults` and the tuner's `models` output (`model_params.get(...)`), with their types.
+# Any other key was ignored without a word. tests/test_config_blocks.py parses strategy_ml.py and checks this table against it.
+MODEL_PARAMS = {
+    "lgbm": {"n_estimators": int, "max_depth": int, "learning_rate": float, "subsample": float, "colsample_bytree": float,
+             "min_child_samples": int},
+    "xgb": {"n_estimators": int, "max_depth": int, "learning_rate": float, "subsample": float, "colsample_bytree": float},
+    "rf": {"n_estimators": int, "max_depth": Optional[int], "min_samples_leaf": typing.Union[int, float]},
+    "logreg": {},  # an SGD classifier with fixed settings: no parameter is read
+    "sgd": {},
+}
+_MODEL_ENTRY_KEYS = ("name", "defaults", "tune")
+_ENSEMBLE_METHODS = ("soft_vote", "stacking")
+_THRESHOLD_METRICS = ("f1", "precision", "recall", "custom_pnl", "sharpe_ratio")
+_ENSEMBLE_KEYS = {
+    "method": str, "weights": Dict[str, float], "meta": Dict[str, Any], "flat_mode": bool, "threshold_metric": str,
+    "auto_threshold": bool, "min_ensemble_auc": float,
+}
+_LOGGING_KEYS = {"level": str, "to_file": bool, "rotate": typing.Union[str, int], "retention": typing.Union[str, int]}
+_LOG_LEVELS = ("TRACE", "DEBUG", "INFO", "SUCCESS", "WARNING", "ERROR", "CRITICAL")
+
+
+def _unknown_key_error(key, known, where, source="config.yaml"):
+    close = difflib.get_close_matches(str(key), list(known), n=1)
+    return ConfigError(f"{source}: unknown key `{key}` in `{where}`" + (f" (did you mean `{close[0]}`?)" if close else "") +
+                       f". Known keys: {', '.join(known) or 'none (this model reads no parameter)'}")
+
+
+def _scalar_kind(hint):
+    """int, float or None (any number) for a parameter's type, with Optional unwrapped."""
+    args = [a for a in typing.get_args(hint) if a is not type(None)] or [hint]
+    return args[0] if len(args) == 1 else None
+
+
+def _refuse_bad_range(value, hint, where, source="config.yaml"):
+    kind = _scalar_kind(hint)
+    ok = isinstance(value, list) and len(value) in (2, 3) and (len(value) == 2 or value[2] == "log")
+    ok = ok and all(isinstance(b, (int, float)) and not isinstance(b, bool) for b in value[:2])
+    if ok:
+        lo, hi = value[:2]
+        # the tuner takes suggest_int or suggest_float from the type of the bounds: a mixed range, or an int range for a
+        # float setting (subsample [0, 1]), would silently search the wrong grid
+        same = isinstance(lo, int) == isinstance(hi, int)
+        fits = kind is None or (isinstance(lo, int) if kind is int else isinstance(lo, float))
+        # tuner.suggest_params draws a decimal for every [lo, hi, log] range, so a whole-number setting would be saved as 287.3
+        ok = same and fits and lo <= hi and not (len(value) == 3 and kind is int)
+    if not ok:
+        want = {int: "whole numbers", float: "decimals (write 0.6, not 0)", None: "numbers of one type"}[kind]
+        log = "[low, high] (no log: the tuner draws a decimal for a log range)" if kind is int else "[low, high] or [low, high, log]"
+        raise ConfigError(f"{source}: `{where}` must be {log} with {want}, low <= high; got {value!r}")
+
+
+def _check_model_param(model, key, value, where, source="config.yaml", allow_range=False, allow_device=False):
+    params = MODEL_PARAMS[model]
+    if key == "device" and allow_device:
+        return _refuse_wrong_type(value, str, f"{where}.{key}", source)
+    if key not in params:
+        raise _unknown_key_error(key, list(params) + (["device"] if allow_device else []), where, source)
+    if allow_range and isinstance(value, list):
+        return _refuse_bad_range(value, params[key], f"{where}.{key}", source)
+    _refuse_wrong_type(value, params[key], f"{where}.{key}", source)
+
+
+def _check_model_params(model, mapping, where, source="config.yaml", allow_range=False, allow_device=False):
+    if not isinstance(mapping, dict):
+        raise ConfigError(f"{source}: `{where}` must be a mapping of parameters, got {mapping!r}")
+    for key, value in mapping.items():
+        _check_model_param(model, key, value, where, source, allow_range, allow_device)
+
+
+def _check_models(models):
+    """`models` (a list of {name, defaults, tune}). Returns the list as written."""
+    if models is None:
+        return []
+    if not isinstance(models, list):
+        raise ConfigError(f"config.yaml: `models` must be a list of models, got {type(models).__name__}")
+    seen = set()
+    for i, entry in enumerate(models):
+        where = f"models[{i}]"
+        if not isinstance(entry, dict):
+            raise ConfigError(f"config.yaml: `{where}` must be a mapping with `name`, got {entry!r}")
+        for key in entry:
+            if key not in _MODEL_ENTRY_KEYS:
+                raise _unknown_key_error(key, _MODEL_ENTRY_KEYS, where)
+        name = entry.get("name")
+        if not isinstance(name, str) or name.lower() not in MODEL_PARAMS:
+            raise ConfigError(f"config.yaml: `{where}.name` must be one of {', '.join(MODEL_PARAMS)}, got {name!r}")
+        if name.lower() in seen:
+            raise ConfigError(f"config.yaml: `{where}.name` {name!r} is listed twice")
+        seen.add(name.lower())
+        _check_model_params(name.lower(), entry.get("defaults") or {}, f"{where}.defaults", allow_device=True)
+        _check_model_params(name.lower(), entry.get("tune") or {}, f"{where}.tune", allow_range=True)
+    return models
+
+
+def _check_ensemble(ensemble, model_names):
+    if ensemble is None:
+        return {}
+    if not isinstance(ensemble, dict):
+        raise ConfigError(f"config.yaml: `ensemble` must be a mapping of settings, got {type(ensemble).__name__}")
+    for key, value in ensemble.items():
+        if key == "threshold_grid":
+            if not (value == "auto" or _type_ok(value, float) or _type_ok(value, List[float])):
+                raise ConfigError(f"config.yaml: `ensemble.threshold_grid` must be \"auto\", a number or a list of numbers, got {value!r}")
+            continue
+        if key not in _ENSEMBLE_KEYS:
+            raise _unknown_key_error(key, list(_ENSEMBLE_KEYS) + ["threshold_grid"], "ensemble")
+        _refuse_wrong_type(value, _ENSEMBLE_KEYS[key], f"ensemble.{key}")
+    if ensemble.get("method", "soft_vote") not in _ENSEMBLE_METHODS:
+        raise ConfigError(f"config.yaml: `ensemble.method` must be one of {', '.join(_ENSEMBLE_METHODS)}, got {ensemble['method']!r}")
+    if ensemble.get("threshold_metric", "f1") not in _THRESHOLD_METRICS:
+        raise ConfigError(f"config.yaml: `ensemble.threshold_metric` must be one of {', '.join(_THRESHOLD_METRICS)}, "
+                          f"got {ensemble['threshold_metric']!r}")
+    for member in ensemble.get("weights") or {}:
+        if member not in model_names:
+            raise ConfigError(f"config.yaml: `ensemble.weights` names `{member}`, which is not a model in `models` ({', '.join(model_names)})")
+    return ensemble
+
+
+def _check_logging(logging_cfg):
+    if logging_cfg is None:
+        return {}
+    if not isinstance(logging_cfg, dict):
+        raise ConfigError(f"config.yaml: `logging` must be a mapping of settings, got {type(logging_cfg).__name__}")
+    for key, value in logging_cfg.items():
+        if key not in _LOGGING_KEYS:
+            raise _unknown_key_error(key, list(_LOGGING_KEYS), "logging")
+        _refuse_wrong_type(value, _LOGGING_KEYS[key], f"logging.{key}")
+    if logging_cfg.get("level", "INFO") not in _LOG_LEVELS:  # case-sensitive: loguru raises on `info`
+        raise ConfigError(f"config.yaml: `logging.level` must be one of {', '.join(_LOG_LEVELS)}, got {logging_cfg['level']!r}")
+    return logging_cfg
+
+
+_TUNED_TOP_LEVEL = {"models": Dict[str, Any], "features": Dict[str, Any], "prediction_horizon": int, "min_pct_change": float}
+
+
+def check_tuned_params(params, source):
+    """The tuned-params file (`optuna_params/<symbol>_best_params.json`): the keys and types the loaders read. Raises ConfigError naming `source`."""
+    for key, value in params.items():
+        if key not in _TUNED_TOP_LEVEL:
+            raise _unknown_key_error(key, list(_TUNED_TOP_LEVEL), "the file", source)
+        _refuse_wrong_type(value, _TUNED_TOP_LEVEL[key], key, source)
+    hints = typing.get_type_hints(FeatureCfg)
+    for key, value in (params.get("features") or {}).items():
+        if key not in hints:
+            raise _unknown_key_error(key, list(hints), "features", source)
+        _refuse_wrong_type(value, hints[key], f"features.{key}", source)
+    for name, tuned in (params.get("models") or {}).items():
+        if name.lower() not in MODEL_PARAMS:
+            raise ConfigError(f"{source}: `models.{name}` must be one of {', '.join(MODEL_PARAMS)}")
+        _check_model_params(name.lower(), tuned, f"models.{name}", source, allow_device=True)
 
 
 def _scalar(raw, key, kind, default):
@@ -416,6 +633,11 @@ class Cfg:
 
         # features may contain lists (for tuning); pick sensible defaults
         raw_features = raw.get("features", {}) or {}
+        if isinstance(raw_features, dict):
+            feature_hints = typing.get_type_hints(FeatureCfg)
+            for k, v in raw_features.items():  # a list is the tuner's [low, high] range: the config takes the first entry
+                if isinstance(v, list) and k not in ("roc_lags", "roc_lags_options") and k in feature_hints:
+                    _refuse_bad_range(v, feature_hints[k], f"features.{k}")
         cleaned_features: Dict[str, Any] = {}
         for k, v in raw_features.items():
             if isinstance(v, list) and k != "roc_lags":  # roc_lags is handled separately if it's a list of lists
@@ -442,6 +664,9 @@ class Cfg:
             price_action=_block(PriceActionCfg, raw_context.get("price_action"), "context_features.price_action"),
         )
 
+        models = _check_models(raw.get("models"))
+        ensemble_checked = _check_ensemble(raw.get("ensemble"), [m["name"] for m in models])
+        logging_checked = _check_logging(raw.get("logging"))
         risk_obj = _block(RiskCfg, raw.get("risk"), "risk")
         # the AUC gate reads RiskCfg (get_symbol_value); `ensemble.min_ensemble_auc` in the YAML used to be ignored
         ensemble_raw = raw.get("ensemble") or {}
@@ -485,6 +710,7 @@ class Cfg:
         symbols = raw.get("symbols", ["EURUSD"])
         _refuse_wrong_type(symbols, List[str], "symbols")
         symbol_overrides = raw.get("symbol_overrides") or {}
+        _refuse_wrong_override_types(symbol_overrides)
         for key in symbol_overrides:
             if key not in symbols:
                 logger.warning(f"config.yaml: `symbol_overrides` has `{key}`, which is not in `symbols` {list(symbols)}: "
@@ -505,10 +731,10 @@ class Cfg:
             initial_equity=float(bt_obj.initial_equity if "backtesting" in raw else _scalar(raw, "initial_equity", float, 100.0)),
             features=features_obj,
             context_features=context_features_obj,
-            models=raw.get("models", []),
-            ensemble=raw.get("ensemble", {}),
+            models=models,
+            ensemble=ensemble_checked,
             risk=risk_obj,
-            logging=raw.get("logging", {}),
+            logging=logging_checked,
             watchdog=watchdog_obj,
             monitoring=mon_obj,
             fetch=fetch_obj,
