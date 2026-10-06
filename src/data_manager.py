@@ -219,6 +219,20 @@ class DataManager:
         except Exception:
             return int(initial_bars)
 
+    @staticmethod
+    def _context_bar_needed(data: pd.DataFrame, timeframe: str):
+        """Open time of the newest higher-timeframe bar the context join gives the decision bar (the last row of `data`).
+
+        `add_contextual_features` shifts each context bar to its close and joins backward on the primary bar's OPEN time, so the
+        decision bar at 10:55 uses the 09:00 H1 bar and the bar at 11:00 uses the 10:00 one. The last primary bar before the current
+        context bar opens is used (not "one context bar earlier"), so a weekend or session gap needs the last bar before the gap.
+        None when there is no earlier primary bar to judge by."""
+        from src.time_utils import timeframe_to_seconds
+        seconds = timeframe_to_seconds(timeframe)
+        floor = data.index[-1].floor(f"{seconds}s")
+        earlier = data.index[data.index < floor]
+        return earlier[-1].floor(f"{seconds}s") if len(earlier) else None
+
     def fetch_live(self, symbol: str, feature_cfg: FeatureCfg) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         # 1. Load the bulk of the history from the local cache first.
         data = self.load_local_history(symbol, self.cfg.timeframe, count=self.cfg.history_bars)
@@ -260,8 +274,18 @@ class DataManager:
                 # Append the newly fetched recent MTA data to local history
                 if self.cfg.fetch.save_raw_data_locally:
                     self.append_new_bars(symbol, mta_recent_data, timeframe=self.cfg.context_features.mta.timeframe)
-                # Load the full (updated) local history for feature building
-                mta_df = self.load_local_history(symbol, self.cfg.context_features.mta.timeframe, count=self.cfg.history_bars)
+                # Load the full (updated) local history for feature building, and add the bars just fetched: with
+                # `save_raw_data_locally` off (or a failed append) the cache alone would stay at its start-up state.
+                mta_tf = self.cfg.context_features.mta.timeframe
+                mta_df = self.load_local_history(symbol, mta_tf, count=self.cfg.history_bars)
+                mta_df = pd.concat([mta_df, mta_recent_data])
+                mta_df = mta_df[~mta_df.index.duplicated(keep='last')].sort_index()
+                needed = self._context_bar_needed(data, mta_tf)
+                if needed is not None and (mta_df.empty or mta_df.index[-1] < needed):
+                    have = mta_df.index[-1] if not mta_df.empty else "none"
+                    logger.warning(f"[{symbol}] The {mta_tf} context ends at {have} but the decision bar needs the bar opened at {needed}; "
+                                   f"the context is stale. Skipping this bar.")
+                    return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
         inter_market_df = None
         if self.cfg.context_features.inter_market.enabled:

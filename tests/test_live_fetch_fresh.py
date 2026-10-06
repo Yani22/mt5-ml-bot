@@ -67,10 +67,16 @@ def test_the_processor_skips_the_bar_when_the_fetch_returns_nothing():
 
 # ---- K24: an empty context fetch used to be "disabled for this tick" while the processor rebuilt X from the cache ----
 
+def hourly(first, last):
+    idx = pd.date_range(first, last, freq="1h", tz="UTC")
+    return pd.DataFrame({"open": 1.0, "high": 1.1, "low": 0.9, "close": 1.0, "volume": 1}, index=idx)
+
+
 def make_ctx(mta_recent, im_recent=None, mta_on=True, im_on=False):
     """`fetch_live` with the H1 context (and optionally inter-market) enabled; M5 always fetches fine."""
     cached, recent = frame(50), frame(10, start=45)
     d, patcher = make(cached, recent)
+    d.load_local_history = lambda symbol, timeframe, *a, **k: (hourly("2026-01-01 00:00", "2026-01-01 03:00") if timeframe == "H1" else cached).copy()
     d.cfg.context_features = NS(mta=NS(enabled=mta_on, timeframe="H1"),
                                 inter_market=NS(enabled=im_on, symbol="USDX"))
     asked = []
@@ -103,14 +109,14 @@ def test_an_empty_h1_fetch_skips_the_bar_instead_of_building_on_the_cached_h1():
 
 
 def test_an_empty_inter_market_fetch_skips_the_bar_too():
-    d, patcher, _, _ = make_ctx(frame(5), im_recent=pd.DataFrame(), im_on=True)
+    d, patcher, _, _ = make_ctx(hourly("2026-01-01 02:00", "2026-01-01 03:00"), im_recent=pd.DataFrame(), im_on=True)
     (data, X, y), warned = warnings_of(d, patcher)
     assert data.empty and X.empty
     assert any("USDX" in line and "skipping this bar" in line.lower() for line in warned)
 
 
 def test_a_fresh_h1_fetch_still_returns_data():
-    d, patcher, _, recent = make_ctx(frame(5))
+    d, patcher, _, recent = make_ctx(hourly("2026-01-01 02:00", "2026-01-01 03:00"))
     data, X, y = run(d, patcher)
     assert data.index[-1] == recent.index[-1] and X.index[-1] == recent.index[-1]
 
@@ -151,3 +157,66 @@ def test_one_bar_is_prepared_without_a_second_feature_build():
     with patcher:
         data, X, y = sp._fetch_and_prepare_data()     # raises if build_features is called
     assert len(X) == 5
+
+
+# ---- a non-empty but stale H1 context: the join needs the last H1 bar closed before the decision bar ----------------
+
+def m5(first, last):
+    idx = pd.date_range(first, last, freq="5min", tz="UTC")
+    return pd.DataFrame({"open": 1.0, "high": 1.1, "low": 0.9, "close": 1.0, "volume": 1}, index=idx)
+
+
+def h1_case(m5_data, h1_cached, h1_fetched, save_raw=True):
+    """`fetch_live` for one decision bar (the last row of `m5_data`); returns (result, warnings, mta_df the build received)."""
+    d, patcher = make(m5_data.iloc[:-10], m5_data.iloc[-10:])
+    d.cfg.fetch = NS(save_raw_data_locally=save_raw)
+    d.cfg.context_features = NS(mta=NS(enabled=True, timeframe="H1"), inter_market=NS(enabled=False))
+    d.load_local_history = lambda symbol, timeframe, *a, **k: (h1_cached if timeframe == "H1" else m5_data.iloc[:-10]).copy()
+    d.append_new_bars = lambda *a, **k: None          # the cache file is not rewritten here
+    base = d._fetch_bars_from_mt5_chunked
+    d._fetch_bars_from_mt5_chunked = lambda symbol, timeframe, count: (h1_fetched if timeframe == "H1" else base(symbol, timeframe, count)).copy()
+    got = {}
+
+    def build(data, *a, **k):
+        got["mta_df"] = k.get("mta_df")
+        return data[["close"]].copy()
+
+    with patch.object(dmod, "build_features", build):
+        out, warned = warnings_of(d, patch.object(dmod, "build_features", build))
+    return out, warned, got.get("mta_df")
+
+
+def test_an_h1_context_one_bar_behind_the_join_skips_the_bar():
+    data = m5("2026-01-01 00:00", "2026-01-01 10:55")           # the join needs the 09:00 H1 bar
+    (d, X, y), warned, _ = h1_case(data, hourly("2026-01-01 00:00", "2026-01-01 08:00"), hourly("2026-01-01 07:00", "2026-01-01 08:00"))
+    assert d.empty and X.empty
+    assert any("H1" in line and "stale" in line.lower() for line in warned)
+
+
+def test_the_join_needs_the_09_bar_at_10_55_not_the_10_bar():
+    data = m5("2026-01-01 00:00", "2026-01-01 10:55")
+    (d, X, y), warned, _ = h1_case(data, hourly("2026-01-01 00:00", "2026-01-01 09:00"), hourly("2026-01-01 08:00", "2026-01-01 09:00"))
+    assert not d.empty and not warned
+
+
+def test_the_join_needs_the_10_bar_at_11_00():
+    data = m5("2026-01-01 00:00", "2026-01-01 11:00")
+    (d, X, y), _, _ = h1_case(data, hourly("2026-01-01 00:00", "2026-01-01 09:00"), hourly("2026-01-01 08:00", "2026-01-01 09:00"))
+    assert d.empty
+    (d, X, y), _, _ = h1_case(data, hourly("2026-01-01 00:00", "2026-01-01 10:00"), hourly("2026-01-01 09:00", "2026-01-01 10:00"))
+    assert not d.empty
+
+
+def test_the_first_hour_of_the_week_needs_fridays_last_h1_bar():
+    friday = m5("2026-01-02 12:00", "2026-01-02 23:55")        # a Friday (2026-01-02) session, then the weekend gap
+    monday = m5("2026-01-05 00:00", "2026-01-05 00:10")
+    data = pd.concat([friday, monday])
+    (d, X, y), warned, _ = h1_case(data, hourly("2026-01-02 10:00", "2026-01-02 23:00"), hourly("2026-01-02 22:00", "2026-01-02 23:00"))
+    assert not d.empty and not warned
+
+
+def test_the_fresh_h1_fetch_reaches_the_build_even_when_the_cache_is_not_saved():
+    data = m5("2026-01-01 00:00", "2026-01-01 10:55")
+    (d, X, y), warned, mta_df = h1_case(data, hourly("2026-01-01 00:00", "2026-01-01 07:00"), hourly("2026-01-01 06:00", "2026-01-01 09:00"), save_raw=False)
+    assert not d.empty and not warned
+    assert mta_df.index[-1] == pd.Timestamp("2026-01-01 09:00", tz="UTC")
