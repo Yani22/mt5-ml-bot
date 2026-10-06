@@ -35,6 +35,7 @@ class MLStrategy:
         self.calibrate = bool(calibrate)
         self.cv_samples_per_split = int(cv_samples_per_split)
         self.n_jobs = int(n_jobs)   # -1 = every core; the live retrain child passes fewer (K12)
+        self.purge_gap = 0          # rows left out between the training and validation rows of each CV fold (the label horizon; the Ensemble sets it)
         model_params = kwargs.copy()
         device = model_params.pop("device", "cpu")
         self._calibrator = None
@@ -178,7 +179,7 @@ class MLStrategy:
             return False
 
         n_splits = min(5, max(2, len(Xc) // self.cv_samples_per_split))
-        tscv = TimeSeriesSplit(n_splits=n_splits)
+        tscv = TimeSeriesSplit(n_splits=n_splits, gap=int(getattr(self, "purge_gap", 0)))
         scores = []
         last_tr_idx, last_va_idx = None, None
 

@@ -191,6 +191,9 @@ class Ensemble:
         self.failed_members: set[str] = set()
         use_gpu = getattr(cfg, "use_gpu", False)
         self.cv_samples = getattr(cfg, "cv_samples_per_split", None) or 300
+        # A label looks `horizon` bars ahead: CV folds leave that many rows between training and validation (C2). A tuned horizon
+        # wins over the config, as it does when the labels are built.
+        self.purge_gap = max(0, int((model_params or {}).get("prediction_horizon", getattr(cfg, "prediction_horizon", 0)) or 0))
 
         for m in cfg.models:
             name = m.get("name")
@@ -215,6 +218,7 @@ class Ensemble:
 
             try:
                 self.members[name] = MLStrategy(model=name, calibrate=True, cv_samples_per_split=self.cv_samples, n_jobs=n_jobs, **cleaned_model_params)
+                self.members[name].purge_gap = self.purge_gap
             except Exception as e:
                 logger.error(f"Ensemble.__init__: failed to init member {name}: {e}")
                 # do not include in members
@@ -349,7 +353,10 @@ class Ensemble:
         """Performs time-series cross-validation to evaluate the ensemble and its members."""
         n_samples = len(Xc)
         cv_split = min(5, max(2, n_samples // self.cv_samples))
-        tscv = TimeSeriesSplit(n_splits=cv_split)
+        gap = int(getattr(self, "purge_gap", 0))
+        for member in self.members.values():
+            member.purge_gap = gap   # the member's own split (it nests inside this one) leaves the same gap
+        tscv = TimeSeriesSplit(n_splits=cv_split, gap=gap)
         oof_preds: List[pd.Series] = []
         oof_true: List[pd.Series] = []
         member_cv_raw: Dict[str, List[float]] = {name: [] for name in self.members}
