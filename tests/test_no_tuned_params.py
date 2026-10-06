@@ -41,7 +41,6 @@ def test_the_child_retrains_with_the_config_defaults_when_there_are_no_tuned_par
 def test_the_trainer_uses_the_config_defaults_when_there_are_no_tuned_params(monkeypatch):
     seen = {}
     monkeypatch.setattr(trainer, "load_optuna_params", lambda sym, cfg: None)
-    monkeypatch.setattr(trainer, "DataManager", lambda cfg: None)
     monkeypatch.setattr(trainer, "get_training_data", lambda **k: seen.update(k) or (None, None, None, None))
     cfg = NS(prediction_horizon=12, retraining_window_bars=100, features=NS(min_pct_change=0.0002))
 
