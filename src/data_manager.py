@@ -251,8 +251,10 @@ class DataManager:
             # Fetch only a small number of recent bars for MTA data
             mta_recent_data = self._fetch_bars_from_mt5_chunked(symbol, self.cfg.context_features.mta.timeframe, 200)
             if mta_recent_data.empty:
-                logger.warning(f"[{symbol}] No live MTA data loaded for timeframe {self.cfg.context_features.mta.timeframe}. Disabling MTA for this tick.")
-                mta_df = None
+                # The processor rebuilds X from the cached context, so "disabling it for this tick" never held: skip the bar.
+                logger.warning(f"[{symbol}] No live MTA data loaded for timeframe {self.cfg.context_features.mta.timeframe}; "
+                               f"the cached context may be stale. Skipping this bar.")
+                return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
             else:
                 # Append the newly fetched recent MTA data to local history
                 if self.cfg.fetch.save_raw_data_locally:
@@ -266,8 +268,9 @@ class DataManager:
             # Fetch only a small number of recent bars for Inter-Market data
             im_recent_data = self._fetch_bars_from_mt5_chunked(im_sym, self.cfg.timeframe, 200)
             if im_recent_data.empty:
-                logger.warning(f"[{symbol}] No live Inter-Market data loaded for symbol {im_sym}. Disabling for this tick.")
-                inter_market_df = None
+                logger.warning(f"[{symbol}] No live Inter-Market data loaded for symbol {im_sym}; "
+                               f"the cached context may be stale. Skipping this bar.")
+                return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
             else:
                 # Append the newly fetched recent Inter-Market data to local history
                 if self.cfg.fetch.save_raw_data_locally:
