@@ -476,7 +476,7 @@ class Ensemble:
             raise ValueError("X and y must be provided to fit()")
 
         # clean data
-        Xc = X.replace([np.inf, -np.inf], np.nan).ffill().bfill().dropna()
+        Xc = X.replace([np.inf, -np.inf], np.nan).ffill().dropna()
         yc = y.reindex(Xc.index)
         prices_c = None
         if prices is not None:
@@ -596,7 +596,7 @@ class Ensemble:
             raise ValueError("X must be provided to predict_proba()")
 
         # clean data
-        Xc = X.replace([np.inf, -np.inf], np.nan).ffill().bfill()
+        Xc = X.replace([np.inf, -np.inf], np.nan).ffill()
         Xc = Xc.fillna(0)  # Fill any remaining NaNs with 0
 
         if Xc.empty:

@@ -7,10 +7,29 @@ from src.config import FeatureCfg, MtaCfg, InterMarketCfg, PriceActionCfg  # Imp
 
 _TF_DELTA = {"M1": "1min", "M5": "5min", "M15": "15min", "M30": "30min", "H1": "1h", "H4": "4h", "D1": "1D"}
 
+# Columns that carry an absolute price level (or a cumulative sum that depends on where the window starts). They stay in `X`: the
+# stops and trailing read `atr_14`, and the contextual bandit reads `macd_diff`. The model gets the relative versions only (C5).
+RAW_LEVEL_COLUMNS = frozenset({
+    "macd", "macd_signal", "macd_diff", "momentum_5", "momentum_10", "atr_14", "vol_ma_20", "obv",
+    "donchian_h", "donchian_l", "donchian_m", "ema_fast", "ema_slow", "bb_high", "bb_low", "macd_x_adx",
+})
 
-def add_contextual_features(df: pd.DataFrame, mta_df: pd.DataFrame = None, inter_market_df: pd.DataFrame = None, mta_cfg: "MtaCfg" = None, im_cfg: "InterMarketCfg" = None) -> pd.DataFrame:
+
+def is_model_column(name: str) -> bool:
+    if name in RAW_LEVEL_COLUMNS:
+        return False
+    return not (name.startswith("mta_ema_") and not name.startswith("mta_ema_dist_"))   # the raw higher-timeframe ema is a price
+
+
+def model_matrix(X: pd.DataFrame) -> pd.DataFrame:
+    """The columns the models are trained and asked on: `X` without the absolute price levels."""
+    return X[[c for c in X.columns if is_model_column(c)]]
+
+
+def add_contextual_features(df: pd.DataFrame, mta_df: pd.DataFrame = None, inter_market_df: pd.DataFrame = None, mta_cfg: "MtaCfg" = None, im_cfg: "InterMarketCfg" = None, relative: bool = False) -> pd.DataFrame:
     """
-    Adds contextual features from higher timeframes (MTA) and other markets.
+    Adds contextual features from higher timeframes (MTA) and other markets. `relative` also adds the MTA ema as a distance from
+    the higher-timeframe close, which is what the model reads (C5); the research scripts keep their columns with the default.
     """
     if mta_df is not None and mta_cfg and mta_cfg.enabled:
         logger.debug(f"Adding MTA features from timeframe {mta_cfg.timeframe}...")
@@ -22,6 +41,8 @@ def add_contextual_features(df: pd.DataFrame, mta_df: pd.DataFrame = None, inter
         mta_features = pd.DataFrame(index=mta_df.index)
         mta_features[f'mta_ema_{mta_cfg.ema_period}'] = mta_ema
         mta_features[f'mta_rsi_{mta_cfg.rsi_period}'] = mta_rsi
+        if relative:
+            mta_features[f'mta_ema_dist_{mta_cfg.ema_period}'] = (mta_df["close"] - mta_ema) / mta_df["close"]   # the model's version of the ema
 
         # MT5 indexes bars by OPEN time, but a bar's close is only known one bar-length later.
         # Shift to availability time and as-of join so no bar sees its own higher-timeframe bar's unfinished close.
@@ -163,12 +184,44 @@ def build_dynamic_features(df: pd.DataFrame, static_features: pd.DataFrame, cfg:
         # --- handle NaNs and infs ---
         nan_count = X.isna().sum().sum()
         inf_count = np.isinf(X.values).sum()
-        X = X.replace([np.inf, -np.inf], np.nan).ffill().bfill()
+        X = X.replace([np.inf, -np.inf], np.nan).ffill()   # no bfill: it would give the first rows values from later bars
 
     except Exception as e:
         logger.exception(f"[{symbol}] Error building dynamic features: {e}")
         raise
 
+    return X
+
+
+def add_relative_features(X: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:
+    """Adds the relative versions of the absolute-level columns (C5), computed from the raw columns of `X` and the bars `df`
+    (bar t only uses bars <= t). The raw columns stay: stops and trailing read `atr_14`, the contextual bandit reads
+    `macd_diff`; `model_matrix` keeps them away from the model. Called by `build_features` (the main pipeline) and the tuner; the
+    H1 bot and the research scripts build their own matrix with the builders above and are left as they were."""
+    X = X.copy()
+    close = df["close"]
+    for name in ("macd", "macd_signal", "macd_diff"):
+        if name in X:
+            X[f"{name}_rel"] = X[name] / close
+    for name in ("momentum_5", "momentum_10"):
+        if name in X:
+            X[f"{name}_rel"] = X[name] / close
+    if "atr_14" in X:
+        X["atr_rel"] = X["atr_14"] / close
+    if "obv" in X and "volume" in df.columns:
+        # the change over 20 bars per unit of volume: the cumulative level depends on where the window starts, the change does not
+        X["obv_chg_20"] = (X["obv"] - X["obv"].shift(20)) / (df["volume"].rolling(20).sum() + 1e-10)
+    if "donchian_h" in X:
+        X["donchian_h_rel"] = (X["donchian_h"] - close) / close
+        X["donchian_l_rel"] = (close - X["donchian_l"]) / close
+        X["donchian_m_rel"] = (X["donchian_m"] - close) / close
+    for name in ("ema_fast", "ema_slow"):
+        if name in X:
+            X[f"{name}_dist"] = (close - X[name]) / close
+    if "bb_high" in X:
+        X["bb_pos"] = (close - X["bb_low"]) / (X["bb_high"] - X["bb_low"] + 1e-12)
+    if "macd_rel" in X and "adx" in X:
+        X["macd_rel_x_adx"] = X["macd_rel"] * X["adx"]
     return X
 
 
@@ -187,8 +240,10 @@ def build_features(df: pd.DataFrame, feature_cfg: FeatureCfg, main_cfg: Cfg, sym
     static_X = build_static_features(df, symbol, pa_cfg=pa_cfg)
     dynamic_X = build_dynamic_features(df, static_X, cfg=feature_cfg, symbol=symbol)
 
+    dynamic_X = add_relative_features(dynamic_X, df)
+
     # Add contextual features
-    dynamic_X = add_contextual_features(dynamic_X, mta_df=mta_df, inter_market_df=inter_market_df, mta_cfg=mta_cfg, im_cfg=im_cfg)
+    dynamic_X = add_contextual_features(dynamic_X, mta_df=mta_df, inter_market_df=inter_market_df, mta_cfg=mta_cfg, im_cfg=im_cfg, relative=True)
 
     return dynamic_X
 

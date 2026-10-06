@@ -10,7 +10,7 @@ from joblib import Parallel, delayed  # type: ignore
 import traceback  # Added for detailed error logging
 
 from src.config import Cfg, RiskCfg
-from src.features import FeatureCfg, build_dynamic_features
+from src.features import FeatureCfg, add_relative_features, build_dynamic_features
 from src.data_colab import fetch_bars, merge_features_labels
 from src.utils import get_training_data, save_optuna_params
 from src.ensemble import Ensemble
@@ -80,7 +80,7 @@ def objective(trial, df: pd.DataFrame, static_features: pd.DataFrame, symbol: st
         feature_cfg = FeatureCfg(**feature_params_raw)
 
         # --- 2. Build Features for this Trial (using cached static features) ---
-        X = build_dynamic_features(df, static_features, feature_cfg, symbol)
+        X = add_relative_features(build_dynamic_features(df, static_features, feature_cfg, symbol), df)   # the matrix the live models are trained on
 
         # --- Generate Labels for this Trial ---
         y = generate_labels(df, prediction_horizon, min_pct_change)

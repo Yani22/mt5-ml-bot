@@ -12,6 +12,7 @@ from sklearn.calibration import CalibratedClassifierCV  # type: ignore
 from sklearn.preprocessing import StandardScaler  # type: ignore
 from sklearn.pipeline import Pipeline  # type: ignore
 from loguru import logger  # type: ignore
+from src.features import model_matrix
 
 try:
     from xgboost import XGBClassifier  # type: ignore
@@ -77,7 +78,7 @@ class MLStrategy:
                 "learning_rate": float(model_params.get("learning_rate", 0.05)),
                 "subsample": float(model_params.get("subsample", 0.8)),
                 "colsample_bytree": float(model_params.get("colsample_bytree", 0.8)),
-                "min_child_samples": int(model_params.get("min_child_samples", 5)),
+                "min_child_samples": int(model_params.get("min_child_samples", 200)),
                 "random_state": self.random_state,
                 "n_jobs": self.n_jobs,
                 "verbose": -1,
@@ -153,7 +154,8 @@ class MLStrategy:
         logger.info(f"Loaded model {self.model_name} from {path}")
 
     def _sanitize(self, X: pd.DataFrame) -> pd.DataFrame:
-        return X.replace([np.inf, -np.inf], np.nan).ffill().bfill().dropna()
+        # The model sees no absolute price level (C5) and no values back-filled from later bars: the warmup rows are dropped
+        return model_matrix(X).replace([np.inf, -np.inf], np.nan).ffill().dropna()
 
     def _proba_raw(self, X: pd.DataFrame):
         try:
