@@ -42,12 +42,11 @@ def test_worse_model_is_rejected():
 
 def _trigger(now, last_date=None, in_progress=False):
     mt5c = MagicMock()
-    mt5c.now_utc.return_value = now
     status, procs, last = {"EURUSD": in_progress}, {}, {"EURUSD": last_date}
     rc = MagicMock()
     with patch.object(retraining, "Process") as proc:
         retraining._check_and_trigger_retraining(
-            _cfg(), "EURUSD", {"EURUSD": MagicMock()}, True, MagicMock(), {}, procs, status, last, rc, mt5c)
+            _cfg(), "EURUSD", {"EURUSD": MagicMock()}, True, MagicMock(), {}, procs, status, last, rc, mt5c, now_fn=lambda: now)
     return proc, status, last, rc
 
 

@@ -148,11 +148,14 @@ def _handle_model_acceptance(sym, cfg, ens_per_symbol_long, ens_per_symbol_short
             discard_staged_ensemble(sym, side)
 
 
-def _check_and_trigger_retraining(cfg: Cfg, sym: str, feature_cfg_per_symbol: Dict[str, FeatureCfg], dry_run: bool, notifier: TelegramNotifier, optuna_params_per_symbol: Dict[str, Any], retraining_processes: Dict[str, Process], retraining_status: Dict[str, bool], last_retrain_date: Dict[str, datetime.date], risk_controller: RiskController, mt5c: MT5Client):
+def _check_and_trigger_retraining(cfg: Cfg, sym: str, feature_cfg_per_symbol: Dict[str, FeatureCfg], dry_run: bool, notifier: TelegramNotifier, optuna_params_per_symbol: Dict[str, Any], retraining_processes: Dict[str, Process], retraining_status: Dict[str, bool], last_retrain_date: Dict[str, datetime.date], risk_controller: RiskController, mt5c: MT5Client, now_fn=None):
     """
     Checks if retraining should be triggered for a given symbol based on retrain_time_utc.
+
+    The time is compared with real UTC (`now_fn`, the system clock by default), not the terminal's server clock, which is hours off UTC and
+    would move the scheduled time with whichever source answers. `mt5c` is kept for the caller's signature and is not asked.
     """
-    current_utc_datetime = mt5c.now_utc()
+    current_utc_datetime = (now_fn or (lambda: datetime.datetime.now(datetime.timezone.utc)))()
     current_utc_time = current_utc_datetime.time()
     current_utc_date = current_utc_datetime.date()
 

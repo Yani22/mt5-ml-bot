@@ -37,7 +37,7 @@ def trigger(monkeypatch, status):
     cfg = NS(get_symbol_value=lambda sym, key, default=None: "00:00")
     _check_and_trigger_retraining(cfg, "EURUSD#", {"EURUSD#": NS()}, True, MagicMock(), {}, procs,
                                   status if status is not None else retraining_status_for(SYMS, procs),
-                                  {"EURUSD#": None}, MagicMock(), NS(now_utc=lambda: NOW))
+                                  {"EURUSD#": None}, MagicMock(), NS(), now_fn=lambda: NOW)
     return process_cls
 
 
