@@ -160,15 +160,6 @@ class SymbolRiskState:
         self.current_ac_multiplier: float = 1.0
         self.last_trade_was_win: Optional[bool] = None
 
-    def _get_bandit_and_grid(self, param_type: str) -> Tuple[ThompsonBandit | LinearThompson, List[float]]:
-        if param_type == "atr":
-            if self.contextual_bandit is not None:
-                return self.contextual_bandit, self.atr_grid_values
-            return self.atr_bandit, self.atr_grid_values
-        elif param_type == "min_prob":
-            return self.min_prob_bandit, self.min_prob_grid_values
-        raise ValueError(f"Unknown param_type: {param_type}")
-
     def get_state(self):
         d = {
             "atr_bandit": self.atr_bandit.get_state(),
@@ -278,51 +269,6 @@ class RiskController:
         self.last_daily_retrain_date[symbol] = date
 
     def _calculate_rule_scale(self, symbol: str, context: Dict[str, Any]) -> float:
-        """
-        Computes a rule-based scaling factor (between 0 and 1, inclusive) based on
-        various performance and market context variables such as volatility, drawdown,
-        and consecutive losses. This scale is applied to certain risk parameters
-        to dynamically adjust risk exposure.
-
-        Args:
-            symbol: The trading symbol for which to calculate the rule scale.
-            context: A dictionary containing current market and performance context.
-
-        Returns:
-            A float representing the calculated rule scale, typically between 0.01 and 1.0.
-        """
-        sym_state = self.symbol_states[symbol]
-        ts_cfg = self.cfg.thompson_sampling
-
-        # Extract context variables
-        vol = context.get("vol", sym_state.last_atr)  # Use last_atr if current vol not provided
-        equity = context.get("equity", sym_state.current_equity)
-        peak_equity = context.get("peak_equity", sym_state.peak_equity)
-        max_drawdown = 1.0 - (equity / peak_equity) if peak_equity is not None and peak_equity > 0 else 0.0
-        consecutive_losses = sym_state.consecutive_losses
-
-        rule_scale = 1.0
-
-        # 1. Inverse Volatility Scale
-        if vol > 0 and ts_cfg.vol_threshold > 0:  # Avoid division by zero
-            inverse_vol_scale = min(1.0, ts_cfg.vol_threshold / vol + 0.5)  # Example scaling
-            rule_scale *= inverse_vol_scale
-
-        # 2. Drawdown Scale
-        if max_drawdown > 0 and ts_cfg.dd_cut_multiplier > 0:
-            drawdown_scale = max(0.1, 1.0 - ts_cfg.dd_cut_multiplier * max_drawdown)
-            rule_scale *= drawdown_scale
-
-        # 3. Consecutive Loss Scale
-        if consecutive_losses > 0 and ts_cfg.consec_loss_cut > 0:
-            consec_scale = max(0.1, 1.0 - ts_cfg.consec_loss_cut * consecutive_losses / 5.0)  # Divide by 5 for example
-            rule_scale *= consec_scale
-
-        # Ensure rule_scale is within (0, 1]
-        rule_scale = np.clip(rule_scale, 0.01, 1.0)  # Min scale of 0.01 to avoid zeroing out
-
-        logger.debug(f"[{symbol}] Rule Scale: {rule_scale:.2f} (Vol:{vol:.5f}, DD:{max_drawdown:.2%}, CL:{consecutive_losses})")
-        return float(rule_scale)
         """
         Computes a rule-based scaling factor (between 0 and 1, inclusive) based on
         various performance and market context variables such as volatility, drawdown,
