@@ -48,6 +48,7 @@ def make_bt(info=EURUSD, spread=1.0, slippage=0.1, overrides=None):
     bt = object.__new__(HybridBacktester)
     bt.cfg, bt.equity, bt.positions, bt._closed_results = cfg, 10_000.0, [], []
     bt._closed_R, bt._early_stop_seen, bt.stopped_early = {}, {}, {}
+    bt.blocked_by_session = 0
     bt.risk_manager = RiskManager(cfg, FakeClient(info), threading.Lock())
     bt.risk_controller = RecordingController()
     return bt

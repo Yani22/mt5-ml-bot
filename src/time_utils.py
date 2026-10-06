@@ -58,3 +58,12 @@ def timeframe_to_seconds(timeframe: int | str) -> int:
         raise ValueError(f"Unsupported string timeframe: {timeframe}")
     else:
         raise TypeError(f"timeframe must be int or str, got {type(timeframe)}")
+
+
+def server_time_to_utc(stamp):
+    """Real UTC for a broker server-time stamp. The bars (and `MT5Client.now_utc`) carry the broker's server time labelled UTC. The server
+    runs on New York time + 7 hours, so it is UTC+3 in US summer time and UTC+2 in winter, and the offset moves with the US clock change
+    (the Sundays in March and November, when the market is closed). Live's session gate uses the real UTC clock, so a backtest has to convert."""
+    import pandas as pd
+    wall = pd.Timestamp(stamp).tz_localize(None) - pd.Timedelta(hours=7)          # New York wall time
+    return wall.tz_localize("America/New_York", ambiguous=True, nonexistent="shift_forward").tz_convert("UTC")

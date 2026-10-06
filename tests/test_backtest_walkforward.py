@@ -54,6 +54,7 @@ def make_bt(monkeypatch, tmp_path, spread_pips=None):
     bt.equity_curve, bt.pending, bt.signals, bt.skipped_for_size, bt.blocked_by_auc = [], {}, 0, 0, 0
     bt.skipped_for_spread = 0
     bt._closed_results = []
+    bt.blocked_by_session = 0
     bt._closed_R, bt._early_stop_seen, bt.stopped_early = {}, {}, {}
     bt.bar_counters, bt.save_state_every_bars, bt.ts_param_history = {"USDJPY#": 0}, 10 ** 9, []
     bt.backtest_ts_state_file = str(tmp_path / "state.json")

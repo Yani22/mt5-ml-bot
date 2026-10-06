@@ -13,6 +13,7 @@ from scipy import stats  # type: ignore
 from src.config import Cfg
 from src.features import FeatureCfg, ema_distance
 from src.risk import RiskManager, trailing_losses
+from src.time_utils import server_time_to_utc
 from src.costs import round_trip_pips
 from src.decision import choose_direction
 from src.utils import setup_logging, load_optuna_params, log_symbol_specific_configs
@@ -40,6 +41,7 @@ class HybridBacktester:
         self.skipped_for_size = 0  # ...of which sizing rejected (lot below broker minimum or risk caps)
         self.consecutive_losses = 0  # NEW: Efficiently track consecutive losses
         self.pending = {}  # symbol -> the order decided on the previous bar, filled at this bar's open
+        self.blocked_by_session = 0  # signals refused outside `risk.session_filter` (live gates a signal the same way)
         self.blocked_by_auc = 0  # signals the `min_ensemble_auc` gate refused (a run with 0 trades says why)
         self.skipped_for_spread = 0  # entries refused because the fill bar's spread was above `max_spread_atr` x ATR (live does the same)
         self.positions: list[SimPosition] = []
@@ -77,6 +79,12 @@ class HybridBacktester:
         except (TypeError, ValueError):
             raw_price = None
         return bar_spread(raw_price, fallback)
+
+    def _decision_time_utc(self, bar_time) -> datetime.datetime:
+        """Real UTC at which live decides on the bar stamped `bar_time` (server time): one bar later, when the bar has closed, plus a second
+        of latency (live decides a few seconds after the close, so a bar closing exactly at the window's end is already outside it)."""
+        closed = server_time_to_utc(bar_time) + pd.Timedelta(minutes=self.cfg.timeframe_minutes() or 0, seconds=1)
+        return closed.to_pydatetime()
 
     def _record_R(self, pos, net_pnl) -> None:
         """Keep a closed trade's R (net P&L over the money at the stop as placed, the verdict's definition) with its entry time."""
@@ -394,6 +402,8 @@ class HybridBacktester:
             if direction:
                 if sym in self.pending or any(p.symbol == sym and p.status == "open" for p in self.positions):
                     logger.info(f"[{sym}] Signal skipped: a position is already open on this symbol.")
+                elif not risk_mgr.session_allows(self._decision_time_utc(bar_time)):
+                    self.blocked_by_session += 1
                 else:
                     self.pending[sym] = dict(direction=direction, auc=auc_score, atr=atr, params=dynamic_risk_params)
             else:
@@ -447,7 +457,7 @@ class HybridBacktester:
 
         logger.info(f"=== Hybrid Adaptive Backtest Complete. Final Equity: {self.equity:.2f} === ")
         logger.info(f"Trades: {len(self.positions)}; signals refused by the min_ensemble_auc gate: {self.blocked_by_auc}; "
-                    f"entries skipped for a wide spread: {self.skipped_for_spread}.")
+                    f"entries skipped for a wide spread: {self.skipped_for_spread}; signals refused outside the session: {self.blocked_by_session}.")
         for sym, why in self.stopped_early.items():
             logger.warning(f"RUN ENDED EARLY - {sym}: {why}")
         if self.signals and self.skipped_for_size / self.signals > 0.2:

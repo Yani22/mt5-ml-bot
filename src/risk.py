@@ -339,6 +339,23 @@ class RiskManager:
             return True
         return False
 
+    def session_allows(self, now_utc: datetime.datetime) -> bool:
+        """False when `risk.session_filter` is set and `now_utc` (real UTC) is outside its same-day window, both ends inclusive; a window
+        that wraps midnight blocks everything. An invalid setting allows trading with a warning. Shared by `should_trade` and the backtester."""
+        sess = self.risk_cfg.session_filter
+        if sess:
+            try:
+                start_t = pd.to_datetime(sess["start"]).time()
+                end_t = pd.to_datetime(sess["end"]).time()
+                allowed = start_t <= now_utc.time() <= end_t
+                if not allowed:
+                    logger.info(f"Trading blocked: outside session {start_t}-{end_t}, current={now_utc.time()}")
+                    return False
+            except Exception:
+                logger.warning("Invalid session_filter in config; allowing trades by default.")
+                return True
+        return True
+
     def should_trade(self, now_local: datetime.datetime, drawdown: float) -> bool:
         """
         Returns True if trading is allowed.
@@ -404,18 +421,8 @@ class RiskManager:
                 return False
 
         # 3) Session filter
-        sess = self.risk_cfg.session_filter
-        if sess:
-            try:
-                start_t = pd.to_datetime(sess["start"]).time()
-                end_t = pd.to_datetime(sess["end"]).time()
-                allowed = start_t <= now_local.time() <= end_t
-                if not allowed:
-                    logger.info(f"Trading blocked: outside session {start_t}-{end_t}, current={now_local.time()}")
-                    return False
-            except Exception:
-                logger.warning("Invalid session_filter in config; allowing trades by default.")
-                return True
+        if not self.session_allows(now_local):
+            return False
 
         # 4) Block on drawdown parameter (if provided separately) - This is now handled in the else block above for CSV
         # if drawdown >= getattr(self.risk_cfg, "block_on_drawdown", 0.10):
