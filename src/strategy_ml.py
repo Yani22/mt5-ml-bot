@@ -29,11 +29,12 @@ MIN_SAMPLES_FOR_FIT = 1000
 
 
 class MLStrategy:
-    def __init__(self, model="lgbm", random_state: int = 42, calibrate: bool = True, cv_samples_per_split: int = 300, **kwargs):
+    def __init__(self, model="lgbm", random_state: int = 42, calibrate: bool = True, cv_samples_per_split: int = 300, n_jobs: int = -1, **kwargs):
         self.model_name = model.lower()
         self.random_state = random_state
         self.calibrate = bool(calibrate)
         self.cv_samples_per_split = int(cv_samples_per_split)
+        self.n_jobs = int(n_jobs)   # -1 = every core; the live retrain child passes fewer (K12)
         model_params = kwargs.copy()
         device = model_params.pop("device", "cpu")
         self._calibrator = None
@@ -43,7 +44,7 @@ class MLStrategy:
                 n_estimators=int(model_params.get("n_estimators", 200)),
                 max_depth=model_params.get("max_depth", None),
                 min_samples_leaf=model_params.get("min_samples_leaf", 3),
-                n_jobs=-1,
+                n_jobs=self.n_jobs,
                 random_state=self.random_state,
             )
             self.supports_online = False
@@ -59,7 +60,7 @@ class MLStrategy:
                 "subsample": float(model_params.get("subsample", 0.8)),
                 "colsample_bytree": float(model_params.get("colsample_bytree", 0.8)),
                 "random_state": self.random_state,
-                "n_jobs": -1,
+                "n_jobs": self.n_jobs,
                 "eval_metric": "logloss",
             }
             base = XGBClassifier(**xgb_params)
@@ -77,7 +78,7 @@ class MLStrategy:
                 "colsample_bytree": float(model_params.get("colsample_bytree", 0.8)),
                 "min_child_samples": int(model_params.get("min_child_samples", 5)),
                 "random_state": self.random_state,
-                "n_jobs": -1,
+                "n_jobs": self.n_jobs,
                 "verbose": -1,
             }
             base = LGBMClassifier(**lgbm_params)

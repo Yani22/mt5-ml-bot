@@ -24,6 +24,11 @@ def retraining_status_for(symbols, retraining_processes) -> Dict[str, bool]:
     return {sym: sym in retraining_processes for sym in symbols}
 
 
+def retrain_n_jobs() -> int:
+    """Threads for the retrain child: every core but one, so the live symbol threads keep a core (K12)."""
+    return max(1, (os.cpu_count() or 1) - 1)
+
+
 def run_retraining_in_background(cfg, sym, feature_cfg, dry_run, notifier, optuna_params_per_symbol):
     """
     A wrapper function to run the entire retraining pipeline for both long and short models in a separate process.
@@ -35,6 +40,7 @@ def run_retraining_in_background(cfg, sym, feature_cfg, dry_run, notifier, optun
             discard_staged_ensemble(sym, side)   # nothing left over from an earlier or crashed run
         min_improvement = cfg.get_symbol_value(sym, 'min_auc_improvement', cfg.risk.min_auc_improvement)  # the acceptance threshold
         data_manager = DataManager(cfg)
+        n_jobs = retrain_n_jobs()
 
         # Retrieve tuned prediction_horizon and min_pct_change for this symbol
         tuned = optuna_params_per_symbol[sym] or {}   # None when there is no tuned-params file: use the config values
@@ -54,12 +60,12 @@ def run_retraining_in_background(cfg, sym, feature_cfg, dry_run, notifier, optun
         logger.info(f"[{sym}] Retraining LONG model...")
         ens_old_long = load_ensemble(cfg, sym, "long", model_params=optuna_params_per_symbol[sym])
         safe_retrain_ensemble(cfg, sym, ens_old_long, full_X, y_long, full_data["close"], dry_run=dry_run, model_type="long", model_params=optuna_params_per_symbol[sym],
-                              staged=True, min_improvement=min_improvement)
+                              staged=True, min_improvement=min_improvement, n_jobs=n_jobs)
 
         logger.info(f"[{sym}] Retraining SHORT model...")
         ens_old_short = load_ensemble(cfg, sym, "short", model_params=optuna_params_per_symbol[sym])
         safe_retrain_ensemble(cfg, sym, ens_old_short, full_X, y_short, full_data["close"], dry_run=dry_run, model_type="short", model_params=optuna_params_per_symbol[sym],
-                              staged=True, min_improvement=min_improvement)
+                              staged=True, min_improvement=min_improvement, n_jobs=n_jobs)
 
         logger.info(f"[{sym}] Background retraining process for LONG and SHORT models finished.")
 

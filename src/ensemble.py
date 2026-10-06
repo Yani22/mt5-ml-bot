@@ -177,13 +177,14 @@ class DynamicWeightedEnsemble:
 
 
 class Ensemble:
-    def __init__(self, cfg, model_params: Optional[Dict[str, Dict]] = None):
+    def __init__(self, cfg, model_params: Optional[Dict[str, Dict]] = None, n_jobs: int = -1):
         """
         cfg: configuration object with
           - cfg.models: list of dicts, each with "name" and optional "defaults" (single values)
           - cfg.ensemble: method, weights, etc.
           - cfg.cv_samples_per_split, etc.
         model_params: optional override from tuning; keys matching model names.
+        n_jobs: threads each member may use (-1 = every core).
         """
         self.cfg = cfg
         self.members: Dict[str, MLStrategy] = {}
@@ -213,7 +214,7 @@ class Ensemble:
                 cleaned_model_params["device"] = cleaned_model_params.get("device", "gpu")
 
             try:
-                self.members[name] = MLStrategy(model=name, calibrate=True, cv_samples_per_split=self.cv_samples, **cleaned_model_params)
+                self.members[name] = MLStrategy(model=name, calibrate=True, cv_samples_per_split=self.cv_samples, n_jobs=n_jobs, **cleaned_model_params)
             except Exception as e:
                 logger.error(f"Ensemble.__init__: failed to init member {name}: {e}")
                 # do not include in members

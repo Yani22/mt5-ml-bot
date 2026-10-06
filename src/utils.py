@@ -290,7 +290,7 @@ def save_ensemble(ensemble: Ensemble, symbol: str, model_type: str, staged: bool
         logger.error(f"[{symbol}] Failed to save ensemble: {e}")
 
 
-def safe_retrain_ensemble(cfg: Cfg, symbol: str, ens_old: Ensemble, X_train: pd.DataFrame, y_train: pd.Series, prices: pd.Series, dry_run: bool = False, model_type: str = "long", model_params: dict | None = None, staged: bool = False, min_improvement: float | None = None) -> Ensemble:
+def safe_retrain_ensemble(cfg: Cfg, symbol: str, ens_old: Ensemble, X_train: pd.DataFrame, y_train: pd.Series, prices: pd.Series, dry_run: bool = False, model_type: str = "long", model_params: dict | None = None, staged: bool = False, min_improvement: float | None = None, n_jobs: int = -1) -> Ensemble:
     """
     Safely retrains an ensemble model.
 
@@ -306,6 +306,7 @@ def safe_retrain_ensemble(cfg: Cfg, symbol: str, ens_old: Ensemble, X_train: pd.
         model_params: Pre-loaded Optuna parameters for the model.
         staged: save an accepted model to the staging folder instead of the live one (the live bot promotes it after its own check).
         min_improvement: AUC gain required to save; defaults to `cfg.risk.min_auc_improvement`.
+        n_jobs: threads the new ensemble may use while fitting (-1 = every core).
 
     Returns:
         The retrained ensemble if it's better than the old one, otherwise the old ensemble.
@@ -318,7 +319,7 @@ def safe_retrain_ensemble(cfg: Cfg, symbol: str, ens_old: Ensemble, X_train: pd.
     # Load model_params if not provided
     if model_params is None:
         model_params = load_optuna_params(symbol, cfg)
-    ens_new = Ensemble(cfg, model_params=model_params)
+    ens_new = Ensemble(cfg, model_params=model_params, n_jobs=n_jobs)
 
     try:
         ens_new.fit(X_train, y_train, prices=prices, model_type=model_type)

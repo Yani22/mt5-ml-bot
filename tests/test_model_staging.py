@@ -37,7 +37,7 @@ class FakeEnsemble:
     """What safe_retrain_ensemble needs: fit, an AUC and save(path)."""
     auc = 0.62
 
-    def __init__(self, cfg, model_params=None):
+    def __init__(self, cfg, model_params=None, n_jobs=-1):
         self.ensemble_cv_auc_ = type(self).auc
 
     def fit(self, *a, **k):
