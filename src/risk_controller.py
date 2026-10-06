@@ -152,6 +152,7 @@ class SymbolRiskState:
         self.atr_updates_since_last_adaptation: int = 0
         self.min_prob_updates_since_last_adaptation: int = 0
         self.last_reset_time: Optional[datetime.datetime] = None  # NEW: To track last reset for cooldown
+        self.last_auc_checked: Optional[float] = None  # the model AUC the low-AUC trigger last looked at (a changed value = a new model)
 
         # Asymmetric Compounding
         self.win_streak: int = 0
@@ -175,6 +176,7 @@ class SymbolRiskState:
             "atr_updates_since_last_adaptation": self.atr_updates_since_last_adaptation,
             "min_prob_updates_since_last_adaptation": self.min_prob_updates_since_last_adaptation,
             "last_reset_time": self.last_reset_time.isoformat() if self.last_reset_time else None,
+            "last_auc_checked": self.last_auc_checked,
             "win_streak": self.win_streak,
             "loss_streak": self.loss_streak,
             "current_ac_multiplier": self.current_ac_multiplier,
@@ -215,6 +217,7 @@ class SymbolRiskState:
         inst.min_prob_updates_since_last_adaptation = state.get("min_prob_updates_since_last_adaptation", 0)
         last_reset_time_str = state.get("last_reset_time")
         inst.last_reset_time = datetime.datetime.fromisoformat(last_reset_time_str) if last_reset_time_str else None
+        inst.last_auc_checked = state.get("last_auc_checked")
 
         # Asymmetric Compounding
         inst.win_streak = state.get("win_streak", 0)
@@ -435,7 +438,7 @@ class RiskController:
         ts_cfg = self.cfg.thompson_sampling
 
         # Check and trigger reset if conditions are met
-        self._check_and_trigger_reset(symbol, context, ensemble_auc=context.get("ensemble_auc", 0.5))
+        self._check_and_trigger_reset(symbol, context, ensemble_auc=context.get("ensemble_auc"))
 
         # 1. Sample discrete choices (possibly contextual)
         atr_idx = None
@@ -755,7 +758,7 @@ class RiskController:
         sym_state.last_reset_time = current_time
         logger.info(f"[{symbol}] Bandit reset complete. Cooldown until {current_time + datetime.timedelta(hours=ts_cfg.reset_cooldown_hours)}")
 
-    def _check_and_trigger_reset(self, symbol: str, context: Dict[str, Any], ensemble_auc: float):
+    def _check_and_trigger_reset(self, symbol: str, context: Dict[str, Any], ensemble_auc: Optional[float]):
         """
         Checks various conditions (drawdown, consecutive losses, low ensemble AUC) to determine
         if a bandit reset is necessary for a given symbol. If a reset is triggered and not
@@ -764,7 +767,7 @@ class RiskController:
         Args:
             symbol: The trading symbol to check for reset conditions.
             context: A dictionary containing current market and performance context.
-            ensemble_auc: The current AUC score of the ensemble model for the symbol.
+            ensemble_auc: The current AUC score of the ensemble model for the symbol; None skips the low-AUC trigger.
         """
         ts_cfg = self.cfg.thompson_sampling
         if not ts_cfg.bandit_reset_enabled:
@@ -806,8 +809,14 @@ class RiskController:
             reset_triggered = True
             trigger_reason = f"Consecutive losses ({sym_state.consecutive_losses}) exceeded {ts_cfg.reset_on_consecutive_losses}"
 
-        # 3. Low ensemble AUC trigger
-        if not reset_triggered and ensemble_auc < ts_cfg.reset_on_low_ensemble_auc:
+        # 3. Low ensemble AUC trigger. The AUC is fixed between retrains, so it counts once per model: a changed value (the only
+        # sign of a new model the controller gets) is judged, the same value on the next bar is not. A state saved before this
+        # field existed has no value, so its first check counts as a new model.
+        auc = float(ensemble_auc) if ensemble_auc is not None and np.isfinite(ensemble_auc) else None
+        new_model = auc is not None and auc != sym_state.last_auc_checked
+        if auc is not None:
+            sym_state.last_auc_checked = auc
+        if not reset_triggered and new_model and auc < ts_cfg.reset_on_low_ensemble_auc:
             reset_triggered = True
             trigger_reason = f"Ensemble AUC ({ensemble_auc:.4f}) below {ts_cfg.reset_on_low_ensemble_auc:.4f}"
 

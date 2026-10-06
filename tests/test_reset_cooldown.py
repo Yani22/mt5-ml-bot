@@ -12,7 +12,7 @@ from src.risk_controller import RiskController
 
 SYM = "EURUSD#"
 T0 = pd.Timestamp("2026-01-05 10:00", tz="UTC")
-LOW_AUC = 0.1  # below reset_on_low_ensemble_auc: a reset trigger on every call
+LOW_AUC = 0.1  # below reset_on_low_ensemble_auc; each call gets a different value (a new model), the trigger counts once per model
 
 
 def make_rc():
@@ -25,7 +25,8 @@ def make_rc():
 
 def check(rc, bar_time):
     ctx = {} if bar_time is None else {"bar_time": bar_time}
-    rc._check_and_trigger_reset(SYM, ctx, ensemble_auc=LOW_AUC)
+    rc._calls = getattr(rc, "_calls", 0) + 1
+    rc._check_and_trigger_reset(SYM, ctx, ensemble_auc=LOW_AUC - rc._calls * 1e-3)
     return rc.symbol_states[SYM].last_reset_time
 
 
