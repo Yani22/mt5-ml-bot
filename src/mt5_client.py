@@ -6,6 +6,7 @@ import datetime
 from typing import Optional
 import MetaTrader5 as mt5  # type: ignore
 from loguru import logger
+from src.mt5_lock import api_lock
 from src.time_utils import timeframe_to_seconds
 
 
@@ -21,7 +22,7 @@ _initialized = False    # this process has initialised the terminal connection (
 def teardown_connection() -> None:
     """Close the real terminal connection and disconnect every client attached so far."""
     global _generation, _initialized
-    with _state_lock:
+    with _state_lock, api_lock:
         try:
             mt5.shutdown()
         except Exception as e:
@@ -82,14 +83,15 @@ class MT5Client:
     @staticmethod
     def _shared_connection_is_healthy() -> bool:
         try:
-            return mt5.terminal_info() is not None and mt5.account_info() is not None
+            with api_lock:
+                return mt5.terminal_info() is not None and mt5.account_info() is not None
         except Exception:
             return False
 
     def connect(self) -> bool:
         last_err = None
         for attempt in range(1, self.max_retries + 1):
-            with _state_lock:   # one attempt at a time; the retry sleep below is outside the lock
+            with _state_lock, api_lock:   # one attempt at a time; the retry sleep below is outside both locks
                 ok, last_err = self._attempt(attempt)
             if ok:
                 return True
@@ -174,10 +176,11 @@ class MT5Client:
         self._connected = False
 
     def account_info(self):
-        if not self._connected:
-            return None
         try:
-            return mt5.account_info()
+            with api_lock:
+                if not self._connected:  # re-checked inside the lock: a teardown may have run while this call waited
+                    return None
+                return mt5.account_info()
         except Exception:
             return None
 
@@ -195,7 +198,8 @@ class MT5Client:
                 if not name or name in tried:
                     continue
                 tried.append(name)
-                tick = mt5.symbol_info_tick(name)
+                with api_lock:
+                    tick = mt5.symbol_info_tick(name)
                 if tick and tick.time > 0:
                     self._time_symbol = name
                     return datetime.datetime.fromtimestamp(tick.time, tz=datetime.timezone.utc)
@@ -205,10 +209,13 @@ class MT5Client:
                 logger.warning(f"MT5Client: no tick from {tried or 'any configured symbol'} for the server time; "
                                f"using the freshest Market Watch tick instead.")
             best = None
-            for info in mt5.symbols_get() or []:
+            with api_lock:
+                infos = mt5.symbols_get() or []
+            for info in infos:
                 if not getattr(info, "select", False) or info.name in tried:
                     continue
-                tick = mt5.symbol_info_tick(info.name)
+                with api_lock:
+                    tick = mt5.symbol_info_tick(info.name)
                 if tick and tick.time > 0 and (best is None or tick.time > best[0]):
                     best = (tick.time, info.name)
             if best:
@@ -235,55 +242,61 @@ class MT5Client:
 
     def symbol_info_tick(self, symbol: str):
         """Wrapper for mt5.symbol_info_tick()"""
-        if not self._connected:
-            return None
         try:
-            return mt5.symbol_info_tick(symbol)
+            with api_lock:
+                if not self._connected:  # re-checked inside the lock: a teardown may have run while this call waited
+                    return None
+                return mt5.symbol_info_tick(symbol)
         except Exception:
             return None
 
     def symbol_info(self, symbol: str):
         """Wrapper for mt5.symbol_info()"""
-        if not self._connected:
-            return None
         try:
-            return mt5.symbol_info(symbol)
+            with api_lock:
+                if not self._connected:  # re-checked inside the lock: a teardown may have run while this call waited
+                    return None
+                return mt5.symbol_info(symbol)
         except Exception:
             return None
 
     def history_deals_get(self, *args, **kwargs):
         """Wrapper for mt5.history_deals_get()"""
-        if not self._connected:
-            return None
         try:
-            return mt5.history_deals_get(*args, **kwargs)
+            with api_lock:
+                if not self._connected:  # re-checked inside the lock: a teardown may have run while this call waited
+                    return None
+                return mt5.history_deals_get(*args, **kwargs)
         except Exception:
             return None
 
     def order_send(self, request: dict):
         """Wrapper for mt5.order_send()"""
-        if not self._connected:
-            return None
         try:
-            return mt5.order_send(request)
+            with api_lock:
+                if not self._connected:  # re-checked inside the lock: a teardown may have run while this call waited
+                    return None
+                return mt5.order_send(request)
         except Exception:
             return None
 
     def positions_get(self, *args, **kwargs):
         """Wrapper for mt5.positions_get()"""
-        if not self._connected:
-            return None
         try:
-            return mt5.positions_get(*args, **kwargs)
+            with api_lock:
+                if not self._connected:  # re-checked inside the lock: a teardown may have run while this call waited
+                    return None
+                return mt5.positions_get(*args, **kwargs)
         except Exception:
             return None
 
     def get_rates(self, symbol: str, timeframe: int, count: int):
         """Wrapper for mt5.copy_rates_from_pos()"""
-        if not self._connected:
-            return None
         try:
-            return mt5.copy_rates_from_pos(symbol, timeframe, 0, count)
+            with api_lock:
+                if not self._connected:  # re-checked inside the lock: a teardown may have run while this call waited
+                    return None
+                return mt5.copy_rates_from_pos(symbol, timeframe, 0, count)
         except Exception:
             return None
 

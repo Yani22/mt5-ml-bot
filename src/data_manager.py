@@ -13,6 +13,7 @@ from src.labels import generate_labels
 
 import time
 from src.mt5_client import MT5Client
+from src.mt5_lock import api_lock
 
 
 def ensure_dir(path: str):
@@ -131,12 +132,15 @@ class DataManager:
             count = 36000
         try:
             # Use copy_rates_from_pos to get the latest 'count' bars
-            rates = mt5.copy_rates_from_pos(symbol, tf, 0, int(count))
+            with api_lock:  # the fetch and its error read in one hold: last_error() is process-wide (B14)
+                rates = mt5.copy_rates_from_pos(symbol, tf, 0, int(count))
+                last_error = None
+                if rates is None or len(rates) == 0:
+                    try:
+                        last_error = mt5.last_error()
+                    except Exception:
+                        last_error = "unavailable"
             if rates is None or len(rates) == 0:
-                try:
-                    last_error = mt5.last_error()
-                except Exception:
-                    last_error = "unavailable"
                 logger.warning(f"[{symbol}] MT5 returned no {timeframe} bars (terminal error: {last_error}).")
                 return pd.DataFrame()
             if len(rates) < int(count):
