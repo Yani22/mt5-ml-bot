@@ -151,6 +151,7 @@ class DataManager:
                 return pd.DataFrame()
             df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
             df = df.set_index("time").sort_index()
+            df.index = df.index.as_unit("us")   # the unit the cached CSV frames load with; mixing units breaks merges under pandas 3
             df = df.rename(columns={"tick_volume": "volume"})
 
             # Drop the last bar if it's the currently forming one
