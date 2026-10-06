@@ -1,11 +1,43 @@
 # src/config.py
 from __future__ import annotations
+import difflib
 import yaml
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import List, Dict, Any, Optional
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+class ConfigError(ValueError):
+    """config.yaml has a key or value the code does not understand. The bot refuses to start on it."""
+
+
+def _refuse_unknown_keys(cls, raw, name):
+    known = [f.name for f in fields(cls)]
+    unknown = [key for key in raw if key not in known]
+    if unknown:
+        hints = []
+        for key in unknown:
+            close = difflib.get_close_matches(str(key), known, n=1)
+            hints.append(f"`{key}`" + (f" (did you mean `{close[0]}`?)" if close else ""))
+        raise ConfigError(f"config.yaml: unknown key(s) in `{name}`: {', '.join(hints)}. Known keys: {', '.join(known)}")
+
+
+def _block(cls, raw, name):
+    """Builds the config dataclass `cls` from the YAML mapping `raw`; an absent or empty block gives the defaults.
+
+    An unknown key raises ConfigError naming the block, the key and the closest known key. It used to log a warning and reset the
+    whole block to defaults, so a typo such as `risk_per_trad` ran every risk setting on defaults without anyone noticing."""
+    if not raw:
+        return cls()
+    if not isinstance(raw, dict):
+        raise ConfigError(f"config.yaml: `{name}` must be a mapping of settings, got {type(raw).__name__}")
+    _refuse_unknown_keys(cls, raw, name)
+    try:
+        return cls(**raw)
+    except Exception as e:
+        raise ConfigError(f"config.yaml: invalid `{name}` block: {e}") from e
 
 
 @dataclass
@@ -320,98 +352,41 @@ class Cfg:
             if "roc_lags" not in cleaned_features and roc_lags_options_from_yaml:
                 cleaned_features["roc_lags"] = roc_lags_options_from_yaml[0]
 
-        try:
-            features_obj = FeatureCfg(**cleaned_features)
-        except Exception as e:
-            logger.warning(f"Invalid feature config in YAML: {e}; using defaults.")
-            features_obj = FeatureCfg()
+        features_obj = _block(FeatureCfg, cleaned_features, "features")
 
         # Parse context features
         raw_context = raw.get("context_features", {}) or {}
-        try:
-            mta_cfg = MtaCfg(**(raw_context.get("mta", {})))
-            inter_market_cfg = InterMarketCfg(**(raw_context.get("inter_market", {})))
-            price_action_cfg = PriceActionCfg(**(raw_context.get("price_action", {})))
-            context_features_obj = ContextFeaturesCfg(
-                mta=mta_cfg,
-                inter_market=inter_market_cfg,
-                price_action=price_action_cfg
-            )
-        except Exception as e:
-            logger.warning(f"Invalid context_features config in YAML: {e}; using defaults.")
-            context_features_obj = ContextFeaturesCfg()
+        _refuse_unknown_keys(ContextFeaturesCfg, raw_context, "context_features")
+        context_features_obj = ContextFeaturesCfg(
+            mta=_block(MtaCfg, raw_context.get("mta"), "context_features.mta"),
+            inter_market=_block(InterMarketCfg, raw_context.get("inter_market"), "context_features.inter_market"),
+            price_action=_block(PriceActionCfg, raw_context.get("price_action"), "context_features.price_action"),
+        )
 
-        try:
-            risk_obj = RiskCfg(**(raw.get("risk", {}) or {}))
-        except Exception as e:
-            logger.warning(f"Invalid risk config in YAML: {e}; using defaults.")
-            risk_obj = RiskCfg()
-
-        # parse watchdog block if present
-        try:
-            wd_raw = raw.get("watchdog", {}) or {}
-            watchdog_obj = WatchdogCfg(**wd_raw) if wd_raw else WatchdogCfg()
-        except Exception as e:
-            logger.warning(f"Invalid watchdog config in YAML: {e}; using defaults.")
-            watchdog_obj = WatchdogCfg()
-
-        # parse monitoring block if present
-        try:
-            mon_raw = raw.get("monitoring", {}) or {}
-            mon_obj = MonitoringCfg(**mon_raw) if mon_raw else MonitoringCfg()
-        except Exception as e:
-            logger.warning(f"Invalid monitoring config in YAML: {e}; using defaults.")
-            mon_obj = MonitoringCfg()
+        risk_obj = _block(RiskCfg, raw.get("risk"), "risk")
+        watchdog_obj = _block(WatchdogCfg, raw.get("watchdog"), "watchdog")
+        mon_obj = _block(MonitoringCfg, raw.get("monitoring"), "monitoring")
 
         # parse fetch block if present (bootstrap + local caching)
-        try:
-            fetch_raw = raw.get("fetch", {}) or {}
-            retrain_time = fetch_raw.get("retrain_time_utc")
-            if isinstance(retrain_time, str):
-                fetch_raw["retrain_time_utc"] = [retrain_time]
-            if not fetch_raw.get("retrain_time_utc"):
-                logger.warning("Could not find a valid `retrain_time_utc` in config.yaml; falling back to `retrain_every_bars`.")
-            fetch_obj = FetchCfg(**fetch_raw) if fetch_raw else FetchCfg()
-        except Exception as e:
-            logger.warning(f"Invalid fetch config in YAML: {e}; using defaults.")
-            fetch_obj = FetchCfg()
+        fetch_raw = raw.get("fetch", {}) or {}
+        retrain_time = fetch_raw.get("retrain_time_utc")
+        if isinstance(retrain_time, str):
+            fetch_raw["retrain_time_utc"] = [retrain_time]
+        if not fetch_raw.get("retrain_time_utc"):
+            logger.warning("Could not find a valid `retrain_time_utc` in config.yaml; falling back to `retrain_every_bars`.")
+        fetch_obj = _block(FetchCfg, fetch_raw, "fetch")
 
-        # parse thompson_sampling block if present
-        try:
-            ts_raw = raw.get("thompson_sampling", {}) or {}
-            ts_obj = ThompsonSamplingCfg(**ts_raw) if ts_raw else ThompsonSamplingCfg()
-        except Exception as e:
-            logger.warning(f"Invalid thompson_sampling config in YAML: {e}; using defaults.")
-            ts_obj = ThompsonSamplingCfg()
+        ts_obj = _block(ThompsonSamplingCfg, raw.get("thompson_sampling"), "thompson_sampling")
 
-        # parse trading_costs block if present
-        try:
-            tc_raw = raw.get("trading_costs", {}) or {}
-            defaults_raw = tc_raw.get("defaults", {}) or {}
-            defaults_obj = TradingCostsDefaultsCfg(**defaults_raw)
-            tc_obj = TradingCostsCfg(
-                source=tc_raw.get("source", "static"),
-                defaults=defaults_obj
-            )
-        except Exception as e:
-            logger.warning(f"Invalid trading_costs config in YAML: {e}; using defaults.")
-            tc_obj = TradingCostsCfg()
+        tc_raw = raw.get("trading_costs", {}) or {}
+        _refuse_unknown_keys(TradingCostsCfg, tc_raw, "trading_costs")
+        tc_obj = TradingCostsCfg(
+            source=tc_raw.get("source", "static"),
+            defaults=_block(TradingCostsDefaultsCfg, tc_raw.get("defaults"), "trading_costs.defaults"),
+        )
 
-        # parse backtesting block if present
-        try:
-            bt_raw = raw.get("backtesting", {}) or {}
-            bt_obj = BacktestingCfg(**bt_raw) if bt_raw else BacktestingCfg()
-        except Exception as e:
-            logger.warning(f"Invalid backtesting config in YAML: {e}; using defaults.")
-            bt_obj = BacktestingCfg()
-
-        # parse asymmetric_compounding block if present
-        try:
-            ac_raw = raw.get("asymmetric_compounding", {}) or {}
-            ac_obj = AsymmetricCompoundingCfg(**ac_raw) if ac_raw else AsymmetricCompoundingCfg()
-        except Exception as e:
-            logger.warning(f"Invalid asymmetric_compounding config in YAML: {e}; using defaults.")
-            ac_obj = AsymmetricCompoundingCfg()
+        bt_obj = _block(BacktestingCfg, raw.get("backtesting"), "backtesting")
+        ac_obj = _block(AsymmetricCompoundingCfg, raw.get("asymmetric_compounding"), "asymmetric_compounding")
 
         return Cfg(
             symbols=raw.get("symbols", ["EURUSD"]),
