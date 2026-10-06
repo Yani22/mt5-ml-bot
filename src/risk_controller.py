@@ -257,6 +257,7 @@ class RiskController:
         self.last_daily_retrain_date: Dict[str, Optional[datetime.date]] = {sym: None for sym in cfg.symbols}
         self._warned_no_price: Dict[str, bool] = {}
         self._warned_no_bar_time: Dict[str, bool] = {}
+        self._warned_no_reset_time: Dict[str, bool] = {}
         self.bar_counters: Dict[str, int] = {sym: 0 for sym in cfg.symbols}
         self.warmstart_sources: Dict[str, str] = {}  # symbol -> backtest file it was warm-started from (kept in the state file)
 
@@ -294,6 +295,19 @@ class RiskController:
                 logger.warning(f"[{symbol}] No bar time in the risk context: the hour inputs of the contextual bandit are 0.")
             return 0.0, 0.0
         return float(np.sin(2 * np.pi * hour / 24.0)), float(np.cos(2 * np.pi * hour / 24.0))
+
+    @staticmethod
+    def _as_utc(t: Any) -> Optional[datetime.datetime]:
+        """`t` as an aware UTC datetime (naive is read as UTC: the bar index and old state files are naive UTC); None when unusable."""
+        try:
+            if t is None or t != t:  # NaT != NaT
+                return None
+            t = t.to_pydatetime() if hasattr(t, "to_pydatetime") else t
+            if not isinstance(t, datetime.datetime):
+                return None
+            return t.replace(tzinfo=datetime.timezone.utc) if t.tzinfo is None else t.astimezone(datetime.timezone.utc)
+        except (AttributeError, TypeError, ValueError):
+            return None
 
     def _relative_vol(self, symbol: str, context: Dict[str, Any]) -> Optional[float]:
         """ATR as a fraction of the decision bar's close (price-scale free, so it means the same on EURUSD, USDJPY or gold).
@@ -752,11 +766,19 @@ class RiskController:
             return
 
         sym_state = self.symbol_states[symbol]
-        current_time = datetime.datetime.utcnow()
+        # The cooldown runs on the decision bar's time, never the wall clock (a backtest's bars are years old). No usable
+        # bar time: no reset (skipping one puts no money at risk), one warning per symbol.
+        current_time = self._as_utc(context.get("bar_time"))
+        if current_time is None:
+            if not self._warned_no_reset_time.get(symbol):
+                self._warned_no_reset_time[symbol] = True
+                logger.warning(f"[{symbol}] No bar time in the risk context: the bandit reset check is skipped.")
+            return
 
         # Check cooldown
-        if sym_state.last_reset_time:
-            cooldown_end_time = sym_state.last_reset_time + datetime.timedelta(hours=ts_cfg.reset_cooldown_hours)
+        last_reset = self._as_utc(sym_state.last_reset_time)
+        if last_reset is not None:
+            cooldown_end_time = last_reset + datetime.timedelta(hours=ts_cfg.reset_cooldown_hours)
             if current_time < cooldown_end_time:
                 logger.debug(f"[{symbol}] Bandit reset in cooldown until {cooldown_end_time}")
                 return
