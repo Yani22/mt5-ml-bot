@@ -27,7 +27,7 @@ def retraining_status_for(symbols, retraining_processes) -> Dict[str, bool]:
 def run_retraining_in_background(cfg, sym, feature_cfg, dry_run, notifier, optuna_params_per_symbol):
     """
     A wrapper function to run the entire retraining pipeline for both long and short models in a separate process.
-    Tuned parameters come from optuna_params/<symbol>_best_params.pkl; config.yaml is never modified.
+    Tuned parameters come from optuna_params/<symbol>_best_params.json; config.yaml is never modified.
     """
     try:
         # The child saves into models/_staging/, never into the live folder; `_handle_model_acceptance` promotes what it accepts.

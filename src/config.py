@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 
 class ConfigError(ValueError):
-    """config.yaml has a key or value the code does not understand. The bot refuses to start on it."""
+    """config.yaml, or a file it points to (the tuned-params JSON), has something the code does not understand. The bot refuses to start on it."""
 
 
 def _refuse_unknown_keys(cls, raw, name):

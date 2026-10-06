@@ -1,4 +1,4 @@
-"""Without `optuna_params/<symbol>_best_params.pkl`, `load_optuna_params` returns None. `trainer.py`, the retrain child and the
+"""Without `optuna_params/<symbol>_best_params.json`, `load_optuna_params` returns None. `trainer.py`, the retrain child and the
 backtester called `.get` on that None for the tuned horizon and threshold, so the trainer and the backtester crashed and the
 daily live retrain failed inside the child's catch-all (logged, nothing trained). They now fall back to the config values."""
 from types import SimpleNamespace as NS

@@ -1,7 +1,7 @@
 # src/utils.py
 from __future__ import annotations
+import json
 import os
-import pickle
 import shutil
 import sys
 from loguru import logger  # type: ignore
@@ -9,7 +9,7 @@ import pandas as pd  # type: ignore
 from src.features import FeatureCfg, build_static_features, build_dynamic_features, add_contextual_features, build_features
 from src.labels import generate_labels, generate_long_short_labels
 from src.ensemble import Ensemble
-from src.config import Cfg
+from src.config import Cfg, ConfigError
 from src import data_manager
 from src.data import merge_features_labels
 from src.time_utils import timeframe_to_seconds, timeframe_to_mt5_timeframe  # NEW IMPORT
@@ -62,20 +62,43 @@ def setup_logging(level="INFO", to_file=True, rotate="10 MB", retention="7 days"
 
 def optuna_params_filename(symbol: str) -> str:
     """File name for a symbol's tuned params, shared by the tuner (writer) and the bot (reader). The '#' is dropped."""
-    return f"{symbol.replace('#', '')}_best_params.pkl"
+    return f"{symbol.replace('#', '')}_best_params.json"
+
+
+def _json_default(value):
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    raise TypeError(f"tuned params must be plain data, got {type(value).__name__}")
+
+
+def save_optuna_params(symbol: str, params: dict) -> str:
+    """Writes the tuned params as JSON (never a pickle: nothing in `optuna_params/` is unpickled) and returns the path."""
+    os.makedirs(PARAMS_DIR, exist_ok=True)
+    path = os.path.join(PARAMS_DIR, optuna_params_filename(symbol))
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(params, f, indent=2, default=_json_default)
+    os.replace(tmp, path)
+    return path
 
 
 def load_optuna_params(symbol: str, cfg: Cfg) -> dict | None:
     file_path = os.path.join(PARAMS_DIR, optuna_params_filename(symbol))
     if not os.path.exists(file_path):
+        legacy = os.path.join(PARAMS_DIR, f"{symbol.replace('#', '')}_best_params.pkl")
+        if os.path.exists(legacy):
+            raise ConfigError(f"[{symbol}] {legacy} is a pickled tuned-params file from an older version. It is never loaded "
+                              f"(a pickle can run code). Delete it, or re-run tuner.py to write {os.path.basename(file_path)}.")
         logger.warning(f"[{symbol}] No Optuna params found at {file_path}, using defaults from config.")
         return None
     try:
-        with open(file_path, "rb") as f:
-            loaded_params = pickle.load(f)
+        with open(file_path, "r", encoding="utf-8") as f:
+            loaded_params = json.load(f)
     except Exception as e:
-        logger.error(f"[{symbol}] Failed to load optuna params: {e}")
-        return None
+        raise ConfigError(f"[{symbol}] tuned params in {file_path} cannot be read ({e}). Fix or delete the file, "
+                          f"or re-run tuner.py.") from e
 
     if not isinstance(loaded_params, dict) or "models" not in loaded_params:
         logger.warning(f"[{symbol}] Optuna params format unexpected; using empty model params.")

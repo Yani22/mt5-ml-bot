@@ -1,7 +1,6 @@
 # tuner.py
 from __future__ import annotations
 import os
-import pickle
 import pandas as pd  # type: ignore
 import optuna  # type: ignore
 from loguru import logger  # type: ignore
@@ -13,7 +12,7 @@ import traceback  # Added for detailed error logging
 from src.config import Cfg, RiskCfg
 from src.features import FeatureCfg, build_dynamic_features
 from src.data_colab import fetch_bars, merge_features_labels
-from src.utils import get_training_data, optuna_params_filename
+from src.utils import get_training_data, save_optuna_params
 from src.ensemble import Ensemble
 from sklearn.model_selection import TimeSeriesSplit  # type: ignore
 from sklearn.metrics import roc_auc_score  # type: ignore
@@ -187,9 +186,7 @@ def run_tuning_for_symbol(sym: str):
                 best_params_structured["models"][model_name] = {}
             best_params_structured["models"][model_name][param_name] = value
 
-    param_file = os.path.join(PARAMS_DIR, optuna_params_filename(sym))
-    with open(param_file, "wb") as f:
-        pickle.dump(best_params_structured, f)
+    param_file = save_optuna_params(sym, best_params_structured)
 
     logger.info(f"[{sym}] Best combined params saved to {param_file}")
     logger.debug(best_params_structured)
