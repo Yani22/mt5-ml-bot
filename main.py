@@ -67,6 +67,10 @@ def _warmstart_bandit(cfg):
 
 def _process_closed_trades(exe, live_monitor, risk_controller, ens_per_symbol_long, ens_per_symbol_short, mt5c):
     """Reconciles closed positions with MT5, feeds them to the monitor and bandit, and logs reward metrics."""
+    try:
+        live_monitor.apply_balance_flows(mt5c, datetime.datetime.now(datetime.timezone.utc))  # deposits/withdrawals first (B7)
+    except Exception as e:
+        logger.exception(f"Balance flow check failed: {e}")
     closed_trades = exe.reconcile_open_positions_with_mt5()
     if closed_trades:
         for trade in closed_trades:
@@ -184,6 +188,7 @@ def run(dry_run: bool = True):
                 live_monitor = LivePerformanceMonitor(cfg)
                 live_monitor.account_id = f"{getattr(account_info, 'login', None)}@{getattr(account_info, 'server', None)}"
                 live_monitor.load_state()  # Load previous state on startup
+                live_monitor.apply_balance_flows(mt5c, datetime.datetime.now(datetime.timezone.utc))  # a withdrawal made while the bot was down (B7)
 
                 # Immediately after loading state, sync the current_equity with the live account value
                 # This ensures the bot starts with the ground truth from the broker.

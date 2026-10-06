@@ -21,6 +21,9 @@ except ImportError:
         "TIMEFRAME_M5", "TIMEFRAME_MN1", "TIMEFRAME_W1", "TRADE_ACTION_DEAL",
         "TRADE_ACTION_SLTP", "TRADE_RETCODE_DONE")):
         setattr(_stub, _name, _i)
+    # Read from the XM terminal's Python package (not the sequential stand-ins above): deposits, withdrawals, credit, bonus
+    for _name, _value in ("DEAL_TYPE_BALANCE", 2), ("DEAL_TYPE_CREDIT", 3), ("DEAL_TYPE_CORRECTION", 5), ("DEAL_TYPE_BONUS", 6):
+        setattr(_stub, _name, _value)
 
 
 import pytest  # noqa: E402

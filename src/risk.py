@@ -3,6 +3,7 @@ try:
     import MetaTrader5 as mt5  # type: ignore
 except ImportError:  # not available on Linux; only needed on the live (Windows) path
     mt5 = None
+from .balance_flows import BalanceFlowCursor, shift_peak
 from .config import Cfg
 import pandas as pd  # type: ignore
 import numpy as np  # type: ignore
@@ -29,6 +30,8 @@ class RiskManager:
         self.risk_cfg = cfg.risk
         self.watchdog_cfg = cfg.watchdog
         self.equity_peak: float | None = None
+        self._balance_flows = BalanceFlowCursor()  # deposits and withdrawals the peak already accounts for (B7)
+        self._pending_flow = 0.0  # polled but not yet applied to the peak (the equity read failed in between)
         self.open_positions_cache: dict[str, dict] = {}
         self.cooldown_until: datetime.datetime | None = None
         self.recently_closed_trades: List[SimPosition] = []  # New: To store closed trades for monitoring
@@ -364,6 +367,9 @@ class RiskManager:
 
         # 2) Drawdown check (based on cfg.block_on_drawdown)
         if self.cfg.data_source == "mt5":
+            # Look at balance deals before reading the equity: a withdrawal that lands between the two then shows as a
+            # short drawdown (blocks) instead of being missed (B7)
+            self._pending_flow += self._balance_flows.poll(self.mt5_client, now_local)
             try:
                 acct = self.mt5_client.account_info()
             except Exception as e:
@@ -373,6 +379,11 @@ class RiskManager:
                 logger.warning("Trading blocked: account_info() returned nothing; cannot check drawdown.")
                 return False
             equity = float(getattr(acct, "equity", 0.0))
+            if self._pending_flow and self.equity_peak is not None:
+                # before the peak update: a deposit must not lift the peak twice
+                self.equity_peak = shift_peak(self.equity_peak, equity, self._pending_flow)
+                logger.info(f"Balance deals of {self._pending_flow:+.2f}: equity peak now {self.equity_peak:.2f}.")
+            self._pending_flow = 0.0
             self._update_equity_peak(equity)
             if self._drawdown_exceeded(equity):
                 # Trigger cooldown only if watchdog is also enabled

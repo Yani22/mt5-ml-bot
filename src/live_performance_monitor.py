@@ -8,6 +8,7 @@ import json  # NEW
 import math
 import os  # NEW
 
+from src.balance_flows import BalanceFlowCursor, shift_peak
 from src.config import Cfg
 from src.trade_types import ClosedTrade  # Import the new ClosedTrade dataclass
 
@@ -32,6 +33,7 @@ class LivePerformanceMonitor:
         self.last_check_time: Optional[datetime.datetime] = None
         self.last_ensemble_auc: float = 0.0  # To track the latest AUC from retraining
         self.account_id: Optional[str] = None  # "login@server"; set before load_state so a state file is only used on its own account
+        self.flow_cursor = BalanceFlowCursor()  # which deposits and withdrawals the peak already accounts for (B7)
 
         logger.info(f"LivePerformanceMonitor initialized with initial equity: {self.current_equity}")
 
@@ -53,6 +55,24 @@ class LivePerformanceMonitor:
         self.current_equity = new_equity
         self.peak_equity = max(self.peak_equity, new_equity)
         logger.info(f"Live monitor equity synchronized to: {new_equity}")
+
+    def apply_balance_flows(self, mt5_client, now: datetime.datetime) -> float:
+        """Rescales the peak for money paid in (+) or out (-) since the last look, so the drawdown fraction is what it was
+        before the flow, then syncs the equity so the two stay paired. Call this before an equity update, never after (B7)."""
+        net = self.flow_cursor.poll(mt5_client, now)
+        if net:
+            try:
+                equity = equity_from_account(mt5_client.account_info())
+            except Exception:
+                equity = None
+            if equity is not None:
+                self.peak_equity = shift_peak(self.peak_equity, equity, net)
+                self.sync_equity(equity)
+            else:  # equity unreadable: move the peak by the amount (right in dollars, not in fraction) rather than not at all
+                self.peak_equity = max(self.peak_equity + net, 0.0)
+                logger.warning("Account equity unreadable after a balance deal; the peak was moved by the amount.")
+            logger.info(f"Balance deals of {net:+.2f}: equity peak now {self.peak_equity:.2f}.")
+        return net
 
     def add_closed_trade(self, trade: ClosedTrade):
         self.closed_trades.append(trade)
@@ -95,6 +115,7 @@ class LivePerformanceMonitor:
                 "current_equity": self.current_equity,
                 "last_check_time": self.last_check_time.isoformat() if self.last_check_time else None,
                 "last_ensemble_auc": self.last_ensemble_auc,
+                "balance_flows": self.flow_cursor.to_state(),
             }
             with open(state_path, 'w') as f:
                 json.dump(state, f, indent=4)
@@ -154,6 +175,7 @@ class LivePerformanceMonitor:
             self.current_equity = state.get("current_equity", self.cfg.initial_equity)
             self.last_check_time = datetime.datetime.fromisoformat(state["last_check_time"]) if state.get("last_check_time") else None
             self.last_ensemble_auc = state.get("last_ensemble_auc", 0.0)
+            self.flow_cursor = BalanceFlowCursor.from_state(state.get("balance_flows"))
 
             logger.debug(f"LivePerformanceMonitor state loaded from {state_path}")
         except Exception as e:
