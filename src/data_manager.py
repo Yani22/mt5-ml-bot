@@ -308,9 +308,11 @@ class DataManager:
         if self.cfg.context_features.mta.enabled:
             mta_df = self.load_local_history(symbol, self.cfg.context_features.mta.timeframe, count=count)
             if mta_df.empty:
-                logger.warning(f"[{symbol}] No MTA data loaded for timeframe {self.cfg.context_features.mta.timeframe}. Disabling MTA features.")
-                self.cfg.context_features.mta.enabled = False  # Temporarily disable to prevent errors
-                mta_df = None
+                # Training without the enabled context would give a model whose columns do not match what the live bot builds,
+                # and the old "disable it in the shared config" edit was never undone: refuse instead.
+                logger.error(f"[{symbol}] No MTA data for timeframe {self.cfg.context_features.mta.timeframe}, but it is enabled; "
+                             f"not building training data without it.")
+                return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
             else:
                 logger.info(f"[{symbol}] Successfully loaded MTA data for timeframe {self.cfg.context_features.mta.timeframe}.")
 
@@ -320,9 +322,9 @@ class DataManager:
             im_sym = self.cfg.context_features.inter_market.symbol
             inter_market_df = self.load_local_history(im_sym, self.cfg.timeframe, count=count)
             if inter_market_df.empty:
-                logger.warning(f"[{symbol}] No Inter-Market data loaded for symbol {im_sym}. Disabling Inter-Market features.")
-                self.cfg.context_features.inter_market.enabled = False  # Temporarily disable to prevent errors
-                inter_market_df = None
+                logger.error(f"[{symbol}] No Inter-Market data for symbol {im_sym}, but it is enabled; "
+                             f"not building training data without it.")
+                return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
             else:
                 logger.info(f"[{symbol}] Successfully loaded Inter-Market data for symbol {im_sym}.")
 

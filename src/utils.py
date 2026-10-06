@@ -147,9 +147,9 @@ def get_training_data(cfg: Cfg, symbol: str, feature_cfg: FeatureCfg, count: int
             mta_df = dm._fetch_bars_from_mt5_chunked(symbol, cfg.context_features.mta.timeframe, fetch_count)
         else:
             raise ValueError(f"Unknown data source: {cfg.data_source}")
-        if mta_df.empty:
-            logger.warning(f"[{symbol}] No MTA data fetched for timeframe {cfg.context_features.mta.timeframe}.")
-            mta_df = None
+        if mta_df is None or mta_df.empty:
+            raise RuntimeError(f"[{symbol}] No MTA data for timeframe {cfg.context_features.mta.timeframe}, but it is enabled: "
+                               f"a model trained without it would not match the live features. Fetch the history or disable it in config.yaml.")
 
     inter_market_df = None
     if cfg.context_features.inter_market.enabled:
@@ -161,9 +161,9 @@ def get_training_data(cfg: Cfg, symbol: str, feature_cfg: FeatureCfg, count: int
             inter_market_df = dm._fetch_bars_from_mt5_chunked(im_sym, cfg.timeframe, fetch_count)
         else:
             raise ValueError(f"Unknown data source: {cfg.data_source}")
-        if inter_market_df.empty:
-            logger.warning(f"[{symbol}] No Inter-Market data fetched for symbol {im_sym}.")
-            inter_market_df = None
+        if inter_market_df is None or inter_market_df.empty:
+            raise RuntimeError(f"[{symbol}] No Inter-Market data for symbol {im_sym}, but it is enabled: a model trained without it "
+                               f"would not match the live features. Fetch the history or disable it in config.yaml.")
 
     # --- 3. Build Feature Set ---
     logger.info(f"[{symbol}] Building full feature set...")

@@ -42,6 +42,9 @@ def run_retraining_in_background(cfg, sym, feature_cfg, dry_run, notifier, optun
         tuned_min_pct_change = tuned.get('min_pct_change', feature_cfg.min_pct_change)
 
         full_data, full_X, _ = data_manager.load_cached(sym, feature_cfg, count=cfg.retraining_window_bars, min_pct_change=tuned_min_pct_change)
+        if full_data.empty or full_X.empty:
+            logger.error(f"[{sym}] No training data (the cache or an enabled context is empty); retrain skipped, nothing staged.")
+            return
 
         y_long, y_short = generate_long_short_labels(full_data, tuned_prediction_horizon, tuned_min_pct_change)
         # Labels drop the unknown-future tail; align features and prices to them.
@@ -105,7 +108,7 @@ def _handle_model_acceptance(sym, cfg, ens_per_symbol_long, ens_per_symbol_short
             alert(f"[{sym}] Staged {label} model could not be loaded and was discarded. Keeping old model.", "WARNING")
             return
         if new_ens is None:
-            logger.info(f"[{sym}] No new {label} model was staged (the retrain was no improvement, or this is a dry run). Keeping the current one.")
+            logger.info(f"[{sym}] No new {label} model was staged (the retrain was no improvement, it failed (see the child's log), or this is a dry run). Keeping the current one.")
             return
 
         new_auc = getattr(new_ens, "ensemble_cv_auc_", None)
