@@ -29,7 +29,7 @@ def make(ts_enabled=True, sl=1.0, tp=2.0):
 
 
 def ratio(rc, rm, vol):
-    ctx = {"vol": vol, "equity": 1000.0, "peak_equity": 1000.0, "ensemble_auc": 0.6}
+    ctx = {"vol": vol, "price": 1.0, "equity": 1000.0, "peak_equity": 1000.0, "ensemble_auc": 0.6}
     p = rc.get_params(SYM, ctx)
     sl, tp = rm.stop_targets(PRICE, ATR, "long", 0.6, SYM, sl_mult=p["atr_multiplier_sl"], tp_mult=p["atr_multiplier_tp"])
     return (tp - PRICE) / (PRICE - sl)

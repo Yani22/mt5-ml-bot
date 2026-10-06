@@ -121,6 +121,7 @@ class SymbolProcessor:
         # Get dynamic risk parameters from RiskController
         context = {
             "vol": atr,
+            "price": float(last_closed_price),
             "equity": self.monitor.current_equity,
             "peak_equity": self.monitor.peak_equity,
             "ensemble_auc": (ens_long.ensemble_cv_auc_ + ens_short.ensemble_cv_auc_) / 2,

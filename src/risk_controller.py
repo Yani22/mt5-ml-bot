@@ -255,6 +255,7 @@ class RiskController:
 
         self.state_file = cfg.thompson_sampling.state_file
         self.last_daily_retrain_date: Dict[str, Optional[datetime.date]] = {sym: None for sym in cfg.symbols}
+        self._warned_no_price: Dict[str, bool] = {}
         self.bar_counters: Dict[str, int] = {sym: 0 for sym in cfg.symbols}
         self.warmstart_sources: Dict[str, str] = {}  # symbol -> backtest file it was warm-started from (kept in the state file)
 
@@ -267,6 +268,24 @@ class RiskController:
 
     def update_last_daily_retrain_date(self, symbol: str, date: datetime.date):
         self.last_daily_retrain_date[symbol] = date
+
+    def _relative_vol(self, symbol: str, context: Dict[str, Any]) -> Optional[float]:
+        """ATR as a fraction of the decision bar's close (price-scale free, so it means the same on EURUSD, USDJPY or gold).
+        None when the context has no usable ATR or price: callers then skip the volatility scaling instead of using a price-unit ATR."""
+        try:
+            vol = float(context.get("vol", 0.0))
+        except (TypeError, ValueError):
+            vol = 0.0
+        try:
+            price = float(context.get("price"))
+        except (TypeError, ValueError):
+            price = float("nan")
+        if not (np.isfinite(vol) and np.isfinite(price) and price > 0 and vol > 0):
+            if vol > 0 and not self._warned_no_price.get(symbol):
+                self._warned_no_price[symbol] = True
+                logger.warning(f"[{symbol}] No usable price in the risk context: the volatility scaling of the stop is skipped.")
+            return None
+        return vol / price
 
     def _calculate_rule_scale(self, symbol: str, context: Dict[str, Any]) -> float:
         """
@@ -286,7 +305,7 @@ class RiskController:
         ts_cfg = self.cfg.thompson_sampling
 
         # Extract context variables
-        vol = context.get("vol", sym_state.last_atr)  # Use last_atr if current vol not provided
+        vol = self._relative_vol(symbol, context)  # fraction of price; `vol_threshold` is in the same unit
         equity = context.get("equity", sym_state.current_equity)
         peak_equity = context.get("peak_equity", sym_state.peak_equity)
         max_drawdown = 1.0 - (equity / peak_equity) if peak_equity is not None and peak_equity > 0 else 0.0
@@ -295,8 +314,9 @@ class RiskController:
         rule_scale = 1.0
 
         # 1. Inverse Volatility Scale
-        if vol > 0 and ts_cfg.vol_threshold > 0:  # Avoid division by zero
-            inverse_vol_scale = min(1.0, ts_cfg.vol_threshold / vol + 0.5)  # Example scaling
+        vol_threshold = float(self.cfg.get_symbol_value(symbol, "vol_threshold", ts_cfg.vol_threshold) or 0.0)
+        if vol is not None and vol_threshold > 0:  # Avoid division by zero
+            inverse_vol_scale = min(1.0, vol_threshold / vol + 0.5)  # Example scaling
             rule_scale *= inverse_vol_scale
 
         # 2. Drawdown Scale
@@ -312,7 +332,7 @@ class RiskController:
         # Ensure rule_scale is within (0, 1]
         rule_scale = np.clip(rule_scale, 0.01, 1.0)  # Min scale of 0.01 to avoid zeroing out
 
-        logger.debug(f"[{symbol}] Rule Scale: {rule_scale:.2f} (Vol:{vol:.5f}, DD:{max_drawdown:.2%}, CL:{consecutive_losses})")
+        logger.debug(f"[{symbol}] Rule Scale: {rule_scale:.2f} (Vol:{vol}, DD:{max_drawdown:.2%}, CL:{consecutive_losses})")
         return float(rule_scale)
 
     def get_params(self, symbol: str, context: Dict[str, Any]) -> Dict[str, Any]:
@@ -352,7 +372,7 @@ class RiskController:
         if getattr(self.cfg.thompson_sampling, "contextual_enabled", False) and sym_state.contextual_bandit is not None:
             # build a context vector from available context dict: vol, equity, peak_equity, ensemble_auc, adx, macd_diff, volatility_10, dist_from_ema_200
             # normalize vol by vol_threshold to keep scales reasonable
-            vol = float(context.get("vol", sym_state.last_atr or 0.0))
+            rel_vol = self._relative_vol(symbol, context)
             auc = float(context.get("ensemble_auc", 0.5))
             equity = float(context.get("equity", sym_state.current_equity or self.cfg.initial_equity))
             peak = float(context.get("peak_equity") or sym_state.peak_equity or self.cfg.initial_equity)
@@ -362,7 +382,7 @@ class RiskController:
             hour = now.hour + now.minute / 60.0
             hour_sin = np.sin(2 * np.pi * hour / 24.0)
             hour_cos = np.cos(2 * np.pi * hour / 24.0)
-            vol_scale = float(self.cfg.thompson_sampling.vol_threshold or 1e-6)
+            vol_scale = float(self.cfg.get_symbol_value(symbol, "vol_threshold", self.cfg.thompson_sampling.vol_threshold) or 1e-6)
 
             # New context features
             adx = float(context.get("adx", 0.0))
@@ -371,7 +391,7 @@ class RiskController:
             dist_from_ema_200 = float(context.get("dist_from_ema_200", 0.0))
 
             x = np.array([
-                vol / max(vol_scale, 1e-9),
+                (rel_vol / max(vol_scale, 1e-9)) if rel_vol is not None else 0.0,
                 auc,
                 drawdown,
                 hour_sin,

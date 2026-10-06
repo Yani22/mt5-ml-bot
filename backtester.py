@@ -305,6 +305,7 @@ class HybridBacktester:
             # Get dynamic risk parameters from RiskController
             context = {
                 "vol": atr,
+                "price": float(current_row["close"]),
                 "equity": self.equity,
                 "peak_equity": self.risk_manager.equity_peak,
                 "ensemble_auc": (ens_long.ensemble_cv_auc_ + ens_short.ensemble_cv_auc_) / 2,  # Pass current model confidence

@@ -2,8 +2,8 @@
 before the unreachable second copy of its body was deleted: the values below passed on the code as it was and must not move.
 Each one is also the formula by hand: inverse vol = min(1, vol_threshold / vol + 0.5); drawdown = max(0.1, 1 - dd_cut x drawdown);
 losses = max(0.1, 1 - consec_cut x losses / 5); product clipped to [0.01, 1]. Defaults: vol_threshold 0.0005, dd_cut 2.0, consec_cut 0.2.
-These pin TODAY's behaviour, including the price-unit `vol_threshold` (AUDIT C1: at USDJPY's ATR of about 0.057 the vol factor is about 0.51);
-a fix for C1 will change the `vol=0.01` values on purpose and should update them."""
+`vol` here is ATR as a fraction of price: the context passes price 1.0, so ATR and fraction coincide (AUDIT C1 fix: `vol_threshold` is a fraction
+of price; the scale-invariance cases are in `test_rule_scale_relative.py`)."""
 import pytest
 
 from src.config import Cfg
@@ -18,7 +18,7 @@ def scale(vol, equity=1000.0, peak=1000.0, losses=0):
     cfg.thompson_sampling.bandit_reset_enabled = False
     rc = RiskController(cfg)
     rc.symbol_states[SYM].consecutive_losses = losses
-    return rc._calculate_rule_scale(SYM, {"vol": vol, "equity": equity, "peak_equity": peak})
+    return rc._calculate_rule_scale(SYM, {"vol": vol, "price": 1.0, "equity": equity, "peak_equity": peak})
 
 
 @pytest.mark.parametrize("kwargs, expected", [
