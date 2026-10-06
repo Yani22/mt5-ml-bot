@@ -4,9 +4,8 @@ import numpy as np  # type: ignore
 from loguru import logger  # type: ignore
 import os
 import copy  # Import copy module for deepcopy
-from sklearn.metrics import roc_auc_score  # type: ignore
 from backtester import HybridBacktester
-from src.config import Cfg, RiskCfg  # Import Cfg and RiskCfg
+from src.config import Cfg  # Import Cfg and RiskCfg
 from src.utils import setup_logging
 
 # --- Load Configuration ---

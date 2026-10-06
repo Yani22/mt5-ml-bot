@@ -11,9 +11,9 @@ from functools import partial
 from joblib import Parallel, delayed  # type: ignore
 import traceback  # Added for detailed error logging
 
-from src.config import Cfg, RiskCfg
+from src.config import Cfg
 from src.features import FeatureCfg, add_relative_features, build_dynamic_features, model_matrix
-from src.data_colab import fetch_bars, merge_features_labels
+from src.data_colab import merge_features_labels
 from src.utils import get_training_data, save_optuna_params
 from src.ensemble import Ensemble
 from sklearn.model_selection import TimeSeriesSplit  # type: ignore
@@ -22,7 +22,7 @@ from sklearn.metrics import roc_auc_score  # type: ignore
 # --- Detect Colab and set path ---
 # Assumes drive is already mounted if running in Colab.
 try:
-    import google.colab  # type: ignore
+    import google.colab  # type: ignore  # noqa: F401  (availability probe)
     # This path should point to the location in your Google Drive where params are stored.
     PARAMS_DIR = "/content/drive/MyDrive/mt5_ml_bot_params/optuna_params"
     IN_COLAB = True

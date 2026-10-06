@@ -11,7 +11,7 @@ import pandas as pd
 import pytest
 
 import tuner
-from src.config import FeatureCfg, PriceActionCfg
+from src.config import PriceActionCfg
 from src.features import build_static_features
 from tests.test_feature_stationarity import ohlc
 

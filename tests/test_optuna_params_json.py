@@ -3,7 +3,6 @@ check before anything is unpickled. A swapped or downloaded `<symbol>_best_param
 plain data, so they are JSON now and nothing in `optuna_params/` is ever unpickled; a leftover `.pkl` stops start-up with a
 message that says what to do."""
 import json
-import os
 import pickle
 from pathlib import Path
 from types import SimpleNamespace as NS

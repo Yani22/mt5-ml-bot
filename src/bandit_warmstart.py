@@ -6,7 +6,6 @@ import glob
 from typing import Any, Dict
 from loguru import logger  # type: ignore
 import numpy as np  # type: ignore
-import datetime  # Import datetime module
 
 
 def _load_json(path: str) -> Dict[str, Any]:
@@ -33,7 +32,7 @@ def _save_json(obj: Dict[str, Any], path: str) -> None:
 
 def find_latest_backtest_state(results_dir: str = "results") -> str | None:
     """Find newest backtest state file."""
-    pattern = f"ts_risk_controller_state_backtest_*.json"
+    pattern = "ts_risk_controller_state_backtest_*.json"
     search_path = os.path.join(results_dir, pattern)
     matches = glob.glob(search_path)
     if not matches:

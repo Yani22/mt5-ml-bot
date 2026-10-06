@@ -5,7 +5,6 @@ import datetime
 from pathlib import Path
 from types import SimpleNamespace as NS
 
-import pytest
 from loguru import logger
 
 import src.mt5_client as mc

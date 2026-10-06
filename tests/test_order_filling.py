@@ -1,7 +1,6 @@
 """B9: the order's filling type comes from what the symbol allows (SYMBOL_FILLING_* flags: FOK 1, IOC 2), not a hard-coded IOC.
 Preference IOC, then FOK, then RETURN (RETURN is allowed except in market-execution mode). type_filling takes ORDER_FILLING_*
 values: FOK 0, IOC 1, RETURN 2."""
-from types import SimpleNamespace as NS
 
 import pytest
 

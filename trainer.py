@@ -9,13 +9,11 @@ from __future__ import annotations
 import os
 from loguru import logger  # type: ignore
 import numpy as np
-from typing import List
 
 from src.config import Cfg
 from src.features import FeatureCfg
-from src.utils import load_ensemble, save_ensemble, safe_retrain_ensemble, load_optuna_params, get_training_data
+from src.utils import load_ensemble, safe_retrain_ensemble, load_optuna_params, get_training_data
 from src.ensemble import Ensemble
-from src.labels import generate_long_short_labels
 import pandas as pd  # type: ignore
 import random
 

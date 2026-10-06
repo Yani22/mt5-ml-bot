@@ -5,10 +5,9 @@ import datetime
 from collections import deque
 import json
 import os
-from typing import List, Dict, Tuple, Optional, Any
+from typing import List, Dict, Optional, Any
 
 from src.config import CONTEXT_VECTOR_DIM, Cfg
-from src.trade import SimPosition  # For reward normalization
 from src.trade_types import ClosedTrade  # Import ClosedTrade
 from src.linear_thompson import LinearThompson  # new
 

@@ -141,7 +141,7 @@ def processor_with(fetched, mta_on=True):
     def boom(*a, **k):
         raise AssertionError("features were built a second time")
 
-    return sp, patch.object(spmod, "build_features", boom)
+    return sp, patch.object(spmod, "build_features", boom, create=True)  # the module no longer imports it; a re-added import is replaced by the tripwire
 
 
 def test_the_processor_returns_the_features_fetch_live_built():

@@ -8,9 +8,8 @@ import requests
 
 from src.config import Cfg
 from src.notifier import TelegramNotifier
-from src.risk import RiskManager
 from test_execution_dry_run import FakeClient as ExecClient, make as make_execution
-from test_trade_gate import decide, make_cfg, make_rm, make_sp
+from test_trade_gate import decide, make_rm, make_sp
 
 
 @pytest.fixture(autouse=True)

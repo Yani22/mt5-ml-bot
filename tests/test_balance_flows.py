@@ -9,7 +9,6 @@ from types import SimpleNamespace as NS
 
 import MetaTrader5 as mt5
 
-from src.balance_flows import BalanceFlowCursor
 from src.config import Cfg
 from src.live_performance_monitor import LivePerformanceMonitor
 from src.risk import RiskManager

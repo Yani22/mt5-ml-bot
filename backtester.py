@@ -472,7 +472,6 @@ class HybridBacktester:
 
 if __name__ == "__main__":
     import random
-    import sys
 
     np.random.seed(42)
     random.seed(42)

@@ -1,6 +1,5 @@
 import MetaTrader5 as mt5
 import sys
-import os
 
 
 def get_info(symbol: str):

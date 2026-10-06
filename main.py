@@ -1,31 +1,20 @@
 # main.py
-import argparse
 import os
 import time
-import copy
-from multiprocessing import Process
 from dotenv import load_dotenv
 from loguru import logger
-import pandas as pd
 from src.config import Cfg, FeatureCfg
 from src.mt5_client import MT5Client, teardown_connection
 from src.risk import RiskManager
 from src.execution import Execution
-from src.utils import setup_logging, get_training_data, load_ensemble, save_ensemble, safe_retrain_ensemble, load_optuna_params, log_symbol_specific_configs, log_startup_summary, timeframe_to_seconds, ensure_min_grid_size, timeframe_to_mt5_timeframe, _initialize_metrics_csv, log_metrics_to_csv, METRICS_CSV_FILE, METRICS_HEADERS
+from src.utils import setup_logging, load_ensemble, load_optuna_params, log_startup_summary, _initialize_metrics_csv, log_metrics_to_csv
 from src.live_performance_monitor import LivePerformanceMonitor, equity_from_account
 from src.notifier import TelegramNotifier
 
 from src.risk_controller import RiskController
 import datetime
-import json
-from typing import Dict, Any
 from src.data_manager import DataManager
-from src.labels import generate_long_short_labels
 from src.bandit_warmstart import find_latest_backtest_state, merge_warmstart
-import csv
-import yaml
-import numpy as np
-from typing import List
 
 import threading
 from src.live_guard import require_live_permission
@@ -58,10 +47,10 @@ def _warmstart_bandit(cfg):
             merge_warmstart(latest_backtest_file, live_state_path, warmstart_weight=warm_weight)
             logger.info(f"Warm-start merge complete for all symbols from {latest_backtest_file}.")
         else:
-            logger.info(f"No backtest bandit state file found to warm-start any symbol.")
+            logger.info("No backtest bandit state file found to warm-start any symbol.")
 
     except Exception:
-        logger.exception(f"Warmstart merge failed; continuing without warmstart.")
+        logger.exception("Warmstart merge failed; continuing without warmstart.")
 
 
 def _process_closed_trades(exe, live_monitor, risk_controller, ens_per_symbol_long, ens_per_symbol_short, mt5c):

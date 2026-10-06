@@ -47,7 +47,7 @@ def get_symbol_info():
     print(f"Minimum Volume (lots): {info.volume_min}")
     print(f"Maximum Volume (lots): {info.volume_max}")
     print(f"Volume Step (lot increment): {info.volume_step}")
-    print(f"------------------------------------")
+    print("------------------------------------")
 
     # Shut down the connection
     mt5c.shutdown()

@@ -3,7 +3,7 @@ from __future__ import annotations
 from loguru import logger  # type: ignore
 import datetime
 from collections import deque
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 import json  # NEW
 import math
 import os  # NEW

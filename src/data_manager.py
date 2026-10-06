@@ -111,8 +111,6 @@ class DataManager:
 
     def _fetch_bars_from_mt5_chunked(self, symbol: str, timeframe: str, count: int) -> pd.DataFrame:
         import MetaTrader5 as mt5  # type: ignore
-        import datetime  # NEW
-        from src.time_utils import timeframe_to_seconds  # NEW
 
         TF_MAP = {
             "M1": getattr(mt5, "TIMEFRAME_M1", None),

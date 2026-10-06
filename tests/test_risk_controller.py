@@ -1,7 +1,6 @@
 """Bandit credit: a closed trade may only teach the bandits what it actually tested (T1, T2)."""
 import datetime
 
-import numpy as np
 import pytest
 
 from src.config import Cfg

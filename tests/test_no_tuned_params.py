@@ -4,7 +4,6 @@ daily live retrain failed inside the child's catch-all (logged, nothing trained)
 from types import SimpleNamespace as NS
 
 import pandas as pd
-import pytest
 
 import backtester
 import trainer

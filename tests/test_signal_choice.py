@@ -1,6 +1,5 @@
 """K5: when both models pass their threshold and AUC gate on the same bar the signals conflict (the labels are mutually
 exclusive: forward return above +x versus below -x), so the bar is skipped instead of always taking the long."""
-import pytest
 
 from src.decision import choose_direction
 from test_trade_gate import FakeEnsemble, decide, make_rm, make_sp
