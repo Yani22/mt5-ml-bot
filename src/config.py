@@ -108,7 +108,7 @@ class RiskCfg:
     max_spread_atr: float = 1.0  # skip entries when spread / decision-bar ATR is above this; 0 = off (symbol_overrides can set it)
     session_filter: Optional[Dict[str, str]] = None
     min_ensemble_auc: float = 0.55
-    min_auc_improvement: float = 0.005
+    min_auc_improvement: float = 0.005  # unused since fix 65 (a retrained model replaces the old one whenever it fitted); kept so config.yaml loads
     max_drawdown_for_pruning: float = 0.70  # New: Max drawdown allowed before Optuna trial pruning
     dynamic_risk: Dict[str, Any] = field(
         default_factory=lambda: {

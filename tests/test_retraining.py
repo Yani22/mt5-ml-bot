@@ -26,16 +26,16 @@ def _accept(old_long, old_short, new_long, new_short):
     return longs["EURUSD"], shorts["EURUSD"], aucs, monitor
 
 
-def test_model_accepted_only_if_auc_improves_by_margin():
-    long_, short_, aucs, monitor = _accept(0.60, 0.60, 0.62, 0.601)
-    assert long_.ensemble_cv_auc_ == 0.62      # improved by 0.02 >= 0.005 -> accepted
-    assert short_.ensemble_cv_auc_ == 0.60     # improved by 0.001 < 0.005 -> rejected
+def test_the_newest_model_replaces_the_old_one_whatever_its_auc():
+    """C2: the AUC margin test is gone (a stored AUC from another window, noisy at a daily retrain); the gate decides trading."""
+    long_, short_, aucs, monitor = _accept(0.60, 0.60, 0.62, 0.50)
+    assert long_.ensemble_cv_auc_ == 0.62 and short_.ensemble_cv_auc_ == 0.50
     assert aucs["EURUSD"] == 0.62
     monitor.update_ensemble_auc.assert_called_once_with(0.62)
 
 
-def test_worse_model_is_rejected():
-    long_, short_, aucs, monitor = _accept(0.60, 0.60, 0.55, 0.50)
+def test_a_model_without_an_auc_is_rejected():
+    long_, short_, aucs, monitor = _accept(0.60, 0.60, None, float("nan"))
     assert long_.ensemble_cv_auc_ == 0.60 and short_.ensemble_cv_auc_ == 0.60
     assert aucs == {} and not monitor.update_ensemble_auc.called
 

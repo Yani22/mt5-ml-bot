@@ -40,7 +40,7 @@ def train_and_save_model(cfg: Cfg, symbol: str, model_type: str, X: pd.DataFrame
     if ens_new is ens_old:
         new_auc = getattr(ens_new, "ensemble_cv_auc_", getattr(ens_new, "cv_auc_", None))
         old_auc = getattr(ens_old, "ensemble_cv_auc_", getattr(ens_old, "cv_auc_", None))
-        return {"ok": False, "reason": "insufficient_improvement_or_failed", "old_auc": old_auc, "new_auc": new_auc}
+        return {"ok": False, "reason": "no_usable_model_or_failed", "old_auc": old_auc, "new_auc": new_auc}
     else:
         new_auc = getattr(ens_new, "ensemble_cv_auc_", getattr(ens_new, "cv_auc_", None))
         old_auc = getattr(ens_old, "ensemble_cv_auc_", getattr(ens_old, "cv_auc_", None))

@@ -87,4 +87,4 @@ def test_a_training_window_too_small_to_fit_is_an_error_not_a_silent_constant_mo
     from src.backtest_models import make_fit_fn
     X, yl, _, px = frame(300)
     with pytest.raises(ValueError, match="train_bars"):
-        make_fit_fn(None, "USDJPY#", None, 0.0)(X, yl, px, "long", None)
+        make_fit_fn(None, "USDJPY#", None)(X, yl, px, "long", None)

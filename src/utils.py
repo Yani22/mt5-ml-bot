@@ -1,6 +1,7 @@
 # src/utils.py
 from __future__ import annotations
 import json
+import math
 import os
 import shutil
 import sys
@@ -290,9 +291,23 @@ def save_ensemble(ensemble: Ensemble, symbol: str, model_type: str, staged: bool
         logger.error(f"[{symbol}] Failed to save ensemble: {e}")
 
 
-def safe_retrain_ensemble(cfg: Cfg, symbol: str, ens_old: Ensemble, X_train: pd.DataFrame, y_train: pd.Series, prices: pd.Series, dry_run: bool = False, model_type: str = "long", model_params: dict | None = None, staged: bool = False, min_improvement: float | None = None, n_jobs: int = -1) -> Ensemble:
+def retrain_is_usable(ens_new) -> tuple[bool, str]:
+    """Whether a freshly fitted ensemble may replace the live one. The newest model replaces it whenever it fitted (a member has
+    its feature names; `Ensemble.fit` skips a small sample with a warning and then predicts 0.5 for every bar) and reports a
+    finite AUC. It is not compared with the old model's stored AUC (another window, noisy at a daily retrain): the
+    `min_ensemble_auc` gate decides whether it trades (C2)."""
+    new_auc = getattr(ens_new, "ensemble_cv_auc_", getattr(ens_new, "cv_auc_", None))
+    if new_auc is None or not math.isfinite(float(new_auc)):
+        return False, "it reports no usable AUC"
+    names = getattr(ens_new, "feature_names", None)
+    if callable(names) and names() is None:
+        return False, "no member was fitted (too few samples)"
+    return True, ""
+
+
+def safe_retrain_ensemble(cfg: Cfg, symbol: str, ens_old: Ensemble, X_train: pd.DataFrame, y_train: pd.Series, prices: pd.Series, dry_run: bool = False, model_type: str = "long", model_params: dict | None = None, staged: bool = False, n_jobs: int = -1) -> Ensemble:
     """
-    Safely retrains an ensemble model.
+    Retrains an ensemble and returns the new one when it fitted, otherwise the old one.
 
     Args:
         cfg: The configuration object.
@@ -305,11 +320,10 @@ def safe_retrain_ensemble(cfg: Cfg, symbol: str, ens_old: Ensemble, X_train: pd.
         model_type: The type of model being retrained ("long" or "short").
         model_params: Pre-loaded Optuna parameters for the model.
         staged: save an accepted model to the staging folder instead of the live one (the live bot promotes it after its own check).
-        min_improvement: AUC gain required to save; defaults to `cfg.risk.min_auc_improvement`.
         n_jobs: threads the new ensemble may use while fitting (-1 = every core).
 
     Returns:
-        The retrained ensemble if it's better than the old one, otherwise the old ensemble.
+        The retrained ensemble if it fitted (see `retrain_is_usable`), otherwise the old ensemble.
     """
     logger.info(f"[{symbol}] Starting safe retraining...")
 
@@ -325,20 +339,14 @@ def safe_retrain_ensemble(cfg: Cfg, symbol: str, ens_old: Ensemble, X_train: pd.
         ens_new.fit(X_train, y_train, prices=prices, model_type=model_type)
         new_auc = getattr(ens_new, "ensemble_cv_auc_", getattr(ens_new, "cv_auc_", None))
 
-        if new_auc is None:
-            logger.warning(f"[{symbol}] New ensemble reports no AUC; refusing to replace.")
+        usable, why = retrain_is_usable(ens_new)
+        if not usable:
+            logger.warning(f"[{symbol}] {model_type.upper()} retrain refused: {why}. Keeping the old model.")
             return ens_old
-
-        if min_improvement is None:
-            min_improvement = cfg.risk.min_auc_improvement
-        if old_auc is None or (new_auc - old_auc) >= min_improvement:
-            if not dry_run:
-                save_ensemble(ens_new, symbol, model_type, staged=staged)
-            logger.info(f"[{symbol}] {model_type.upper()} Retrain accepted. old_auc={old_auc} new_auc={new_auc}")
-            return ens_new
-        else:
-            logger.info(f"[{symbol}] {model_type.upper()} Retrain NOT accepted. improvement {(new_auc - old_auc):.4f} < {min_improvement}")
-            return ens_old
+        if not dry_run:
+            save_ensemble(ens_new, symbol, model_type, staged=staged)
+        logger.info(f"[{symbol}] {model_type.upper()} Retrain accepted. old_auc={old_auc} new_auc={new_auc}")
+        return ens_new
     except Exception as e:
         logger.exception(f"[{symbol}] Retraining failed: {e}")
         return ens_old

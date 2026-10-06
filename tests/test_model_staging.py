@@ -70,10 +70,9 @@ def test_the_default_retrain_still_saves_to_the_live_folder(models, monkeypatch)
     assert read(models / LIVE) == "new"
 
 
-def test_the_childs_gate_uses_the_threshold_it_is_given(models, monkeypatch):
-    retrain(monkeypatch, old_auc=0.60, new_auc=0.62, staged=True, min_improvement=0.05)   # +0.02 < 0.05
-    assert not (models / "_staging" / LIVE).exists()
-    retrain(monkeypatch, old_auc=0.60, new_auc=0.62, staged=True)                         # default 0.005
+def test_the_child_stages_a_model_even_when_its_auc_is_lower(models, monkeypatch):
+    """No AUC margin any more (C2); `tests/test_retrain_always_replaces.py` covers the rule."""
+    retrain(monkeypatch, old_auc=0.60, new_auc=0.52, staged=True)
     assert (models / "_staging" / LIVE).exists()
 
 
@@ -133,7 +132,7 @@ def test_discard_removes_the_staged_folder_and_is_quiet_when_there_is_none(model
 
 # ---- the child process --------------------------------------------------------------------------------------------
 
-def test_the_child_clears_old_staged_models_and_retrains_into_staging_with_the_symbol_threshold(monkeypatch):
+def test_the_child_clears_old_staged_models_and_retrains_into_staging(monkeypatch):
     idx = pd.date_range("2026-01-05", periods=5, freq="5min")
     frame = pd.DataFrame({"close": 1.0}, index=idx)
     monkeypatch.setattr(retraining, "DataManager", lambda cfg: NS(load_cached=lambda *a, **k: (frame, frame, None)))
@@ -143,14 +142,13 @@ def test_the_child_clears_old_staged_models_and_retrains_into_staging_with_the_s
     monkeypatch.setattr(retraining, "discard_staged_ensemble", lambda sym, side: order.append(("discard", side)))
     safe = MagicMock(side_effect=lambda *a, **k: order.append(("retrain", k["model_type"])))
     monkeypatch.setattr(retraining, "safe_retrain_ensemble", safe)
-    cfg = NS(prediction_horizon=3, retraining_window_bars=100, risk=NS(min_auc_improvement=0.005),
-             get_symbol_value=lambda sym, key, default=None: 0.02 if key == "min_auc_improvement" else default)
+    cfg = NS(prediction_horizon=3, retraining_window_bars=100, risk=NS(), get_symbol_value=lambda sym, key, default=None: default)
 
     retraining.run_retraining_in_background(cfg, SYM, NS(min_pct_change=0.0), False, None, {SYM: {}})
 
     assert order[:2] == [("discard", "long"), ("discard", "short")] and len(order) == 4
     for call in safe.call_args_list:
-        assert call.kwargs["staged"] is True and call.kwargs["min_improvement"] == 0.02
+        assert call.kwargs["staged"] is True and "min_improvement" not in call.kwargs
 
 
 # ---- acceptance ---------------------------------------------------------------------------------------------------
@@ -178,7 +176,7 @@ def ens(auc):
 
 def test_an_accepted_side_is_promoted_on_disk_and_a_rejected_one_is_discarded(monkeypatch):
     new_long = ens(0.65)
-    long_, short_, promote, discard = accept(monkeypatch, {"long": new_long, "short": ens(0.55)})
+    long_, short_, promote, discard = accept(monkeypatch, {"long": new_long, "short": NS(ensemble_cv_auc_=float("nan"))})
     assert long_ is new_long and short_.ensemble_cv_auc_ == 0.60
     promote.assert_called_once_with(SYM, "long")
     discard.assert_called_once_with(SYM, "short")

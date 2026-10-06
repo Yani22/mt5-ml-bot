@@ -36,9 +36,9 @@ class WalkForwardModels:
         return float(pl.loc[t]), float(ps.loc[t]), auc_l, auc_s
 
 
-def make_fit_fn(cfg, sym, model_params, min_improvement):
-    """The production fit: a fresh `Ensemble` the first time, then `safe_retrain_ensemble` (keeps the old model unless the new one
-    improves by `min_improvement`, the live gate). `dry_run=True`: nothing is written to `models/`."""
+def make_fit_fn(cfg, sym, model_params):
+    """The production fit: a fresh `Ensemble` the first time, then `safe_retrain_ensemble` (the newest model replaces the old
+    one whenever it fitted, as live does). `dry_run=True`: nothing is written to `models/`."""
     from src.ensemble import Ensemble
     from src.strategy_ml import MIN_SAMPLES_FOR_FIT
     from src.utils import safe_retrain_ensemble
@@ -50,7 +50,6 @@ def make_fit_fn(cfg, sym, model_params, min_improvement):
             ens = Ensemble(cfg, model_params=model_params)
             ens.fit(Xt, yt, prices=pt, model_type=side)
             return ens
-        return safe_retrain_ensemble(cfg, sym, previous, Xt, yt, pt, dry_run=True, model_type=side, model_params=model_params,
-                                     min_improvement=min_improvement)
+        return safe_retrain_ensemble(cfg, sym, previous, Xt, yt, pt, dry_run=True, model_type=side, model_params=model_params)
 
     return fit_fn

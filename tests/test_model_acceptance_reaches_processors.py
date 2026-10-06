@@ -10,7 +10,7 @@ from src.retraining import _handle_model_acceptance
 from test_trade_gate import FakeEnsemble, decide, make_rm, make_sp
 
 SYM = "EURUSD#"
-CFG = NS(risk=NS(min_auc_improvement=0.005), get_symbol_value=lambda sym, key, default=None: default)
+CFG = NS(risk=NS(), get_symbol_value=lambda sym, key, default=None: default)
 
 
 def accept(monkeypatch, old_long, old_short, new_long, new_short, processors):
@@ -29,9 +29,15 @@ def real_processor(long, short):
     return sp
 
 
+class Unfitted(FakeEnsemble):
+    """A staged model whose fit was skipped: no member has feature names (C2 refuses it)."""
+    def feature_names(self):
+        return None
+
+
 def test_an_accepted_long_reaches_the_processor_and_a_rejected_short_does_not(monkeypatch):
     old_long, old_short = FakeEnsemble(auc=0.56), FakeEnsemble(auc=0.56)
-    new_long, new_short = FakeEnsemble(auc=0.60), FakeEnsemble(auc=0.50)
+    new_long, new_short = FakeEnsemble(auc=0.60), Unfitted(auc=0.50)
     sp = real_processor(old_long, old_short)
     longs, shorts = accept(monkeypatch, old_long, old_short, new_long, new_short, {SYM: sp})
     assert sp.ens_long is new_long and sp.ens_short is old_short
@@ -40,7 +46,7 @@ def test_an_accepted_long_reaches_the_processor_and_a_rejected_short_does_not(mo
 
 def test_an_accepted_short_reaches_the_processor(monkeypatch):
     old_long, old_short = FakeEnsemble(auc=0.56), FakeEnsemble(auc=0.56)
-    new_long, new_short = FakeEnsemble(auc=0.50), FakeEnsemble(auc=0.60)
+    new_long, new_short = Unfitted(auc=0.50), FakeEnsemble(auc=0.60)
     sp = real_processor(old_long, old_short)
     accept(monkeypatch, old_long, old_short, new_long, new_short, {SYM: sp})
     assert sp.ens_short is new_short and sp.ens_long is old_long
@@ -49,7 +55,7 @@ def test_an_accepted_short_reaches_the_processor(monkeypatch):
 def test_two_rejected_sides_leave_the_processor_alone(monkeypatch):
     old_long, old_short = FakeEnsemble(auc=0.60), FakeEnsemble(auc=0.60)
     sp = real_processor(old_long, old_short)
-    accept(monkeypatch, old_long, old_short, FakeEnsemble(auc=0.55), FakeEnsemble(auc=0.55), {SYM: sp})
+    accept(monkeypatch, old_long, old_short, Unfitted(auc=0.55), Unfitted(auc=0.55), {SYM: sp})
     assert sp.ens_long is old_long and sp.ens_short is old_short
 
 
@@ -57,14 +63,14 @@ def test_a_symbol_without_a_processor_still_updates_the_main_dicts(monkeypatch):
     """A symbol whose MT5 client failed to connect has no processor."""
     old_long, old_short = FakeEnsemble(auc=0.56), FakeEnsemble(auc=0.56)
     new_long = FakeEnsemble(auc=0.60)
-    longs, _ = accept(monkeypatch, old_long, old_short, new_long, FakeEnsemble(auc=0.50), {})
+    longs, _ = accept(monkeypatch, old_long, old_short, new_long, Unfitted(auc=0.50), {})
     assert longs[SYM] is new_long
 
 
 def test_no_processors_argument_keeps_the_old_behaviour(monkeypatch):
     old_long, old_short = FakeEnsemble(auc=0.56), FakeEnsemble(auc=0.56)
     new_long = FakeEnsemble(auc=0.60)
-    longs, _ = accept(monkeypatch, old_long, old_short, new_long, FakeEnsemble(auc=0.50), None)
+    longs, _ = accept(monkeypatch, old_long, old_short, new_long, Unfitted(auc=0.50), None)
     assert longs[SYM] is new_long
 
 

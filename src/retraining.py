@@ -14,7 +14,7 @@ from src.labels import generate_long_short_labels
 from src.mt5_client import MT5Client
 from src.notifier import TelegramNotifier
 from src.risk_controller import RiskController
-from src.utils import (discard_staged_ensemble, load_ensemble, model_dir_for, promote_staged_ensemble,
+from src.utils import (retrain_is_usable, discard_staged_ensemble, load_ensemble, model_dir_for, promote_staged_ensemble,
                        safe_retrain_ensemble)
 
 
@@ -38,7 +38,6 @@ def run_retraining_in_background(cfg, sym, feature_cfg, dry_run, notifier, optun
         # The child saves into models/_staging/, never into the live folder; `_handle_model_acceptance` promotes what it accepts.
         for side in ("long", "short"):
             discard_staged_ensemble(sym, side)   # nothing left over from an earlier or crashed run
-        min_improvement = cfg.get_symbol_value(sym, 'min_auc_improvement', cfg.risk.min_auc_improvement)  # the acceptance threshold
         data_manager = DataManager(cfg)
         n_jobs = retrain_n_jobs()
 
@@ -60,12 +59,12 @@ def run_retraining_in_background(cfg, sym, feature_cfg, dry_run, notifier, optun
         logger.info(f"[{sym}] Retraining LONG model...")
         ens_old_long = load_ensemble(cfg, sym, "long", model_params=optuna_params_per_symbol[sym])
         safe_retrain_ensemble(cfg, sym, ens_old_long, full_X, y_long, full_data["close"], dry_run=dry_run, model_type="long", model_params=optuna_params_per_symbol[sym],
-                              staged=True, min_improvement=min_improvement, n_jobs=n_jobs)
+                              staged=True, n_jobs=n_jobs)
 
         logger.info(f"[{sym}] Retraining SHORT model...")
         ens_old_short = load_ensemble(cfg, sym, "short", model_params=optuna_params_per_symbol[sym])
         safe_retrain_ensemble(cfg, sym, ens_old_short, full_X, y_short, full_data["close"], dry_run=dry_run, model_type="short", model_params=optuna_params_per_symbol[sym],
-                              staged=True, min_improvement=min_improvement, n_jobs=n_jobs)
+                              staged=True, n_jobs=n_jobs)
 
         logger.info(f"[{sym}] Background retraining process for LONG and SHORT models finished.")
 
@@ -91,13 +90,12 @@ def _load_staged(cfg, sym, side, model_params):
 def _handle_model_acceptance(sym, cfg, ens_per_symbol_long, ens_per_symbol_short, active_model_auc, live_monitor, notifier, optuna_params_per_symbol, processors=None):
     """Judges the models the retrain child staged and promotes the ones that improve on the live model.
 
-    Each side is judged on its own, with the per-symbol `min_auc_improvement` (the threshold the child used). An accepted model is
+    Each side is judged on its own: the staged model replaces the live one whenever it fitted and has a finite AUC (`retrain_is_usable`; the `min_ensemble_auc` gate decides trading, C2). An accepted model is
     promoted on disk first, then replaced in `main`'s dicts and pushed into the running processor (K25: `processors` maps symbol ->
     SymbolProcessor; a symbol whose MT5 client did not connect has none). A rejected or unreadable one is deleted, so the live folder
     is never touched by a model that was not accepted.
     """
     logger.info(f"[{sym}] Handling model acceptance...")
-    min_auc_improvement = cfg.get_symbol_value(sym, 'min_auc_improvement', cfg.risk.min_auc_improvement)
     model_params = (optuna_params_per_symbol or {}).get(sym)
 
     def alert(message, level):
@@ -118,10 +116,11 @@ def _handle_model_acceptance(sym, cfg, ens_per_symbol_long, ens_per_symbol_short
             return
 
         new_auc = getattr(new_ens, "ensemble_cv_auc_", None)
-        old_auc = getattr(live_models[sym], "ensemble_cv_auc_", None)   # None: no incumbent AUC, so any staged model with one is accepted
-        if new_auc is None or (old_auc is not None and new_auc < old_auc + min_auc_improvement):
+        old_auc = getattr(live_models[sym], "ensemble_cv_auc_", None)
+        usable, why = retrain_is_usable(new_ens)
+        if not usable:
             shown = lambda v: "n/a" if v is None else f"{v:.4f}"  # noqa: E731
-            message = f"[{sym}] New {label} model rejected (AUC: {shown(old_auc)} -> {shown(new_auc)}). Keeping old model."
+            message = f"[{sym}] New {label} model rejected ({why}; AUC: {shown(old_auc)} -> {shown(new_auc)}). Keeping old model."
             logger.warning(message)
             alert(message, "WARNING")
             discard_staged_ensemble(sym, side)

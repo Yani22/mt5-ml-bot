@@ -453,6 +453,15 @@ class Ensemble:
                 except Exception as e:
                     logger.warning(f"Ensemble.fit: threshold optimization failed: {e}")
 
+    def feature_names(self) -> Optional[List[str]]:
+        """The columns the fitted members were trained on, or None while no member has been fitted (a skipped fit leaves it
+        unfitted: it predicts 0.5 for every bar)."""
+        for member in self.members.values():
+            names = getattr(getattr(member, "_pipe", None), "feature_names_in_", None)
+            if names is not None:
+                return [str(n) for n in names]
+        return None
+
     def fit(
         self,
         X: pd.DataFrame,

@@ -36,7 +36,7 @@ def test_a_real_ensemble_walk_forward_run_trades_only_after_the_first_window(mon
     keep = future.notna()
     frame = BacktestFrame(bars=bars[keep], X=X[keep], y_long=y_long[keep], y_short=y_short[keep])
     models = WalkForwardModels(frame.X, frame.y_long, frame.y_short, frame.bars["close"], TRAIN, EVERY, HORIZON,
-                               make_fit_fn(cfg, "USDJPY#", None, 0.0))
+                               make_fit_fn(cfg, "USDJPY#", None))
     bt._process_bar("USDJPY#", frame, models)
     bt._force_close_open_positions("USDJPY#", frame.bars)
 

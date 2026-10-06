@@ -460,10 +460,9 @@ class HybridBacktester:
                 if frame.bars.empty:
                     logger.warning(f"No data for {sym}, skipping.")
                     continue
-                min_improvement = self.cfg.get_symbol_value(sym, 'min_auc_improvement', self.cfg.risk.min_auc_improvement)
                 models = WalkForwardModels(frame.X, frame.y_long, frame.y_short, frame.bars["close"], self.cfg.backtesting.train_bars,
                                            self.cfg.retrain_every_bars, tuned_prediction_horizon,
-                                           make_fit_fn(self.cfg, sym, optuna_params, min_improvement))
+                                           make_fit_fn(self.cfg, sym, optuna_params))
                 if len(frame.X) <= models.start + 1:
                     logger.warning(f"{sym}: {len(frame.X)} bars do not go past backtesting.train_bars={models.start}; nothing to trade.")
                     continue
