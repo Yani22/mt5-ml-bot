@@ -99,8 +99,6 @@ class SymbolProcessor:
         return True
 
     def _make_trade_decision(self, data: pd.DataFrame, X: pd.DataFrame):
-        import datetime  # Import datetime
-
         now_utc = datetime.datetime.now(datetime.timezone.utc)  # Define now_utc here
         ens_long, ens_short = self.ens_long, self.ens_short   # one model per side for the whole decision (set_models can swap)
         if ens_long is None or ens_short is None:
@@ -179,9 +177,6 @@ class SymbolProcessor:
                     return
                 if not self._spread_ok(tick, atr):
                     return
-                spread_pips = (tick.ask - tick.bid) / self.mt5_client.symbol_info(self.symbol).point
-                spread_value = spread_pips * self.mt5_client.symbol_info(self.symbol).point
-
                 # Calculate total open risk from the risk_manager's cache
                 total_open_risk = self.risk_manager.total_open_risk()
 
@@ -217,7 +212,7 @@ class SymbolProcessor:
                     return
 
                 # Execute trade
-                order_result = self.execution.trade(
+                self.execution.trade(
                     symbol=self.symbol,
                     direction=direction,
                     lots=lots,

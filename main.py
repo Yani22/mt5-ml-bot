@@ -32,7 +32,6 @@ from src.live_guard import require_live_permission
 from src.state_paths import apply_mode_state_paths
 from src.symbol_processor import SymbolProcessor, stop_symbol_threads
 from src.retraining import _check_and_trigger_retraining, _handle_model_acceptance, retraining_status_for
-from src.utils import _initialize_metrics_csv
 
 
 # --- Initial Setup ---

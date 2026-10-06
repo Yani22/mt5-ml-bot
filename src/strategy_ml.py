@@ -38,7 +38,7 @@ class MLStrategy:
         self.n_jobs = int(n_jobs)   # -1 = every core; the live retrain child passes fewer (K12)
         self.purge_gap = 0          # rows left out between the training and validation rows of each CV fold (the label horizon; the Ensemble sets it)
         model_params = kwargs.copy()
-        device = model_params.pop("device", "cpu")
+        model_params.pop("device", None)
         self._calibrator = None
 
         if self.model_name == "rf":

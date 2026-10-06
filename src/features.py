@@ -182,8 +182,6 @@ def build_dynamic_features(df: pd.DataFrame, static_features: pd.DataFrame, cfg:
         X["ema_diff_x_adx"] = X["ema_diff"] * X["adx"]
 
         # --- handle NaNs and infs ---
-        nan_count = X.isna().sum().sum()
-        inf_count = np.isinf(X.values).sum()
         X = X.replace([np.inf, -np.inf], np.nan).ffill()   # no bfill: it would give the first rows values from later bars
 
     except Exception as e:

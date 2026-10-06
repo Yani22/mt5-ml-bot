@@ -85,9 +85,6 @@ def analyze_trades(df: pd.DataFrame, name: str, equity_df: pd.DataFrame | None =
         returns = equity_df['equity'].pct_change().dropna()
 
         if not returns.empty:
-            # Annualization factor for daily returns (assuming 252 trading days)
-            annualization_factor = 252
-
             # Compound Annual Growth Rate (CAGR)
             cagr = qs.stats.cagr(returns)
 

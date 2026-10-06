@@ -161,7 +161,6 @@ def _check_and_trigger_retraining(cfg: Cfg, sym: str, feature_cfg_per_symbol: Di
     would move the scheduled time with whichever source answers. `mt5c` is kept for the caller's signature and is not asked.
     """
     current_utc_datetime = (now_fn or (lambda: datetime.datetime.now(datetime.timezone.utc)))()
-    current_utc_time = current_utc_datetime.time()
     current_utc_date = current_utc_datetime.date()
 
     retrain_time_value = cfg.get_symbol_value(sym, 'retrain_time_utc', None)

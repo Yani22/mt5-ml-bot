@@ -98,7 +98,7 @@ def test_a_swap_in_the_middle_of_a_decision_does_not_mix_the_probability_of_one_
 
 def test_set_models_replaces_only_the_sides_it_is_given():
     sp = make_sp(make_rm())
-    old_long, old_short = sp.ens_long, sp.ens_short
+    old_short = sp.ens_short
     new_long = FakeEnsemble()
     sp.set_models(long=new_long)
     assert sp.ens_long is new_long and sp.ens_short is old_short

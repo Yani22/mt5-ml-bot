@@ -129,7 +129,6 @@ class RiskManager:
             return 0.0, 0.0
 
         pip_size = symbol_info.point
-        contract_size = symbol_info.trade_contract_size
         pip_value = self.get_pip_value(symbol)  # Use helper to get value of 1 pip move per lot
 
         # Get symbol-specific or default risk per trade

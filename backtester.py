@@ -135,8 +135,6 @@ class HybridBacktester:
 
     def _update_positions(self, sym, row):
         """Check open positions for SL/TP, calculate PnL, and update equity using sequential reconstruction."""
-        closed_trades_this_cycle = []
-
         # This loop identifies trades that close on the current bar
         for pos in [p for p in self.positions if p.symbol == sym and p.status == "open"]:
             hit = exit_hit(pos.direction, pos.sl, pos.tp, row["open"], row["high"], row["low"], self._spread_price(sym, row.get("spread")))
@@ -309,15 +307,9 @@ class HybridBacktester:
             }
             dynamic_risk_params = self.risk_controller.get_params(sym, context)
 
-            atr_multiplier_sl = dynamic_risk_params["atr_multiplier_sl"]
-            atr_multiplier_tp = dynamic_risk_params["atr_multiplier_tp"]
-            trailing_atr_mult = dynamic_risk_params["trailing_atr_mult"]
             min_prob_long = dynamic_risk_params["min_prob_long"]
             min_prob_short = dynamic_risk_params["min_prob_short"]
             min_ensemble_auc = risk_mgr.cfg.get_symbol_value(sym, 'min_ensemble_auc', 0.55)
-            atr_idx = dynamic_risk_params["atr_idx"]
-            min_prob_long_idx = dynamic_risk_params.get("min_prob_long_idx", -1)
-            min_prob_short_idx = dynamic_risk_params.get("min_prob_short_idx", -1)
 
             direction, auc_score, conflict = choose_direction(
                 prob_long, prob_short, min_prob_long, min_prob_short,
@@ -479,7 +471,6 @@ class HybridBacktester:
 
 
 if __name__ == "__main__":
-    import numpy as np  # type: ignore
     import random
     import sys
 

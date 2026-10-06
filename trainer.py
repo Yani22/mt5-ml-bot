@@ -14,11 +14,9 @@ from typing import List
 from src.config import Cfg
 from src.features import FeatureCfg
 from src.utils import load_ensemble, save_ensemble, safe_retrain_ensemble, load_optuna_params, get_training_data
-from src.data_manager import DataManager
 from src.ensemble import Ensemble
 from src.labels import generate_long_short_labels
 import pandas as pd  # type: ignore
-import numpy as np  # type: ignore
 import random
 
 # Safe retraining parameters
@@ -65,7 +63,6 @@ def retrain_symbol(cfg: Cfg, symbol: str, dry_run: bool = True, mt5_instance=Non
     tuned_min_pct_change = tuned.get('min_pct_change', cfg.features.min_pct_change)  # Get tuned min_pct_change
 
     logger.info(f"[{symbol}] Loading full history via DataManager...")
-    dm = DataManager(cfg)
 
     # Use get_training_data with build_dynamic=False and return_long_short_labels=True to get untrimmed data and features
     X, y_long, y_short, data = get_training_data(
@@ -116,9 +113,7 @@ if __name__ == "__main__":
     # import random # Removed from here
     np.random.seed(42)
     random.seed(42)
-    import os
     from dotenv import load_dotenv  # type: ignore
-    from src.config import Cfg
     from src.mt5_client import MT5Client
 
     load_dotenv()
