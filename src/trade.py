@@ -14,6 +14,7 @@ class SimPosition:
         self.lots = lots
         self.entry_price = entry_price
         self.sl = sl
+        self.initial_sl = sl  # the stop as placed; `sl` is moved by breakeven and trailing
         self.tp = tp
         self.entry_time = entry_time
         self.exit_time = None

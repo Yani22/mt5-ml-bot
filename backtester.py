@@ -88,6 +88,15 @@ class HybridBacktester:
 
             pos.sl = new_sl
 
+    def _open_stop_money(self, pos) -> float:
+        """Money (account currency) at the stop as it was placed, the live convention (fixes 8 and 54): breakeven and trailing
+        move `pos.sl` but not what the trade risked."""
+        return self.risk_manager.move_value(pos.symbol, abs(pos.entry_price - pos.initial_sl), pos.lots)
+
+    def _total_open_risk(self) -> float:
+        """Sum of `_open_stop_money` over the open positions, what the portfolio cap counts."""
+        return sum(self._open_stop_money(p) for p in self.positions if p.status == "open")
+
     def _close_costs(self, sym: str, lots: float) -> float:
         """Money (account currency) a round trip costs, charged when the position closes: one spread (the bars are bid-only and
         entry and exit both use the close, so a long or a short pays exactly one), slippage, and commission. Spread and slippage
@@ -150,8 +159,8 @@ class HybridBacktester:
                     volatility_10=getattr(pos, 'volatility_10', 0.0),
                     dist_from_ema_200=getattr(pos, 'dist_from_ema_200', 0.0),
                     context_vector=getattr(pos, 'trade_context', None),  # NEW: Pass stored context vector
-                    risk_amount=self.risk_manager.move_value(sym, abs(pos.entry_price - pos.sl), pos.lots),
-                    sl_atr_mult=(abs(pos.entry_price - pos.sl) / pos.atr) if pos.atr else None
+                    risk_amount=self._open_stop_money(pos),
+                    sl_atr_mult=(abs(pos.entry_price - pos.initial_sl) / pos.atr) if pos.atr else None
                 )
 
                 # Update the bandit and the symbol's state with the ClosedTrade object
@@ -340,7 +349,7 @@ class HybridBacktester:
 
             if direction:
                 self.signals += 1
-                total_open_risk = sum(p.entry_equity * p.risk_fraction for p in self.positions if p.status == "open")
+                total_open_risk = self._total_open_risk()
 
                 # Determine pip_value for position sizing
                 pip_value = self.risk_manager.get_pip_value(sym)
