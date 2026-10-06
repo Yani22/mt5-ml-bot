@@ -306,6 +306,7 @@ class HybridBacktester:
             context = {
                 "vol": atr,
                 "price": float(current_row["close"]),
+                "bar_time": bar_time,
                 "equity": self.equity,
                 "peak_equity": self.risk_manager.equity_peak,
                 "ensemble_auc": (ens_long.ensemble_cv_auc_ + ens_short.ensemble_cv_auc_) / 2,  # Pass current model confidence

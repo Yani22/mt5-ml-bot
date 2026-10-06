@@ -123,6 +123,7 @@ class SymbolProcessor:
         context = {
             "vol": atr,
             "price": float(last_closed_price),
+            "bar_time": last_closed_features.index[0],
             "equity": self.monitor.current_equity,
             "peak_equity": self.monitor.peak_equity,
             "ensemble_auc": (ens_long.ensemble_cv_auc_ + ens_short.ensemble_cv_auc_) / 2,

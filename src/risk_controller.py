@@ -256,6 +256,7 @@ class RiskController:
         self.state_file = cfg.thompson_sampling.state_file
         self.last_daily_retrain_date: Dict[str, Optional[datetime.date]] = {sym: None for sym in cfg.symbols}
         self._warned_no_price: Dict[str, bool] = {}
+        self._warned_no_bar_time: Dict[str, bool] = {}
         self.bar_counters: Dict[str, int] = {sym: 0 for sym in cfg.symbols}
         self.warmstart_sources: Dict[str, str] = {}  # symbol -> backtest file it was warm-started from (kept in the state file)
 
@@ -277,6 +278,22 @@ class RiskController:
         except (TypeError, ValueError):
             return None
         return price if np.isfinite(price) and price > 0 else None
+
+    def _hour_inputs(self, symbol: str, context: Dict[str, Any]) -> tuple[float, float]:
+        """(sin, cos) of the hour of `context["bar_time"]`, the decision bar's own time, so a backtest and the live bot give the
+        same input for the same bar. Without it (0.0, 0.0), which is not on the hour circle, and one warning per symbol:
+        never the wall clock (every bar of a backtest would get the hour the backtest ran)."""
+        bar_time = context.get("bar_time")
+        try:
+            hour = float(bar_time.hour) + float(bar_time.minute) / 60.0
+            if not np.isfinite(hour):  # pd.NaT.hour is nan, not an error
+                raise ValueError("no hour")
+        except (AttributeError, TypeError, ValueError):
+            if not self._warned_no_bar_time.get(symbol):
+                self._warned_no_bar_time[symbol] = True
+                logger.warning(f"[{symbol}] No bar time in the risk context: the hour inputs of the contextual bandit are 0.")
+            return 0.0, 0.0
+        return float(np.sin(2 * np.pi * hour / 24.0)), float(np.cos(2 * np.pi * hour / 24.0))
 
     def _relative_vol(self, symbol: str, context: Dict[str, Any]) -> Optional[float]:
         """ATR as a fraction of the decision bar's close (price-scale free, so it means the same on EURUSD, USDJPY or gold).
@@ -384,10 +401,7 @@ class RiskController:
             peak = float(context.get("peak_equity") or sym_state.peak_equity or self.cfg.initial_equity)
             drawdown = 1.0 - (equity / peak) if peak > 0 else 0.0
             # time-of-day features (hour sin/cos)
-            now = datetime.datetime.utcnow()
-            hour = now.hour + now.minute / 60.0
-            hour_sin = np.sin(2 * np.pi * hour / 24.0)
-            hour_cos = np.cos(2 * np.pi * hour / 24.0)
+            hour_sin, hour_cos = self._hour_inputs(symbol, context)
             vol_scale = float(self.cfg.get_symbol_value(symbol, "vol_threshold", self.cfg.thompson_sampling.vol_threshold) or 1e-6)
 
             # New context features
