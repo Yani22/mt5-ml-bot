@@ -120,7 +120,7 @@ thompson_sampling:
   context_dim: 9                      # ignored: fixed by the code (9 inputs)
   min_visits_for_exploration: 5        # number of visits before arm is considered "known"
   exploration_risk_mult: 0.5         # fraction of normal risk to use for exploratory arms
-  warmstart_weight: 1.0              # weight for warmstart merging (1.0 = fully add backtest priors)
+  warmstart_weight: 0.0              # weight for warmstart merging (0 = off; 1.0 = fully add backtest priors)
   state_file: "results/ts_risk_controller_state.json" # File to save RiskController state
 
   # Adaptive Grid Configuration (for Dynamic Grid Adaptation)
