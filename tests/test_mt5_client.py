@@ -63,7 +63,7 @@ def test_mt5_client_initialization(mock_mt5):
 def test_mt5_client_connection_success(mock_mt5):
     client = MT5Client(login=12345, password="password", server="server", path="path")
     client.connect()
-    assert client.is_connected
+    assert client.is_connected()
     # Verify that initialize and login were called
     from MetaTrader5 import initialize, login
     initialize.assert_called_once_with(path="path")
