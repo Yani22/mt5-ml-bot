@@ -1,5 +1,6 @@
 # src/execution.py
 from __future__ import annotations
+import math
 import os
 from typing import TYPE_CHECKING
 try:
@@ -261,6 +262,15 @@ class Execution:
         if atr and atr > 0 and distance > 0:
             out["sl_atr_mult"] = distance / float(atr)
         return out
+
+    def _cache_risk(self, symbol: str, stop_fields: Dict[str, Any], nominal: float) -> float:
+        """The `risk` a cache entry carries into the portfolio cap: the money at the stop that was placed, at the lots sent.
+        Without it (no usable pip value or stop) the nominal risk is used, never None: the cap sums this field."""
+        amount = stop_fields.get("risk_amount")
+        if amount is not None and math.isfinite(float(amount)) and amount > 0:
+            return float(amount)
+        logger.warning(f"[{symbol}] No money-at-stop for the cache entry; counting the nominal risk {nominal:.2f} toward the cap.")
+        return float(nominal)
 
     def _send_order_with_retry(self, request: dict, retries: int = -1, delay: float = 1.0):
         """Sends the order, again only after a return code that guarantees it was not executed (RETRY_SAFE_RETCODES).
@@ -573,6 +583,9 @@ class Execution:
             if self.notifier:
                 self.notifier.send_message(f"[DRY-RUN] Prepared {direction} for {symbol}: lots={lots}, SL={sl}, TP={tp}", level="INFO")
 
+            stop_fields = self._stop_fields(price, sl, lots, atr, pip_size, pip_value)
+            nominal = float(equity * self.risk._get_dynamic_value(self.risk.risk_cfg.dynamic_risk, auc_score, getattr(self.risk.risk_cfg, "risk_per_trade", 0.005)))
+            cache_risk = self._cache_risk(symbol, stop_fields, nominal)
             # Store comprehensive details for later SimPosition reconstruction in dry-run
             with self.risk.cache_lock:
                 self.risk.open_positions_cache[simulated_ticket] = {
@@ -582,7 +595,7 @@ class Execution:
                     "entry_price": price,
                     "lots": float(lots),
                     "dry_run": True,  # simulated: never exists at the broker
-                    "risk": float(equity * self.risk._get_dynamic_value(self.risk.risk_cfg.dynamic_risk, auc_score, getattr(self.risk.risk_cfg, "risk_per_trade", 0.005))),  # Store the dollar amount at risk
+                    "risk": cache_risk,  # Money at risk at the placed stop
                     "entry_time": now_utc,
                     "atr": atr,
                     "entry_auc": auc_score,
@@ -592,7 +605,7 @@ class Execution:
                     "tp": tp,
                     "pip_size": pip_size,
                     "pip_value": pip_value,
-                    **self._stop_fields(price, sl, lots, atr, pip_size, pip_value),
+                    **stop_fields,
                     "atr_idx": atr_idx,
                     "min_prob_long_idx": min_prob_long_idx,
                     "min_prob_short_idx": min_prob_short_idx,
@@ -643,10 +656,9 @@ class Execution:
 
         # compute effective risk and store in cache keyed by the reliable position_id
         try:
+            stop_fields = self._stop_fields(price, sl, lots, atr, pip_size, pip_value)  # lots are the filled lots here
             risk_per_trade = self.risk._get_dynamic_value(self.risk.risk_cfg.dynamic_risk, auc_score, getattr(self.risk.risk_cfg, "risk_per_trade", 0.005))
-            risk_amt = equity * risk_per_trade
-            sl_distance = max(1e-6, self.risk.risk_cfg.atr_multiplier_sl * atr)
-            effective_lots = (risk_amt / (sl_distance * pip_value)) if pip_value and sl_distance else 0.0
+            risk_amt = self._cache_risk(symbol, stop_fields, equity * risk_per_trade)
 
             # Store comprehensive details for later SimPosition reconstruction
             with self.risk.cache_lock:
@@ -666,7 +678,7 @@ class Execution:
                     "tp": tp,  # TP at entry
                     "pip_size": pip_size,  # <-- ADD THIS
                     "pip_value": pip_value,  # <-- ADD THIS
-                    **self._stop_fields(price, sl, lots, atr, pip_size, pip_value),
+                    **stop_fields,
                     "atr_idx": atr_idx,
                     "min_prob_long_idx": min_prob_long_idx,
                     "min_prob_short_idx": min_prob_short_idx,
