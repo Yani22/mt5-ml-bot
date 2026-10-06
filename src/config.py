@@ -155,9 +155,40 @@ MODEL_PARAMS = {
     "logreg": {},  # an SGD classifier with fixed settings: no parameter is read
     "sgd": {},
 }
+
+
+def _positive_finite(v):
+    return 0 < v < float("inf")
+
+
+def _fraction(v):
+    return 0 < v <= 1
+
+
+# What each library takes, probed against the installed lightgbm 4.7, xgboost 3.4 and scikit-learn (Linux and Wine Python had the same
+# versions), with the values that a library accepts but that give a useless model (no trees, a constant model) tightened. Each check is
+# written as `a < v <= b` so a NaN fails it. tests/test_config_limits.py fits each model just inside and just outside every limit.
+# A parameter with no entry takes any value of its type (lightgbm's max_depth: 0 and below mean no limit).
+MODEL_LIMITS = {
+    ("lgbm", "n_estimators"): ("a whole number >= 1", lambda v: v >= 1),
+    ("lgbm", "learning_rate"): ("a finite number > 0", _positive_finite),
+    ("lgbm", "subsample"): ("a number > 0 and <= 1", _fraction),
+    ("lgbm", "colsample_bytree"): ("a number > 0 and <= 1", _fraction),
+    ("lgbm", "min_child_samples"): ("a whole number >= 0", lambda v: v >= 0),
+    ("xgb", "n_estimators"): ("a whole number >= 1", lambda v: v >= 1),
+    ("xgb", "max_depth"): ("a whole number >= 1", lambda v: v >= 1),
+    ("xgb", "learning_rate"): ("a finite number > 0", _positive_finite),
+    ("xgb", "subsample"): ("a number > 0 and <= 1", _fraction),
+    ("xgb", "colsample_bytree"): ("a number > 0 and <= 1", _fraction),
+    ("rf", "n_estimators"): ("a whole number >= 1", lambda v: v >= 1),
+    ("rf", "max_depth"): ("null or a whole number >= 1", lambda v: v is None or v >= 1),
+    ("rf", "min_samples_leaf"): ("a whole number >= 1 or a decimal > 0 and < 1",
+                                 lambda v: (isinstance(v, int) and v >= 1) or (isinstance(v, float) and 0 < v < 1)),
+}
 _MODEL_ENTRY_KEYS = ("name", "defaults", "tune")
 _ENSEMBLE_METHODS = ("soft_vote", "stacking")
 _THRESHOLD_METRICS = ("f1", "precision", "recall", "custom_pnl", "sharpe_ratio")
+_META_KEYS = ("type", "C")
 _ENSEMBLE_KEYS = {
     "method": str, "weights": Dict[str, float], "meta": Dict[str, Any], "flat_mode": bool, "threshold_metric": str,
     "auto_threshold": bool, "min_ensemble_auc": float,
@@ -203,8 +234,14 @@ def _check_model_param(model, key, value, where, source="config.yaml", allow_ran
     if key not in params:
         raise _unknown_key_error(key, list(params) + (["device"] if allow_device else []), where, source)
     if allow_range and isinstance(value, list):
-        return _refuse_bad_range(value, params[key], f"{where}.{key}", source)
-    _refuse_wrong_type(value, params[key], f"{where}.{key}", source)
+        _refuse_bad_range(value, params[key], f"{where}.{key}", source)
+        values = value[:2]
+    else:
+        _refuse_wrong_type(value, params[key], f"{where}.{key}", source)
+        values = [value]
+    limit = MODEL_LIMITS.get((model, key))
+    if limit and not all(limit[1](v) for v in values):
+        raise ConfigError(f"{source}: `{where}.{key}` must be {limit[0]} for {model}, got {value!r}")
 
 
 def _check_model_params(model, mapping, where, source="config.yaml", allow_range=False, allow_device=False):
@@ -252,6 +289,16 @@ def _check_ensemble(ensemble, model_names):
         if key not in _ENSEMBLE_KEYS:
             raise _unknown_key_error(key, list(_ENSEMBLE_KEYS) + ["threshold_grid"], "ensemble")
         _refuse_wrong_type(value, _ENSEMBLE_KEYS[key], f"ensemble.{key}")
+    meta = ensemble.get("meta") or {}
+    for key, value in meta.items():
+        if key not in _META_KEYS:
+            raise _unknown_key_error(key, _META_KEYS, "ensemble.meta")
+    if "type" in meta and meta["type"] != "logit":  # nothing reads `type`: the stacker is always a logistic regression
+        raise ConfigError(f"config.yaml: `ensemble.meta.type` must be \"logit\" (the only stacker), got {meta['type']!r}")
+    if "C" in meta:  # LogisticRegression refuses a bad C, and Ensemble.fit then swallows the error and averages the members instead
+        _refuse_wrong_type(meta["C"], float, "ensemble.meta.C")
+        if not _positive_finite(meta["C"]):
+            raise ConfigError(f"config.yaml: `ensemble.meta.C` must be a finite number > 0, got {meta['C']!r}")
     if ensemble.get("method", "soft_vote") not in _ENSEMBLE_METHODS:
         raise ConfigError(f"config.yaml: `ensemble.method` must be one of {', '.join(_ENSEMBLE_METHODS)}, got {ensemble['method']!r}")
     if ensemble.get("threshold_metric", "f1") not in _THRESHOLD_METRICS:
