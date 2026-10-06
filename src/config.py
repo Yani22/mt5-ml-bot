@@ -8,13 +8,21 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Inputs of the contextual bandit: the vector `RiskController._context_vector` builds (a fixed list, not a function
+# of the context_features flags). `thompson_sampling.context_dim` in the YAML is ignored.
+CONTEXT_VECTOR_DIM = 9
+
 
 class ConfigError(ValueError):
     """config.yaml, or a file it points to (the tuned-params JSON), has something the code does not understand. The bot refuses to start on it."""
 
 
 def _refuse_unknown_keys(cls, raw, name):
-    known = [f.name for f in fields(cls)]
+    _refuse_unknown_keys_in(raw, [f.name for f in fields(cls)], name)
+
+
+def _refuse_unknown_keys_in(raw, known, name):
+    known = list(known)
     unknown = [key for key in raw if key not in known]
     if unknown:
         hints = []
@@ -38,6 +46,28 @@ def _block(cls, raw, name):
         return cls(**raw)
     except Exception as e:
         raise ConfigError(f"config.yaml: invalid `{name}` block: {e}") from e
+
+
+# Top-level keys that are not Cfg fields but are read in from_yaml
+_EXTRA_TOP_LEVEL_KEYS = ("roc_lags_options", "ensemble_training")
+_ENSEMBLE_TRAINING_KEYS = ("min_samples_for_ensemble",)
+
+
+def _refuse_unknown_top_level_keys(raw):
+    known = [f.name for f in fields(Cfg)] + list(_EXTRA_TOP_LEVEL_KEYS)
+    unknown = [key for key in raw if key not in known]
+    if unknown:
+        hints = []
+        for key in unknown:
+            close = difflib.get_close_matches(str(key), known, n=1)
+            hints.append(f"`{key}`" + (f" (did you mean `{close[0]}`?)" if close else ""))
+        raise ConfigError(f"config.yaml: unknown top-level key(s): {', '.join(hints)}. Known keys: {', '.join(sorted(known))}")
+
+
+def _same_setting(a, b, what):
+    """A setting that can sit in two places must not hold two different values."""
+    if a is not None and b is not None and a != b:
+        raise ConfigError(f"config.yaml: {what} is set twice with different values ({a} and {b}); set it in one place")
 
 
 @dataclass
@@ -191,7 +221,7 @@ class ThompsonSamplingCfg:
 
     # NEW fields
     contextual_enabled: bool = False           # Toggle contextual bandit
-    context_dim: int = 9                      # dim of context vector if contextual_enabled
+    context_dim: int = CONTEXT_VECTOR_DIM     # ignored: the size is fixed by the vector RiskController builds
     min_visits_for_exploration: int = 5        # number of visits before arm is considered "known"
     exploration_risk_mult: float = 0.5         # fraction of normal risk to use for exploratory arms
     warmstart_weight: float = 1.0              # how strongly to weight backtest priors when merging (1.0 = equal)
@@ -256,18 +286,8 @@ class Cfg:
     asymmetric_compounding: AsymmetricCompoundingCfg = field(default_factory=AsymmetricCompoundingCfg)
 
     def __post_init__(self):
-        # Dynamically calculate context_dim for Thompson Sampling
-        if self.thompson_sampling.contextual_enabled:
-            dim = 0
-            # Base context: vol, equity, peak_equity, ensemble_auc
-            dim += 4
-            if self.context_features.mta.enabled:
-                dim += 2  # rsi, ema
-            if self.context_features.inter_market.enabled:
-                dim += len(self.context_features.inter_market.roc_lags)
-            if self.context_features.price_action.enabled:
-                dim += 2  # dist_from_ema_200, adx
-            self.thompson_sampling.context_dim = dim
+        # The contextual bandit's input size is what RiskController._context_vector builds; the YAML value is ignored
+        self.thompson_sampling.context_dim = CONTEXT_VECTOR_DIM
 
     def timeframe_seconds(self) -> Optional[int]:
         """ Convert timeframe string like 'M5', 'H1', 'D1' to seconds.
@@ -335,6 +355,8 @@ class Cfg:
             logger.warning("MT5 data source is only available on Windows. Falling back to 'csv'.")
             raw["data_source"] = "csv"
 
+        _refuse_unknown_top_level_keys(raw)
+
         # features may contain lists (for tuning); pick sensible defaults
         raw_features = raw.get("features", {}) or {}
         cleaned_features: Dict[str, Any] = {}
@@ -364,6 +386,19 @@ class Cfg:
         )
 
         risk_obj = _block(RiskCfg, raw.get("risk"), "risk")
+        # the AUC gate reads RiskCfg (get_symbol_value); `ensemble.min_ensemble_auc` in the YAML used to be ignored
+        ensemble_raw = raw.get("ensemble") or {}
+        if "min_ensemble_auc" in ensemble_raw:
+            _same_setting(ensemble_raw["min_ensemble_auc"], (raw.get("risk") or {}).get("min_ensemble_auc"),
+                          "`min_ensemble_auc` (in `ensemble` and `risk`)")
+            risk_obj.min_ensemble_auc = float(ensemble_raw["min_ensemble_auc"])
+
+        # `ensemble_training.min_samples_for_ensemble` was never read: the loader looked at the top level only
+        ensemble_training_raw = raw.get("ensemble_training") or {}
+        _refuse_unknown_keys_in(ensemble_training_raw, _ENSEMBLE_TRAINING_KEYS, "ensemble_training")
+        _same_setting(ensemble_training_raw.get("min_samples_for_ensemble"), raw.get("min_samples_for_ensemble"),
+                      "`min_samples_for_ensemble` (top level and `ensemble_training`)")
+        min_samples_for_ensemble = int(ensemble_training_raw.get("min_samples_for_ensemble", raw.get("min_samples_for_ensemble", 1000)))
         watchdog_obj = _block(WatchdogCfg, raw.get("watchdog"), "watchdog")
         mon_obj = _block(MonitoringCfg, raw.get("monitoring"), "monitoring")
 
@@ -388,8 +423,15 @@ class Cfg:
         bt_obj = _block(BacktestingCfg, raw.get("backtesting"), "backtesting")
         ac_obj = _block(AsymmetricCompoundingCfg, raw.get("asymmetric_compounding"), "asymmetric_compounding")
 
+        symbols = raw.get("symbols", ["EURUSD"])
+        symbol_overrides = raw.get("symbol_overrides") or {}
+        for key in symbol_overrides:
+            if key not in symbols:
+                logger.warning(f"config.yaml: `symbol_overrides` has `{key}`, which is not in `symbols` {list(symbols)}: "
+                               f"its settings are not used (rename the key together with `symbols`, or delete the block).")
+
         return Cfg(
-            symbols=raw.get("symbols", ["EURUSD"]),
+            symbols=symbols,
             timeframe=raw.get("timeframe", "M5"),
             history_bars=int(raw.get("history_bars", 2000)),
             retrain_every_bars=int(raw.get("retrain_every_bars", 250)),
@@ -412,12 +454,12 @@ class Cfg:
             fetch=fetch_obj,
             thompson_sampling=ts_obj,
             trading_costs=tc_obj,
-            min_samples_for_ensemble=int(raw.get("min_samples_for_ensemble", 1000)),
+            min_samples_for_ensemble=min_samples_for_ensemble,
             force_retrain_on_startup=bool(raw.get("force_retrain_on_startup", False)),
             retraining_window_bars=raw.get("retraining_window_bars", None),
             startup_logging=bool(raw.get("startup_logging", True)),
             magic_number=int(raw.get("magic_number", 424242)),
-            symbol_overrides=raw.get("symbol_overrides", {}),
+            symbol_overrides=symbol_overrides,
             backtesting=bt_obj,
             asymmetric_compounding=ac_obj,
         )

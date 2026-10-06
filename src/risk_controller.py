@@ -7,7 +7,7 @@ import json
 import os
 from typing import List, Dict, Tuple, Optional, Any
 
-from src.config import Cfg
+from src.config import CONTEXT_VECTOR_DIM, Cfg
 from src.trade import SimPosition  # For reward normalization
 from src.trade_types import ClosedTrade  # Import ClosedTrade
 from src.linear_thompson import LinearThompson  # new
@@ -140,7 +140,7 @@ class SymbolRiskState:
         self.contextual_bandit = None
         if getattr(ts_cfg, "contextual_enabled", False):
             # small default context dimension; RiskController will define how to build the vector
-            ctx_dim = int(getattr(ts_cfg, "context_dim", 5))
+            ctx_dim = CONTEXT_VECTOR_DIM
             self.contextual_bandit = LinearThompson(num_arms=len(self.atr_grid_values), dim=ctx_dim, lambda_prior=1.0, noise_var=float(ts_cfg.obs_var or 1.0))
 
         self.peak_equity: float = cfg.initial_equity
@@ -224,12 +224,13 @@ class SymbolRiskState:
         inst.last_trade_was_win = state.get("last_trade_was_win")
 
         if "contextual_bandit" in state and getattr(cfg.thompson_sampling, "contextual_enabled", False):
-            # Re-initialize contextual bandit with the correct number of arms from the loaded grid
-            ctx_dim = int(getattr(cfg.thompson_sampling, "context_dim", 9))
-            # Ensure the contextual bandit is created with the correct number of arms
-            inst.contextual_bandit = LinearThompson(num_arms=len(inst.atr_grid_values), dim=ctx_dim, lambda_prior=1.0, noise_var=float(cfg.thompson_sampling.obs_var or 1.0))
-            # Now load the state into the correctly sized bandit
-            inst.contextual_bandit = LinearThompson.from_state(state["contextual_bandit"])
+            saved = state["contextual_bandit"]
+            if int(saved.get("dim", -1)) == CONTEXT_VECTOR_DIM:
+                inst.contextual_bandit = LinearThompson.from_state(saved)
+            else:
+                # A bandit learned on another input vector cannot take today's inputs: start it fresh
+                logger.warning(f"Saved contextual bandit has {saved.get('dim')} inputs, the context vector has "
+                               f"{CONTEXT_VECTOR_DIM}: starting a fresh contextual bandit (its statistics are dropped).")
 
         return inst
 
@@ -372,6 +373,39 @@ class RiskController:
         logger.debug(f"[{symbol}] Rule Scale: {rule_scale:.2f} (Vol:{vol}, DD:{max_drawdown:.2%}, CL:{consecutive_losses})")
         return float(rule_scale)
 
+    def _context_vector(self, symbol: str, context: Dict[str, Any]) -> np.ndarray:
+        """The contextual bandit's inputs, CONTEXT_VECTOR_DIM of them."""
+        sym_state = self.symbol_states[symbol]
+        # normalize vol by vol_threshold to keep scales reasonable
+        rel_vol = self._relative_vol(symbol, context)
+        auc = float(context.get("ensemble_auc", 0.5))
+        equity = float(context.get("equity", sym_state.current_equity or self.cfg.initial_equity))
+        peak = float(context.get("peak_equity") or sym_state.peak_equity or self.cfg.initial_equity)
+        drawdown = 1.0 - (equity / peak) if peak > 0 else 0.0
+        # time-of-day features (hour sin/cos)
+        hour_sin, hour_cos = self._hour_inputs(symbol, context)
+        vol_scale = float(self.cfg.get_symbol_value(symbol, "vol_threshold", self.cfg.thompson_sampling.vol_threshold) or 1e-6)
+
+        # New context features
+        adx = float(context.get("adx", 0.0))
+        price = self._price(context)
+        macd_diff = float(context.get("macd_diff", 0.0)) / price if price is not None else 0.0  # price units -> fraction of price
+        volatility_10 = float(context.get("volatility_10", 0.0))
+        dist_from_ema_200 = float(context.get("dist_from_ema_200", 0.0))
+
+        x = np.array([
+            (rel_vol / max(vol_scale, 1e-9)) if rel_vol is not None else 0.0,
+            auc,
+            drawdown,
+            hour_sin,
+            hour_cos,
+            adx / 100.0,  # Normalize ADX (typically 0-100)
+            macd_diff * 1000.0,  # Scale macd_diff for better feature representation
+            volatility_10 * 100.0,  # Scale volatility
+            dist_from_ema_200 * 100.0,  # Scale distance
+        ], dtype=float)
+        return x
+
     def get_params(self, symbol: str, context: Dict[str, Any]) -> Dict[str, Any]:
         """
         Samples discrete choices via Thompson Sampling (or contextual bandit if enabled)
@@ -407,41 +441,13 @@ class RiskController:
         # 1. Sample discrete choices (possibly contextual)
         atr_idx = None
         if getattr(self.cfg.thompson_sampling, "contextual_enabled", False) and sym_state.contextual_bandit is not None:
-            # build a context vector from available context dict: vol, equity, peak_equity, ensemble_auc, adx, macd_diff, volatility_10, dist_from_ema_200
-            # normalize vol by vol_threshold to keep scales reasonable
-            rel_vol = self._relative_vol(symbol, context)
-            auc = float(context.get("ensemble_auc", 0.5))
-            equity = float(context.get("equity", sym_state.current_equity or self.cfg.initial_equity))
-            peak = float(context.get("peak_equity") or sym_state.peak_equity or self.cfg.initial_equity)
-            drawdown = 1.0 - (equity / peak) if peak > 0 else 0.0
-            # time-of-day features (hour sin/cos)
-            hour_sin, hour_cos = self._hour_inputs(symbol, context)
-            vol_scale = float(self.cfg.get_symbol_value(symbol, "vol_threshold", self.cfg.thompson_sampling.vol_threshold) or 1e-6)
-
-            # New context features
-            adx = float(context.get("adx", 0.0))
-            price = self._price(context)
-            macd_diff = float(context.get("macd_diff", 0.0)) / price if price is not None else 0.0  # price units -> fraction of price
-            volatility_10 = float(context.get("volatility_10", 0.0))
-            dist_from_ema_200 = float(context.get("dist_from_ema_200", 0.0))
-
-            x = np.array([
-                (rel_vol / max(vol_scale, 1e-9)) if rel_vol is not None else 0.0,
-                auc,
-                drawdown,
-                hour_sin,
-                hour_cos,
-                adx / 100.0,  # Normalize ADX (typically 0-100)
-                macd_diff * 1000.0,  # Scale macd_diff for better feature representation
-                volatility_10 * 100.0,  # Scale volatility
-                dist_from_ema_200 * 100.0,  # Scale distance
-            ], dtype=float)
-            # ensure dimension matches bandit's dimension; if not, pad/truncate
+            # inputs: vol, ensemble_auc, drawdown, hour sin/cos, adx, macd_diff, volatility_10, dist_from_ema_200
+            x = self._context_vector(symbol, context)
+            # the bandit is built with CONTEXT_VECTOR_DIM inputs; a different size is a bug, never pad or cut silently
             ctx_dim = sym_state.contextual_bandit.dim
-            if len(x) < ctx_dim:
-                x = np.concatenate([x, np.zeros(ctx_dim - len(x))])
-            elif len(x) > ctx_dim:
-                x = x[:ctx_dim]
+            if len(x) != ctx_dim:
+                logger.error(f"[{symbol}] The contextual bandit takes {ctx_dim} inputs, the context vector has {len(x)}.")
+                x = np.concatenate([x, np.zeros(max(0, ctx_dim - len(x)))])[:ctx_dim]
             atr_idx = sym_state.contextual_bandit.sample_arm(x)
         else:
             atr_idx = sym_state.atr_bandit.sample()
@@ -729,7 +735,7 @@ class RiskController:
 
         # Reset contextual bandit if enabled
         if getattr(ts_cfg, "contextual_enabled", False) and sym_state.contextual_bandit is not None:
-            ctx_dim = int(getattr(ts_cfg, "context_dim", 9))
+            ctx_dim = CONTEXT_VECTOR_DIM
             sym_state.contextual_bandit = LinearThompson(num_arms=len(ts_cfg.atr_grid), dim=ctx_dim, lambda_prior=1.0, noise_var=float(ts_cfg.obs_var or 1.0))
 
         # Reset dynamic grids to initial config values

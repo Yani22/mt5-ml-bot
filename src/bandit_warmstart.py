@@ -108,6 +108,11 @@ def _merge_bandit_states(lstate: Dict[str, Any], bstate: Dict[str, Any], warmsta
             merged[bandit_key] = b_band
             continue
 
+        if bandit_key == "contextual_bandit" and l_band.get("dim") != b_band.get("dim"):
+            logger.warning(f"Not merging the backtest's contextual bandit ({b_band.get('dim')} inputs) into the live one "
+                           f"({l_band.get('dim')} inputs).")
+            continue
+
         merged_band = l_band.copy()
 
         # Merge numeric lists
