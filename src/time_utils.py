@@ -1,4 +1,8 @@
-import MetaTrader5 as mt5
+try:
+    import MetaTrader5 as mt5  # type: ignore
+except ImportError:  # Linux: string timeframes still work, an MT5 constant raises ImportError
+    from src.mt5_missing import MissingMT5
+    mt5 = MissingMT5()
 
 
 def timeframe_to_mt5_timeframe(timeframe_str: str):

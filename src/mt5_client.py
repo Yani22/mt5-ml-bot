@@ -4,10 +4,23 @@ import threading
 import time
 import datetime
 from typing import Optional
-import MetaTrader5 as mt5  # type: ignore
+try:
+    import MetaTrader5 as mt5  # type: ignore
+except ImportError:  # Linux: the offline tools import this module; any real call raises ImportError
+    from src.mt5_missing import MissingMT5
+    mt5 = MissingMT5()
 from loguru import logger
 from src.mt5_lock import api_lock
 from src.time_utils import timeframe_to_seconds
+
+
+class _Mt5Constant:
+    """A class attribute that reads the same-named constant from `mt5` each time it is accessed."""
+    def __set_name__(self, owner, name):
+        self.name = name
+
+    def __get__(self, obj, objtype=None):
+        return getattr(mt5, self.name)
 
 
 # The MetaTrader5 package keeps ONE connection per process. The bot makes many MT5Client objects (main, one per symbol, one
@@ -300,8 +313,10 @@ class MT5Client:
         except Exception:
             return None
 
-    def wait_for_new_bar(self, symbol: str, timeframe: int = mt5.TIMEFRAME_M1, timeout_multiplier: float = 1.5, stop_event=None):
+    def wait_for_new_bar(self, symbol: str, timeframe: Optional[int] = None, timeout_multiplier: float = 1.5, stop_event=None):
         """Waits for a new bar to appear for a given symbol and timeframe. Returns False early once `stop_event` is set."""
+        if timeframe is None:
+            timeframe = mt5.TIMEFRAME_M1
         if not self._connected:
             logger.warning("wait_for_new_bar: Not connected to MT5.")
             return False
@@ -335,9 +350,10 @@ class MT5Client:
         return False
 
     # --- MT5 Constants ---
-    ORDER_TYPE_BUY = mt5.ORDER_TYPE_BUY
-    ORDER_TYPE_SELL = mt5.ORDER_TYPE_SELL
-    TRADE_ACTION_DEAL = mt5.TRADE_ACTION_DEAL
-    ORDER_TIME_GTC = mt5.ORDER_TIME_GTC
-    ORDER_FILLING_IOC = mt5.ORDER_FILLING_IOC
-    TRADE_RETCODE_DONE = mt5.TRADE_RETCODE_DONE
+    # Read from the package when used, not when the class is built, so this module imports without the package.
+    ORDER_TYPE_BUY = _Mt5Constant()
+    ORDER_TYPE_SELL = _Mt5Constant()
+    TRADE_ACTION_DEAL = _Mt5Constant()
+    ORDER_TIME_GTC = _Mt5Constant()
+    ORDER_FILLING_IOC = _Mt5Constant()
+    TRADE_RETCODE_DONE = _Mt5Constant()

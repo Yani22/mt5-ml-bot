@@ -150,8 +150,8 @@ def test_another_thread_can_call_while_wait_for_new_bar_waits(mt5):
 
 def test_the_lock_module_and_the_offline_bar_loader_import_without_the_metatrader5_package():
     """The lock lives in a module with no MetaTrader5 import, so a module that takes it does not gain a hard dependency on the
-    package. Run outside pytest, where no stub is installed. (`src.data_manager` already needs `src.mt5_client`, which imports the
-    package; that is not new.)"""
+    package. Run outside pytest, where no stub is installed. (`src.mt5_client` and `src.time_utils` also import without it now: see
+    tests/test_offline_import_without_mt5.py.)"""
     code = ("import sys; sys.modules['MetaTrader5'] = None\n"
             "import src.mt5_lock, src.data; print('ok')")
     out = subprocess.run([sys.executable, "-c", code], cwd=ROOT, capture_output=True, text=True)
