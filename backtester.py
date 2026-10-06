@@ -8,6 +8,7 @@ import datetime
 import quantstats as qs  # type: ignore
 import optuna  # type: ignore
 import numpy as np  # type: ignore
+from scipy import stats  # type: ignore
 
 from src.config import Cfg
 from src.features import FeatureCfg, ema_distance
@@ -43,6 +44,9 @@ class HybridBacktester:
         self.skipped_for_spread = 0  # entries refused because the fill bar's spread was above `max_spread_atr` x ATR (live does the same)
         self.positions: list[SimPosition] = []
         self._closed_results: list[tuple] = []  # (exit time, net P&L) of closed trades, sorted by time
+        self._closed_R: dict[str, list] = {}  # symbol -> (entry time, R at the placed stop) of its closed trades, for the early stop
+        self._early_stop_seen: dict[str, int] = {}  # symbol -> closed trades the early stop has already judged
+        self.stopped_early: dict[str, str] = {}  # symbol -> why its replay ended early
         self.equity_curve = []
         lock = threading.Lock()
         if broker_client is None:
@@ -73,6 +77,37 @@ class HybridBacktester:
         except (TypeError, ValueError):
             raw_price = None
         return bar_spread(raw_price, fallback)
+
+    def _record_R(self, pos, net_pnl) -> None:
+        """Keep a closed trade's R (net P&L over the money at the stop as placed, the verdict's definition) with its entry time."""
+        money = self._open_stop_money(pos)
+        if money > 0:
+            self._closed_R.setdefault(pos.symbol, []).append((pos.entry_time, float(net_pnl) / money))
+
+    def _early_stop_reason(self, sym: str, bar_time, blocks: int, trial=None) -> str | None:
+        """Why the replay should end now, or None. Fires when `backtesting.early_stop` is on, there is no Optuna trial, the bar is before
+        `early_stop_until`, at least `early_stop_min_trades` closed trades were entered before it, at least `early_stop_min_blocks` retrain
+        blocks were reached, and the upper end of the (1 - alpha) two-sided t-interval of their mean R is below 0: the variant cannot pass."""
+        cfg = self.cfg.backtesting
+        if not cfg.early_stop or trial is not None:
+            return None
+
+        def utc(t):
+            t = pd.Timestamp(t)
+            return t.tz_localize("UTC") if t.tzinfo is None else t.tz_convert("UTC")
+        until = utc(cfg.early_stop_until) if cfg.early_stop_until else None
+        if until is not None and utc(bar_time) >= until:
+            return None
+        values = [r for entered, r in self._closed_R.get(sym, []) if until is None or utc(entered) < until]
+        n = len(values)
+        if n < max(2, int(cfg.early_stop_min_trades)) or blocks < int(cfg.early_stop_min_blocks):
+            return None
+        mean = float(np.mean(values))
+        half = float(stats.t.ppf(1 - float(cfg.early_stop_alpha) / 2, n - 1) * np.std(values, ddof=1) / np.sqrt(n))
+        if mean + half >= 0:
+            return None
+        return (f"early stop at {utc(bar_time)} (retrain block {blocks}): n={n} trades, mean R {mean:.3f}, "
+                f"{100 * (1 - float(cfg.early_stop_alpha)):.1f}% interval {mean - half:.3f} to {mean + half:.3f}, the upper end is below 0")
 
     def _record_close(self, exit_time, pnl) -> None:
         """Keep each closed trade's (exit time, net P&L) in time order, for `_watchdog_losses`."""
@@ -205,6 +240,7 @@ class HybridBacktester:
                 # Close the position object (SimPosition)
                 pos.close(price, row.name.to_pydatetime().replace(tzinfo=datetime.timezone.utc), net_pnl, self.equity)
                 self._record_close(pos.exit_time, net_pnl)
+                self._record_R(pos, net_pnl)
 
                 logger.info(
                     f"[{sym}] Closed {pos.direction} position at {pos.exit_price:.5f}. "
@@ -265,6 +301,14 @@ class HybridBacktester:
             self._open_pending(sym, current_row)
             self._update_positions(sym, current_row)
             self._manage_stops(sym, current_row, atr)  # a moved stop applies from the next bar
+            closed_now = len(self._closed_R.get(sym, []))
+            if closed_now != self._early_stop_seen.get(sym, 0):   # judged only when one of THIS symbol's trades has closed since the last look
+                self._early_stop_seen[sym] = closed_now
+                reason = self._early_stop_reason(sym, bar_time, (i - models.start) // models.every + 1, trial)
+                if reason:
+                    self.stopped_early[sym] = reason
+                    logger.warning(f"[{sym}] {reason}. The rest of the replay is skipped; the results are of the part that ran.")
+                    break
             if i == len(X) - 1:
                 break  # no next bar to fill a decision on
 
@@ -404,6 +448,8 @@ class HybridBacktester:
         logger.info(f"=== Hybrid Adaptive Backtest Complete. Final Equity: {self.equity:.2f} === ")
         logger.info(f"Trades: {len(self.positions)}; signals refused by the min_ensemble_auc gate: {self.blocked_by_auc}; "
                     f"entries skipped for a wide spread: {self.skipped_for_spread}.")
+        for sym, why in self.stopped_early.items():
+            logger.warning(f"RUN ENDED EARLY - {sym}: {why}")
         if self.signals and self.skipped_for_size / self.signals > 0.2:
             logger.warning(
                 f"{self.skipped_for_size}/{self.signals} signals were skipped at sizing (lot below the broker minimum or risk caps). "

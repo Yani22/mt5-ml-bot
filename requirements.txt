@@ -11,6 +11,7 @@ python-dotenv==1.2.4
 loguru==0.7.3
 optuna==5.0.0
 quantstats==0.0.86
+scipy==1.18.1
 requests==2.34.2
 # Windows only (no Linux wheel); CI and Linux installs filter this line out.
 MetaTrader5>=5.0

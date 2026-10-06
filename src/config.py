@@ -411,6 +411,12 @@ class BacktestingCfg:
     initial_equity: float = 10000.0
     enable_retraining: bool = True  # unused since the walk-forward backtester (kept: config.yaml sets it and an unknown key stops start-up)
     train_bars: int = 45000  # the first bars of a backtest only train; trading starts after them
+    # Early stop: end a symbol's replay when its trades are demonstrably losing (see HybridBacktester._early_stop_reason). Off by default.
+    early_stop: bool = False
+    early_stop_min_trades: int = 100        # at least this many closed trades entered before `early_stop_until`
+    early_stop_min_blocks: int = 5          # and at least this many retrain blocks reached
+    early_stop_alpha: float = 0.001         # stop when the upper end of the (1 - alpha) two-sided t-interval of the mean R is below 0
+    early_stop_until: Optional[str] = None  # "YYYY-MM-DD" (UTC, quoted): never check from this bar on and ignore trades entered after it; None = whole run
 
 
 @dataclass
