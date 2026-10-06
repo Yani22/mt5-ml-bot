@@ -9,7 +9,7 @@ import optuna  # type: ignore
 import numpy as np  # type: ignore
 
 from src.config import Cfg
-from src.features import FeatureCfg
+from src.features import FeatureCfg, ema_distance
 from src.risk import RiskManager
 from src.costs import round_trip_pips
 from src.decision import choose_direction
@@ -232,6 +232,7 @@ class HybridBacktester:
         client = risk_mgr.mt5_client
 
         logger.info(f"Processing {len(X)} bars for {sym}...")
+        ema_dist_context = ema_distance(bars["close"]).fillna(0.0).to_numpy()  # the same value the live decision reads
         for i in range(models.start, len(X)):
             bar_time = X.index[i]
             current_row = bars.iloc[i]
@@ -303,7 +304,7 @@ class HybridBacktester:
                 "adx": float(last_features["adx"].iloc[0]) if "adx" in last_features.columns else 0.0,
                 "macd_diff": float(last_features["macd_diff"].iloc[0]) if "macd_diff" in last_features.columns else 0.0,
                 "volatility_10": float(last_features["volatility_10"].iloc[0]) if "volatility_10" in last_features.columns else 0.0,
-                "dist_from_ema_200": float(last_features["dist_from_ema_200"].iloc[0]) if "dist_from_ema_200" in last_features.columns else 0.0,
+                "dist_from_ema_200": ema_dist_context[i],
             }
             dynamic_risk_params = self.risk_controller.get_params(sym, context)
 

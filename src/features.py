@@ -26,6 +26,24 @@ def model_matrix(X: pd.DataFrame) -> pd.DataFrame:
     return X[[c for c in X.columns if is_model_column(c)]]
 
 
+EMA_DIST_SPAN = 200
+
+
+def ema_distance(close: pd.Series, span: int = EMA_DIST_SPAN) -> pd.Series:
+    """(close - ema) / close, the risk context's `dist_from_ema_200`. It is not a model column, so it changes no saved model.
+    The ema uses bars <= t only; it needs `span` bars and an unconverged start is NaN, so give it the whole history."""
+    ema = close.ewm(span=span, adjust=False, min_periods=span).mean()
+    return ((close - ema) / close).replace([np.inf, -np.inf], np.nan)
+
+
+def ema_distance_at(close: pd.Series, when, span: int = EMA_DIST_SPAN) -> float:
+    """`ema_distance` at the bar stamped `when`; 0.0 when it is missing or not finite."""
+    value = ema_distance(close, span).get(when, np.nan)
+    if isinstance(value, pd.Series):   # a repeated stamp: the last one
+        value = value.iloc[-1]
+    return float(value) if np.isfinite(value) else 0.0
+
+
 def add_contextual_features(df: pd.DataFrame, mta_df: pd.DataFrame = None, inter_market_df: pd.DataFrame = None, mta_cfg: "MtaCfg" = None, im_cfg: "InterMarketCfg" = None, relative: bool = False) -> pd.DataFrame:
     """
     Adds contextual features from higher timeframes (MTA) and other markets. `relative` also adds the MTA ema as a distance from

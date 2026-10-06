@@ -9,7 +9,7 @@ import time
 from src.config import Cfg
 from src.mt5_client import MT5Client
 from src.data_manager import DataManager
-from src.features import FeatureCfg
+from src.features import FeatureCfg, ema_distance_at
 from src.ensemble import Ensemble
 from src.risk_controller import RiskController
 from src.live_performance_monitor import LivePerformanceMonitor
@@ -128,7 +128,7 @@ class SymbolProcessor:
             "adx": float(last_closed_features["adx"].iloc[0]) if "adx" in last_closed_features.columns else 0.0,
             "macd_diff": float(last_closed_features["macd_diff"].iloc[0]) if "macd_diff" in last_closed_features.columns else 0.0,
             "volatility_10": float(last_closed_features["volatility_10"].iloc[0]) if "volatility_10" in last_closed_features.columns else 0.0,
-            "dist_from_ema_200": float(last_closed_features["dist_from_ema_200"].iloc[0]) if "dist_from_ema_200" in last_closed_features.columns else 0.0,
+            "dist_from_ema_200": ema_distance_at(data["close"], last_closed_features.index[0]),
         }
         dynamic_risk_params = self.risk_controller.get_params(self.symbol, context)
 
