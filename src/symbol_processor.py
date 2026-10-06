@@ -89,13 +89,14 @@ class SymbolProcessor:
             logger.exception(f"[{self.symbol}] Position management failed: {e}")
 
     def _trading_allowed(self, now_utc) -> bool:
-        """Risk gate before an order: drawdown block, watchdog cooldown, session filter, max open positions."""
+        """Risk gate before an order: drawdown block, watchdog cooldown, session filter. `max_positions` is checked later,
+        under the entry lock, with the open-risk read, the sizing and the order."""
         peak = self.monitor.peak_equity
         drawdown = 1.0 - self.monitor.current_equity / peak if peak and peak > 0 else 0.0
         if not self.risk_manager.should_trade(now_utc, drawdown):
             logger.info(f"[{self.symbol}] Trade blocked by the risk gate (drawdown/watchdog/session).")
             return False
-        return not self.risk_manager.max_positions_reached()
+        return True
 
     def _make_trade_decision(self, data: pd.DataFrame, X: pd.DataFrame):
         import datetime  # Import datetime
@@ -161,71 +162,82 @@ class SymbolProcessor:
             if not self._trading_allowed(now_utc):
                 return
 
-            # Get spread for position sizing
-            tick = self.mt5_client.symbol_info_tick(self.symbol)
-            if not tick:
-                logger.warning(f"[{self.symbol}] Could not get tick info for spread. Skipping trade.")
+            if not self.risk_manager.entry_lock.acquire(timeout=self.risk_manager.entry_lock_timeout):
+                logger.warning(f"[{self.symbol}] Another symbol is still entering a trade; skipping this bar.")
                 return
-            if not self._spread_ok(tick, atr):
-                return
-            spread_pips = (tick.ask - tick.bid) / self.mt5_client.symbol_info(self.symbol).point
-            spread_value = spread_pips * self.mt5_client.symbol_info(self.symbol).point
+            try:
+                if self.stop_event.is_set():
+                    logger.info(f"[{self.symbol}] Stopped: not entering.")
+                    return
+                if self.risk_manager.max_positions_reached():
+                    return
+                # Get spread for position sizing
+                tick = self.mt5_client.symbol_info_tick(self.symbol)
+                if not tick:
+                    logger.warning(f"[{self.symbol}] Could not get tick info for spread. Skipping trade.")
+                    return
+                if not self._spread_ok(tick, atr):
+                    return
+                spread_pips = (tick.ask - tick.bid) / self.mt5_client.symbol_info(self.symbol).point
+                spread_value = spread_pips * self.mt5_client.symbol_info(self.symbol).point
 
-            # Calculate total open risk from the risk_manager's cache
-            total_open_risk = self.risk_manager.total_open_risk()
+                # Calculate total open risk from the risk_manager's cache
+                total_open_risk = self.risk_manager.total_open_risk()
 
-            # Determine pip_value and pip_size
-            pip_value = self.risk_manager.get_pip_value(self.symbol)
-            pip_size = self.risk_manager.get_pip_size(self.symbol)
+                # Determine pip_value and pip_size
+                pip_value = self.risk_manager.get_pip_value(self.symbol)
+                pip_size = self.risk_manager.get_pip_size(self.symbol)
 
-            # Work out the stop/take-profit first, then size the position on that exact stop distance.
-            price = float(tick.ask) if direction == "long" else float(tick.bid)
-            sl, tp = self.risk_manager.stop_targets(
-                price, atr, direction, auc_score, self.symbol,
-                sl_mult=atr_multiplier_sl, tp_mult=atr_multiplier_tp
-            )
-            if sl <= 0 or tp <= 0:
-                logger.warning(f"[{self.symbol}] Could not compute stop/take-profit. Skipping trade.")
-                return
+                # Work out the stop/take-profit first, then size the position on that exact stop distance.
+                price = float(tick.ask) if direction == "long" else float(tick.bid)
+                sl, tp = self.risk_manager.stop_targets(
+                    price, atr, direction, auc_score, self.symbol,
+                    sl_mult=atr_multiplier_sl, tp_mult=atr_multiplier_tp
+                )
+                if sl <= 0 or tp <= 0:
+                    logger.warning(f"[{self.symbol}] Could not compute stop/take-profit. Skipping trade.")
+                    return
 
-            lots, effective_risk = self.risk_manager.position_size(
-                self.monitor.current_equity, atr, auc_score,
-                total_open_risk=total_open_risk, symbol=self.symbol,
-                exploration_mult=dynamic_risk_params.get("exploration_risk_mult", 1.0),
-                ac_multiplier=dynamic_risk_params.get("ac_multiplier", 1.0),
-                sl_distance=abs(price - sl)
-            )
+                lots, effective_risk = self.risk_manager.position_size(
+                    self.monitor.current_equity, atr, auc_score,
+                    total_open_risk=total_open_risk, symbol=self.symbol,
+                    exploration_mult=dynamic_risk_params.get("exploration_risk_mult", 1.0),
+                    ac_multiplier=dynamic_risk_params.get("ac_multiplier", 1.0),
+                    sl_distance=abs(price - sl)
+                )
 
-            # CRITICAL: If position_size returned 0 lots (e.g., due to existing open position for symbol), skip trade execution.
-            if lots <= 0:
-                logger.info(f"[{self.symbol}] Trade skipped due to risk limits or position size zero (calculated lots: {lots:.4f}).")
-                return  # Exit early, as no trade can be executed with zero lots
+                # CRITICAL: If position_size returned 0 lots (e.g., due to existing open position for symbol), skip trade execution.
+                if lots <= 0:
+                    logger.info(f"[{self.symbol}] Trade skipped due to risk limits or position size zero (calculated lots: {lots:.4f}).")
+                    return  # Exit early, as no trade can be executed with zero lots
 
-            if self.stop_event.is_set():
-                logger.info(f"[{self.symbol}] Stopped: not sending the order.")
-                return
+                if self.stop_event.is_set():
+                    logger.info(f"[{self.symbol}] Stopped: not sending the order.")
+                    return
 
-            # Execute trade
-            order_result = self.execution.trade(
-                symbol=self.symbol,
-                direction=direction,
-                lots=lots,
-                price=price,
-                sl=sl,
-                tp=tp,
-                equity=self.monitor.current_equity,
-                pip_size=pip_size,
-                pip_value=pip_value,
-                now_utc=now_utc,
-                X=X,
-                atr=atr,
-                auc_score=auc_score,
-                total_open_risk=total_open_risk,
-                atr_idx=atr_idx,
-                min_prob_long_idx=min_prob_long_idx,
-                min_prob_short_idx=min_prob_short_idx,
-                context_vector=dynamic_risk_params.get("context_vector")  # NEW: Pass the context vector
-            )
+                # Execute trade
+                order_result = self.execution.trade(
+                    symbol=self.symbol,
+                    direction=direction,
+                    lots=lots,
+                    price=price,
+                    sl=sl,
+                    tp=tp,
+                    equity=self.monitor.current_equity,
+                    pip_size=pip_size,
+                    pip_value=pip_value,
+                    now_utc=now_utc,
+                    X=X,
+                    atr=atr,
+                    auc_score=auc_score,
+                    total_open_risk=total_open_risk,
+                    atr_idx=atr_idx,
+                    min_prob_long_idx=min_prob_long_idx,
+                    min_prob_short_idx=min_prob_short_idx,
+                    context_vector=dynamic_risk_params.get("context_vector")  # NEW: Pass the context vector
+                )
+            finally:
+                self.risk_manager.entry_lock.release()
         # The 'else' branch for 'if prob_long/prob_short >= ...' is now implicitly handled higher up by a 'return'
         # if 'direction' remains None. Thus, no final 'else' for logging 'No trade signal' is needed here.
 

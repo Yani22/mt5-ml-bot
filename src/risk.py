@@ -35,6 +35,10 @@ class RiskManager:
         self.notifier = notifier  # NEW
         self.mt5_client = mt5_client
         self.cache_lock = lock
+        # One entry at a time: the open-risk read, the `max_positions` check, sizing and the order must not interleave
+        # between symbols. Always taken before `cache_lock`, never while holding it.
+        self.entry_lock = threading.Lock()
+        self.entry_lock_timeout = 60.0
 
     def get_contract_size(self, symbol: str) -> float:
         symbol_info = self.mt5_client.symbol_info(symbol)
