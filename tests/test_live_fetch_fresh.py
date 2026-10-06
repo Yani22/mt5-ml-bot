@@ -120,3 +120,34 @@ def test_with_the_context_features_off_nothing_is_fetched_for_them():
     data, X, y = run(d, patcher)
     assert data.index[-1] == recent.index[-1]
     assert all(tf == "M5" for _, tf in asked)
+
+
+# ---- the processor decides on the features `fetch_live` built and checked, it does not build them a second time ----
+
+def processor_with(fetched, mta_on=True):
+    import src.symbol_processor as spmod
+    sp = object.__new__(SymbolProcessor)
+    sp.symbol, sp.feature_cfg = "EURUSD#", None
+    sp.cfg = NS(context_features=NS(mta=NS(enabled=mta_on, timeframe="H1"), inter_market=NS(enabled=False)))
+    sp.data_manager = NS(fetch_live=lambda *a: fetched,
+                         load_local_history=lambda *a, **k: pd.DataFrame())
+
+    def boom(*a, **k):
+        raise AssertionError("features were built a second time")
+
+    return sp, patch.object(spmod, "build_features", boom)
+
+
+def test_the_processor_returns_the_features_fetch_live_built():
+    data, X, y = frame(5), frame(5)[["close"]], pd.DataFrame()
+    sp, patcher = processor_with((data, X, y))
+    with patcher:
+        got_data, got_X, got_y = sp._fetch_and_prepare_data()
+    assert got_data is data and got_X is X and got_y is y
+
+
+def test_one_bar_is_prepared_without_a_second_feature_build():
+    sp, patcher = processor_with((frame(5), frame(5)[["close"]], pd.DataFrame()))
+    with patcher:
+        data, X, y = sp._fetch_and_prepare_data()     # raises if build_features is called
+    assert len(X) == 5

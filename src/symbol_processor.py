@@ -70,26 +70,12 @@ class SymbolProcessor:
             self.ens_short = short
 
     def _fetch_and_prepare_data(self) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame] | tuple[None, None, None]:
-        logger.info(f"[{self.symbol}] Bootstrapping local history...")
-        # Fetch initial history
-        data, _, _ = self.data_manager.fetch_live(self.symbol, self.feature_cfg)  # data, X, y are returned, but we only need data here
+        # `fetch_live` builds the features once and checks that they reach the newest bar; decide on that X (it used to be
+        # rebuilt here from the cached context, which skipped the check and cost a second build per bar).
+        data, X, y = self.data_manager.fetch_live(self.symbol, self.feature_cfg)
         if data.empty:
             logger.warning(f"[{self.symbol}] No fresh data for this bar. Skipping it.")
             return None, None, None
-
-        # Load context data
-        mta_df = None
-        if self.cfg.context_features.mta.enabled:
-            mta_df = self.data_manager.load_local_history(self.symbol, self.cfg.context_features.mta.timeframe)
-        inter_market_df = None
-        if self.cfg.context_features.inter_market.enabled:
-            im_sym = self.cfg.context_features.inter_market.symbol
-            inter_market_df = self.data_manager.load_local_history(im_sym, self.cfg.timeframe)
-
-        # Build features
-        X = build_features(data, self.feature_cfg, self.cfg, self.symbol, mta_df, inter_market_df)
-        y = pd.DataFrame()  # y is not used in live trading
-
         return data, X, y
 
     def _manage_positions(self, X: pd.DataFrame):
