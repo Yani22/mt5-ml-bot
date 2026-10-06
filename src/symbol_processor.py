@@ -61,6 +61,14 @@ class SymbolProcessor:
         if self.ens_short and self.ens_short.ensemble_cv_auc_:
             logger.info(f"[{self.symbol}] Active model AUC (Short): {self.ens_short.ensemble_cv_auc_:.4f}")
 
+    def set_models(self, long=None, short=None):
+        """Swap in an accepted retrain (K25); a side left as None is kept. Plain assignments, atomic under the GIL;
+        `_make_trade_decision` reads each attribute once, so a swap from the main thread lands between decisions."""
+        if long is not None:
+            self.ens_long = long
+        if short is not None:
+            self.ens_short = short
+
     def _fetch_and_prepare_data(self) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame] | tuple[None, None, None]:
         logger.info(f"[{self.symbol}] Bootstrapping local history...")
         # Fetch initial history
@@ -107,7 +115,8 @@ class SymbolProcessor:
         import datetime  # Import datetime
 
         now_utc = datetime.datetime.now(datetime.timezone.utc)  # Define now_utc here
-        if self.ens_long is None or self.ens_short is None:
+        ens_long, ens_short = self.ens_long, self.ens_short   # one model per side for the whole decision (set_models can swap)
+        if ens_long is None or ens_short is None:
             logger.warning(f"[{self.symbol}] Ensembles not loaded. Skipping trade decision.")
             return
 
@@ -120,15 +129,15 @@ class SymbolProcessor:
         atr = X["atr_14"].iloc[DECISION_BAR]
         logger.info(f"[{self.symbol}] Deciding on the bar that closed at {X.index[DECISION_BAR]}.")
 
-        prob_long = self.ens_long.predict_proba(last_closed_features).iloc[0]
-        prob_short = self.ens_short.predict_proba(last_closed_features).iloc[0]
+        prob_long = ens_long.predict_proba(last_closed_features).iloc[0]
+        prob_short = ens_short.predict_proba(last_closed_features).iloc[0]
 
         # Get dynamic risk parameters from RiskController
         context = {
             "vol": atr,
             "equity": self.monitor.current_equity,
             "peak_equity": self.monitor.peak_equity,
-            "ensemble_auc": (self.ens_long.ensemble_cv_auc_ + self.ens_short.ensemble_cv_auc_) / 2,
+            "ensemble_auc": (ens_long.ensemble_cv_auc_ + ens_short.ensemble_cv_auc_) / 2,
             "adx": float(last_closed_features["adx"].iloc[0]) if "adx" in last_closed_features.columns else 0.0,
             "macd_diff": float(last_closed_features["macd_diff"].iloc[0]) if "macd_diff" in last_closed_features.columns else 0.0,
             "volatility_10": float(last_closed_features["volatility_10"].iloc[0]) if "volatility_10" in last_closed_features.columns else 0.0,
@@ -149,17 +158,17 @@ class SymbolProcessor:
 
         direction, auc_score, conflict = choose_direction(
             prob_long, prob_short, min_prob_long, min_prob_short,
-            self.ens_long.ensemble_cv_auc_, self.ens_short.ensemble_cv_auc_, min_ensemble_auc)
+            ens_long.ensemble_cv_auc_, ens_short.ensemble_cv_auc_, min_ensemble_auc)
         if conflict:
             logger.info(f"[{self.symbol}] Conflicting signals skipped: prob_long={prob_long:.3f} and prob_short={prob_short:.3f} "
                         f"both pass their thresholds and AUC gates.")
             return
         if direction is None:
-            logger.info(f"[{self.symbol}] No trade signal details: min_prob_long={min_prob_long:.3f}, min_prob_short={min_prob_short:.3f}, min_ensemble_auc={min_ensemble_auc:.3f}, ens_long_auc={self.ens_long.ensemble_cv_auc_:.3f}, ens_short_auc={self.ens_short.ensemble_cv_auc_:.3f})")
-            if prob_long >= min_prob_long and self.ens_long.ensemble_cv_auc_ < min_ensemble_auc:
-                logger.info(f"[{self.symbol}] Long trade blocked due to low ensemble confidence (AUC={self.ens_long.ensemble_cv_auc_:.4f} < {min_ensemble_auc:.4f}).")
-            if prob_short >= min_prob_short and self.ens_short.ensemble_cv_auc_ < min_ensemble_auc:
-                logger.info(f"[{self.symbol}] Short trade blocked due to low ensemble confidence (AUC={self.ens_short.ensemble_cv_auc_:.4f} < {min_ensemble_auc:.4f}).")
+            logger.info(f"[{self.symbol}] No trade signal details: min_prob_long={min_prob_long:.3f}, min_prob_short={min_prob_short:.3f}, min_ensemble_auc={min_ensemble_auc:.3f}, ens_long_auc={ens_long.ensemble_cv_auc_:.3f}, ens_short_auc={ens_short.ensemble_cv_auc_:.3f})")
+            if prob_long >= min_prob_long and ens_long.ensemble_cv_auc_ < min_ensemble_auc:
+                logger.info(f"[{self.symbol}] Long trade blocked due to low ensemble confidence (AUC={ens_long.ensemble_cv_auc_:.4f} < {min_ensemble_auc:.4f}).")
+            if prob_short >= min_prob_short and ens_short.ensemble_cv_auc_ < min_ensemble_auc:
+                logger.info(f"[{self.symbol}] Short trade blocked due to low ensemble confidence (AUC={ens_short.ensemble_cv_auc_:.4f} < {min_ensemble_auc:.4f}).")
 
         if direction:
             if not self._trading_allowed(now_utc):

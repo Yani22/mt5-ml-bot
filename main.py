@@ -296,7 +296,8 @@ def run(dry_run: bool = True):
                             logger.info(f"[{sym}] Background retraining process finished.")
                             _handle_model_acceptance(
                                 sym, cfg, ens_per_symbol_long, ens_per_symbol_short,
-                                active_model_auc, live_monitor, notifier, optuna_params_per_symbol
+                                active_model_auc, live_monitor, notifier, optuna_params_per_symbol,
+                                processors={d["symbol"]: d["processor"] for d in symbol_threads}
                             )
                             retraining_status[sym] = False
                             del retraining_processes[sym]  # Clean up the process entry

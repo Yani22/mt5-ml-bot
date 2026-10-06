@@ -54,8 +54,17 @@ def run_retraining_in_background(cfg, sym, feature_cfg, dry_run, notifier, optun
         logger.exception(f"[{sym}] Background retraining process failed: {e}")
 
 
-def _handle_model_acceptance(sym, cfg, ens_per_symbol_long, ens_per_symbol_short, active_model_auc, live_monitor, notifier, optuna_params_per_symbol):
-    """Loads newly trained models, compares them, and accepts them if they are an improvement."""
+def _push_to_processor(processors, sym, **sides):
+    processor = (processors or {}).get(sym)
+    if processor is not None:
+        processor.set_models(**sides)
+
+
+def _handle_model_acceptance(sym, cfg, ens_per_symbol_long, ens_per_symbol_short, active_model_auc, live_monitor, notifier, optuna_params_per_symbol, processors=None):
+    """Loads newly trained models, compares them, and accepts them if they are an improvement.
+
+    `processors` maps symbol -> SymbolProcessor; an accepted side is pushed into the running processor (K25), which keeps
+    its own copy of the models. A symbol without a processor (its MT5 client did not connect) is skipped."""
     logger.info(f"[{sym}] Handling model acceptance...")
     try:
         new_ens_long = load_ensemble(cfg, sym, "long")
@@ -77,6 +86,7 @@ def _handle_model_acceptance(sym, cfg, ens_per_symbol_long, ens_per_symbol_short
 
         if long_accepted:
             ens_per_symbol_long[sym] = new_ens_long
+            _push_to_processor(processors, sym, long=new_ens_long)
             active_model_auc[sym] = new_auc_long
             live_monitor.update_ensemble_auc(new_auc_long)
             message = f"[{sym}] New LONG model accepted (AUC: {old_auc_long:.4f} -> {new_auc_long:.4f})."
@@ -91,6 +101,7 @@ def _handle_model_acceptance(sym, cfg, ens_per_symbol_long, ens_per_symbol_short
 
         if short_accepted:
             ens_per_symbol_short[sym] = new_ens_short
+            _push_to_processor(processors, sym, short=new_ens_short)
             message = f"[{sym}] New SHORT model accepted (AUC: {old_auc_short:.4f} -> {new_auc_short:.4f})."
             logger.info(message)
             if notifier:
