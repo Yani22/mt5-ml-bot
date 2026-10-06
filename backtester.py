@@ -404,18 +404,12 @@ class HybridBacktester:
     def _persist_bandit_state(self, force_path: str | None = None):
         """
         Persist RiskController state and ts_param_history CSV.
-        If force_path supplied, temporarily write the TS JSON to that path.
+        The TS JSON goes to `force_path`, else to this backtester's own file; never to the config's (live) state file.
         """
         try:
-            # optionally override cfg path just for this save
-            original_state_file = None
-            if force_path:
-                original_state_file = self.cfg.thompson_sampling.state_file
-                self.cfg.thompson_sampling.state_file = force_path
-
-            # Save RiskController internal JSON (uses RiskController.save_state)
+            # Save RiskController internal JSON (uses RiskController.save_state); the config's state path is never touched
             try:
-                self.risk_controller.save_state()
+                self.risk_controller.save_state(path=force_path or self.backtest_ts_state_file)
             except Exception:
                 logger.exception("Failed to save RiskController state with risk_controller.save_state()")
 
@@ -425,13 +419,9 @@ class HybridBacktester:
                 df = pd.DataFrame(self.ts_param_history)
                 df.to_csv(self.ts_history_csv, index=False)
 
-            logger.info(f"Persisted bandit state to {self.cfg.thompson_sampling.state_file} and CSV to {self.ts_history_csv}")
+            logger.info(f"Persisted bandit state to {force_path or self.backtest_ts_state_file} and CSV to {self.ts_history_csv}")
         except Exception as e:
             logger.exception(f"_persist_bandit_state failed: {e}")
-        finally:
-            if force_path and original_state_file is not None:
-                # restore original
-                self.cfg.thompson_sampling.state_file = original_state_file
 
     def run(self, trial: optuna.Trial | None = None, pruning_interval: int = 0):
         logger.info("=== Starting Hybrid Adaptive Backtest ===")
@@ -492,8 +482,6 @@ if __name__ == "__main__":
             logger.error("Failed to connect to MT5, falling back to csv data source.")
             cfg.data_source = "csv"
             mt5_client = None
-
-    cfg.thompson_sampling.state_file = f"ts_risk_controller_state_backtest_{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
 
     bt = HybridBacktester(cfg, mt5_client)
     try:

@@ -256,7 +256,6 @@ class RiskController:
 
             self.symbol_states[sym] = SymbolRiskState(cfg, atr_grid, min_prob_grid_long, min_prob_grid_short)
 
-        self.state_file = cfg.thompson_sampling.state_file
         self.last_daily_retrain_date: Dict[str, Optional[datetime.date]] = {sym: None for sym in cfg.symbols}
         self._warned_no_price: Dict[str, bool] = {}
         self._warned_no_bar_time: Dict[str, bool] = {}
@@ -618,8 +617,9 @@ class RiskController:
             sym_state.current_ac_multiplier = float(multiplier)
             logger.debug(f"[{symbol}] Asymmetric Compounding: Win Streak={sym_state.win_streak}, Loss Streak={sym_state.loss_streak}, AC Multiplier={sym_state.current_ac_multiplier:.2f}")
 
-    def save_state(self, open_positions_cache: dict | None = None):
-        state_path = self.cfg.thompson_sampling.state_file
+    def save_state(self, open_positions_cache: dict | None = None, path: str | None = None):
+        """Writes the state to `path`, or to the config's `thompson_sampling.state_file` (read at call time) when none is given."""
+        state_path = path or self.cfg.thompson_sampling.state_file
         try:
             symbol_states_data = {}
             for sym, sym_state in self.symbol_states.items():
@@ -640,8 +640,8 @@ class RiskController:
             if self.notifier:
                 self.notifier.send_message(f"<b>ERROR:</b> Failed to save RiskController state: {e}", level="ERROR")
 
-    def load_state(self) -> dict:
-        state_path = self.cfg.thompson_sampling.state_file
+    def load_state(self, path: str | None = None) -> dict:
+        state_path = path or self.cfg.thompson_sampling.state_file
         if not os.path.exists(state_path):
             logger.info(f"No existing RiskController state file found at {state_path}. Starting fresh.")
             return {}
