@@ -3,6 +3,7 @@ from __future__ import annotations
 import difflib
 import yaml
 from dataclasses import dataclass, field, fields
+import typing
 from typing import List, Dict, Any, Optional
 import logging
 
@@ -32,6 +33,61 @@ def _refuse_unknown_keys_in(raw, known, name):
         raise ConfigError(f"config.yaml: unknown key(s) in `{name}`: {', '.join(hints)}. Known keys: {', '.join(known)}")
 
 
+def _type_name(hint):
+    return getattr(hint, "__name__", None) or str(hint).replace("typing.", "")
+
+
+def _type_ok(value, hint):
+    """True when a YAML value fits the annotated type. A bool is never an int or a float; an int is a float."""
+    origin = typing.get_origin(hint)
+    if hint is Any:
+        return True
+    if origin is typing.Union:
+        return any(_type_ok(value, arg) for arg in typing.get_args(hint))
+    if hint is type(None):
+        return value is None
+    if origin in (list, List):
+        args = typing.get_args(hint)
+        return isinstance(value, list) and all(_type_ok(v, args[0]) for v in value) if args else isinstance(value, list)
+    if origin in (dict, Dict):
+        return isinstance(value, dict)
+    if hint is bool:
+        return isinstance(value, bool)
+    if hint is int:
+        return isinstance(value, int) and not isinstance(value, bool)
+    if hint is float:
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if hint is str:
+        return isinstance(value, str)
+    return True  # a nested dataclass or another type is checked where it is built
+
+
+def _refuse_wrong_type(value, hint, where):
+    if not _type_ok(value, hint):
+        note = ""
+        if isinstance(value, str) and hint in (float, int, Optional[int]):
+            try:
+                float(value)
+                note = " (quoted, or an exponent with no decimal point such as 1e-4: write 0.0001 or 1.0e-4)"
+            except ValueError:
+                pass
+        raise ConfigError(f"config.yaml: `{where}` must be {_type_name(hint)}, got {value!r} ({type(value).__name__}){note}")
+
+
+def _refuse_wrong_types(cls, raw, name):
+    hints = typing.get_type_hints(cls)
+    for key, value in raw.items():
+        _refuse_wrong_type(value, hints[key], f"{name}.{key}")
+
+
+def _scalar(raw, key, kind, default):
+    """`raw[key]` checked against `kind` (bool, int, float, str or Optional of one); `default` when absent. Replaces `bool()`/`int()`/`float()`,
+    which turned "false" into True and 2.7 into 2."""
+    value = raw.get(key, default)
+    _refuse_wrong_type(value, kind, key)
+    return value
+
+
 def _block(cls, raw, name):
     """Builds the config dataclass `cls` from the YAML mapping `raw`; an absent or empty block gives the defaults.
 
@@ -42,6 +98,7 @@ def _block(cls, raw, name):
     if not isinstance(raw, dict):
         raise ConfigError(f"config.yaml: `{name}` must be a mapping of settings, got {type(raw).__name__}")
     _refuse_unknown_keys(cls, raw, name)
+    _refuse_wrong_types(cls, raw, name)
     try:
         return cls(**raw)
     except Exception as e:
@@ -391,6 +448,7 @@ class Cfg:
         if "min_ensemble_auc" in ensemble_raw:
             _same_setting(ensemble_raw["min_ensemble_auc"], (raw.get("risk") or {}).get("min_ensemble_auc"),
                           "`min_ensemble_auc` (in `ensemble` and `risk`)")
+            _refuse_wrong_type(ensemble_raw["min_ensemble_auc"], float, "ensemble.min_ensemble_auc")
             risk_obj.min_ensemble_auc = float(ensemble_raw["min_ensemble_auc"])
 
         # `ensemble_training.min_samples_for_ensemble` was never read: the loader looked at the top level only
@@ -398,7 +456,8 @@ class Cfg:
         _refuse_unknown_keys_in(ensemble_training_raw, _ENSEMBLE_TRAINING_KEYS, "ensemble_training")
         _same_setting(ensemble_training_raw.get("min_samples_for_ensemble"), raw.get("min_samples_for_ensemble"),
                       "`min_samples_for_ensemble` (top level and `ensemble_training`)")
-        min_samples_for_ensemble = int(ensemble_training_raw.get("min_samples_for_ensemble", raw.get("min_samples_for_ensemble", 1000)))
+        min_samples_for_ensemble = _scalar(
+            ensemble_training_raw, "min_samples_for_ensemble", int, _scalar(raw, "min_samples_for_ensemble", int, 1000))
         watchdog_obj = _block(WatchdogCfg, raw.get("watchdog"), "watchdog")
         mon_obj = _block(MonitoringCfg, raw.get("monitoring"), "monitoring")
 
@@ -416,7 +475,7 @@ class Cfg:
         tc_raw = raw.get("trading_costs", {}) or {}
         _refuse_unknown_keys(TradingCostsCfg, tc_raw, "trading_costs")
         tc_obj = TradingCostsCfg(
-            source=tc_raw.get("source", "static"),
+            source=_scalar(tc_raw, "source", str, "static"),
             defaults=_block(TradingCostsDefaultsCfg, tc_raw.get("defaults"), "trading_costs.defaults"),
         )
 
@@ -424,6 +483,7 @@ class Cfg:
         ac_obj = _block(AsymmetricCompoundingCfg, raw.get("asymmetric_compounding"), "asymmetric_compounding")
 
         symbols = raw.get("symbols", ["EURUSD"])
+        _refuse_wrong_type(symbols, List[str], "symbols")
         symbol_overrides = raw.get("symbol_overrides") or {}
         for key in symbol_overrides:
             if key not in symbols:
@@ -432,17 +492,17 @@ class Cfg:
 
         return Cfg(
             symbols=symbols,
-            timeframe=raw.get("timeframe", "M5"),
-            history_bars=int(raw.get("history_bars", 2000)),
-            retrain_every_bars=int(raw.get("retrain_every_bars", 250)),
-            prediction_horizon=int(raw.get("prediction_horizon", 6)),
-            data_source=raw.get("data_source", "csv"),
-            use_gpu=bool(raw.get("use_gpu", False)),
-            cv_samples_per_split=int(raw.get("cv_samples_per_split", 300)),
-            optuna_n_trials=int(raw.get("optuna_n_trials", 100)),
-            optuna_pruning_interval=int(raw.get("optuna_pruning_interval", 100)),  # New
-            n_jobs=int(raw.get("n_jobs", -1)),  # New
-            initial_equity=float(bt_obj.initial_equity if "backtesting" in raw else raw.get("initial_equity", 100.0)),
+            timeframe=_scalar(raw, "timeframe", str, "M5"),
+            history_bars=_scalar(raw, "history_bars", int, 2000),
+            retrain_every_bars=_scalar(raw, "retrain_every_bars", int, 250),
+            prediction_horizon=_scalar(raw, "prediction_horizon", int, 6),
+            data_source=_scalar(raw, "data_source", str, "csv"),
+            use_gpu=_scalar(raw, "use_gpu", bool, False),
+            cv_samples_per_split=_scalar(raw, "cv_samples_per_split", int, 300),
+            optuna_n_trials=_scalar(raw, "optuna_n_trials", int, 100),
+            optuna_pruning_interval=_scalar(raw, "optuna_pruning_interval", int, 100),  # New
+            n_jobs=_scalar(raw, "n_jobs", int, -1),  # New
+            initial_equity=float(bt_obj.initial_equity if "backtesting" in raw else _scalar(raw, "initial_equity", float, 100.0)),
             features=features_obj,
             context_features=context_features_obj,
             models=raw.get("models", []),
@@ -455,10 +515,10 @@ class Cfg:
             thompson_sampling=ts_obj,
             trading_costs=tc_obj,
             min_samples_for_ensemble=min_samples_for_ensemble,
-            force_retrain_on_startup=bool(raw.get("force_retrain_on_startup", False)),
-            retraining_window_bars=raw.get("retraining_window_bars", None),
-            startup_logging=bool(raw.get("startup_logging", True)),
-            magic_number=int(raw.get("magic_number", 424242)),
+            force_retrain_on_startup=_scalar(raw, "force_retrain_on_startup", bool, False),
+            retraining_window_bars=_scalar(raw, "retraining_window_bars", Optional[int], None),
+            startup_logging=_scalar(raw, "startup_logging", bool, True),
+            magic_number=_scalar(raw, "magic_number", int, 424242),
             symbol_overrides=symbol_overrides,
             backtesting=bt_obj,
             asymmetric_compounding=ac_obj,
