@@ -10,12 +10,14 @@ from src.retraining import _handle_model_acceptance
 from test_trade_gate import FakeEnsemble, decide, make_rm, make_sp
 
 SYM = "EURUSD#"
-CFG = NS(get_symbol_value=lambda sym, key, default=None: default)   # min_auc_improvement 0.005
+CFG = NS(risk=NS(min_auc_improvement=0.005), get_symbol_value=lambda sym, key, default=None: default)
 
 
 def accept(monkeypatch, old_long, old_short, new_long, new_short, processors):
     loaded = {"long": new_long, "short": new_short}
-    monkeypatch.setattr(retraining, "load_ensemble", lambda cfg, sym, side, model_params=None: loaded[side])
+    monkeypatch.setattr(retraining, "_load_staged", lambda cfg, sym, side, model_params: loaded[side])
+    monkeypatch.setattr(retraining, "promote_staged_ensemble", MagicMock())
+    monkeypatch.setattr(retraining, "discard_staged_ensemble", MagicMock())
     longs, shorts, aucs = {SYM: old_long}, {SYM: old_short}, {}
     _handle_model_acceptance(SYM, CFG, longs, shorts, aucs, MagicMock(), None, {SYM: None}, processors=processors)
     return longs, shorts

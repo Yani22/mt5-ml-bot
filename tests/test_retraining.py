@@ -20,7 +20,8 @@ def _accept(old_long, old_short, new_long, new_short):
     longs, shorts, aucs = {"EURUSD": _ens(old_long)}, {"EURUSD": _ens(old_short)}, {}
     monitor = MagicMock()
     new = {"long": _ens(new_long), "short": _ens(new_short)}
-    with patch.object(retraining, "load_ensemble", side_effect=lambda cfg, sym, side, **k: new[side]):
+    with patch.object(retraining, "_load_staged", side_effect=lambda cfg, sym, side, params: new[side]), \
+            patch.object(retraining, "promote_staged_ensemble"), patch.object(retraining, "discard_staged_ensemble"):
         retraining._handle_model_acceptance("EURUSD", _cfg(), longs, shorts, aucs, monitor, None, {})
     return longs["EURUSD"], shorts["EURUSD"], aucs, monitor
 

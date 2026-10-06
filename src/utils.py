@@ -2,6 +2,7 @@
 from __future__ import annotations
 import os
 import pickle
+import shutil
 import sys
 from loguru import logger  # type: ignore
 import pandas as pd  # type: ignore
@@ -188,9 +189,53 @@ def get_training_data(cfg: Cfg, symbol: str, feature_cfg: FeatureCfg, count: int
         return data, X, y
 
 
+def _model_name(symbol: str, model_type: str) -> str:
+    return f"{symbol.replace('#', '')}_ensemble_{model_type}"
+
+
+def model_dir_for(symbol: str, model_type: str, staged: bool = False) -> str:
+    """The live model folder, or the staging folder a retrain child writes to until it is accepted."""
+    base = os.path.join(MODEL_DIR, "_staging") if staged else MODEL_DIR
+    return os.path.join(base, _model_name(symbol, model_type))
+
+
+def recover_interrupted_promotion(symbol: str, model_type: str) -> None:
+    """A crash between the two renames of `promote_staged_ensemble` leaves no live folder and a `.bak`: put it back, or the
+    next load would build an untrained ensemble."""
+    live = model_dir_for(symbol, model_type)
+    if not os.path.isdir(live) and os.path.isdir(live + ".bak"):
+        logger.warning(f"[{symbol}] {model_type} model folder missing; restoring {live}.bak (an interrupted promotion).")
+        os.rename(live + ".bak", live)
+
+
+def promote_staged_ensemble(symbol: str, model_type: str) -> None:
+    """Makes the staged model the live one: live -> .bak, staged -> live, drop .bak; the old model is put back if the
+    second rename fails. The manifest signs file contents and relative paths only, so a rename keeps it valid."""
+    live, staged = model_dir_for(symbol, model_type), model_dir_for(symbol, model_type, staged=True)
+    backup = live + ".bak"
+    if os.path.isdir(backup):
+        shutil.rmtree(backup)
+    had_live = os.path.isdir(live)
+    if had_live:
+        os.rename(live, backup)
+    try:
+        os.rename(staged, live)
+    except Exception:
+        if had_live:
+            os.rename(backup, live)
+        raise
+    if had_live:
+        shutil.rmtree(backup, ignore_errors=True)
+
+
+def discard_staged_ensemble(symbol: str, model_type: str) -> None:
+    shutil.rmtree(model_dir_for(symbol, model_type, staged=True), ignore_errors=True)
+
+
 def load_ensemble(cfg: Cfg, symbol: str, model_type: str, model_params: dict | None = None) -> Ensemble:
+    recover_interrupted_promotion(symbol, model_type)
     # New: ensemble is saved in a directory, not a single file
-    model_dir_path = os.path.join(MODEL_DIR, f"{symbol.replace('#', '')}_ensemble_{model_type}")
+    model_dir_path = model_dir_for(symbol, model_type)
 
     # Load model_params if not provided
     if model_params is None:
@@ -209,10 +254,12 @@ def load_ensemble(cfg: Cfg, symbol: str, model_type: str, model_params: dict | N
     return ens
 
 
-def save_ensemble(ensemble: Ensemble, symbol: str, model_type: str):
+def save_ensemble(ensemble: Ensemble, symbol: str, model_type: str, staged: bool = False):
     # New: save to a directory
-    model_dir_path = os.path.join(MODEL_DIR, f"{symbol.replace('#', '')}_ensemble_{model_type}")
+    model_dir_path = model_dir_for(symbol, model_type, staged=staged)
     try:
+        if staged:
+            shutil.rmtree(model_dir_path, ignore_errors=True)    # never mix files of two retrains
         # Use the new instance method to save
         ensemble.save(model_dir_path)
         logger.info(f"[{symbol}] Ensemble model saved to directory {model_dir_path}")
@@ -220,7 +267,7 @@ def save_ensemble(ensemble: Ensemble, symbol: str, model_type: str):
         logger.error(f"[{symbol}] Failed to save ensemble: {e}")
 
 
-def safe_retrain_ensemble(cfg: Cfg, symbol: str, ens_old: Ensemble, X_train: pd.DataFrame, y_train: pd.Series, prices: pd.Series, dry_run: bool = False, model_type: str = "long", model_params: dict | None = None) -> Ensemble:
+def safe_retrain_ensemble(cfg: Cfg, symbol: str, ens_old: Ensemble, X_train: pd.DataFrame, y_train: pd.Series, prices: pd.Series, dry_run: bool = False, model_type: str = "long", model_params: dict | None = None, staged: bool = False, min_improvement: float | None = None) -> Ensemble:
     """
     Safely retrains an ensemble model.
 
@@ -234,6 +281,8 @@ def safe_retrain_ensemble(cfg: Cfg, symbol: str, ens_old: Ensemble, X_train: pd.
         dry_run: If True, the new model will not be saved.
         model_type: The type of model being retrained ("long" or "short").
         model_params: Pre-loaded Optuna parameters for the model.
+        staged: save an accepted model to the staging folder instead of the live one (the live bot promotes it after its own check).
+        min_improvement: AUC gain required to save; defaults to `cfg.risk.min_auc_improvement`.
 
     Returns:
         The retrained ensemble if it's better than the old one, otherwise the old ensemble.
@@ -256,13 +305,15 @@ def safe_retrain_ensemble(cfg: Cfg, symbol: str, ens_old: Ensemble, X_train: pd.
             logger.warning(f"[{symbol}] New ensemble reports no AUC; refusing to replace.")
             return ens_old
 
-        if old_auc is None or (new_auc - old_auc) >= cfg.risk.min_auc_improvement:
+        if min_improvement is None:
+            min_improvement = cfg.risk.min_auc_improvement
+        if old_auc is None or (new_auc - old_auc) >= min_improvement:
             if not dry_run:
-                save_ensemble(ens_new, symbol, model_type)
+                save_ensemble(ens_new, symbol, model_type, staged=staged)
             logger.info(f"[{symbol}] {model_type.upper()} Retrain accepted. old_auc={old_auc} new_auc={new_auc}")
             return ens_new
         else:
-            logger.info(f"[{symbol}] {model_type.upper()} Retrain NOT accepted. improvement {(new_auc - old_auc):.4f} < {cfg.risk.min_auc_improvement}")
+            logger.info(f"[{symbol}] {model_type.upper()} Retrain NOT accepted. improvement {(new_auc - old_auc):.4f} < {min_improvement}")
             return ens_old
     except Exception as e:
         logger.exception(f"[{symbol}] Retraining failed: {e}")

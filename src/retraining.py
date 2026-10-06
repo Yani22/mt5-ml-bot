@@ -1,6 +1,7 @@
 # src/retraining.py
 """Scheduled background retraining and model-acceptance logic for the live bot."""
 import datetime
+import os
 from multiprocessing import Process
 from typing import Any, Dict
 
@@ -8,11 +9,13 @@ from loguru import logger
 
 from src.config import Cfg, FeatureCfg
 from src.data_manager import DataManager
+from src.ensemble import Ensemble
 from src.labels import generate_long_short_labels
 from src.mt5_client import MT5Client
 from src.notifier import TelegramNotifier
 from src.risk_controller import RiskController
-from src.utils import load_ensemble, safe_retrain_ensemble
+from src.utils import (discard_staged_ensemble, load_ensemble, model_dir_for, promote_staged_ensemble,
+                       safe_retrain_ensemble)
 
 
 def retraining_status_for(symbols, retraining_processes) -> Dict[str, bool]:
@@ -27,6 +30,10 @@ def run_retraining_in_background(cfg, sym, feature_cfg, dry_run, notifier, optun
     Tuned parameters come from optuna_params/<symbol>_best_params.pkl; config.yaml is never modified.
     """
     try:
+        # The child saves into models/_staging/, never into the live folder; `_handle_model_acceptance` promotes what it accepts.
+        for side in ("long", "short"):
+            discard_staged_ensemble(sym, side)   # nothing left over from an earlier or crashed run
+        min_improvement = cfg.get_symbol_value(sym, 'min_auc_improvement', cfg.risk.min_auc_improvement)  # the acceptance threshold
         data_manager = DataManager(cfg)
 
         # Retrieve tuned prediction_horizon and min_pct_change for this symbol
@@ -42,11 +49,13 @@ def run_retraining_in_background(cfg, sym, feature_cfg, dry_run, notifier, optun
 
         logger.info(f"[{sym}] Retraining LONG model...")
         ens_old_long = load_ensemble(cfg, sym, "long", model_params=optuna_params_per_symbol[sym])
-        safe_retrain_ensemble(cfg, sym, ens_old_long, full_X, y_long, full_data["close"], dry_run=dry_run, model_type="long", model_params=optuna_params_per_symbol[sym])
+        safe_retrain_ensemble(cfg, sym, ens_old_long, full_X, y_long, full_data["close"], dry_run=dry_run, model_type="long", model_params=optuna_params_per_symbol[sym],
+                              staged=True, min_improvement=min_improvement)
 
         logger.info(f"[{sym}] Retraining SHORT model...")
         ens_old_short = load_ensemble(cfg, sym, "short", model_params=optuna_params_per_symbol[sym])
-        safe_retrain_ensemble(cfg, sym, ens_old_short, full_X, y_short, full_data["close"], dry_run=dry_run, model_type="short", model_params=optuna_params_per_symbol[sym])
+        safe_retrain_ensemble(cfg, sym, ens_old_short, full_X, y_short, full_data["close"], dry_run=dry_run, model_type="short", model_params=optuna_params_per_symbol[sym],
+                              staged=True, min_improvement=min_improvement)
 
         logger.info(f"[{sym}] Background retraining process for LONG and SHORT models finished.")
 
@@ -60,60 +69,79 @@ def _push_to_processor(processors, sym, **sides):
         processor.set_models(**sides)
 
 
+def _load_staged(cfg, sym, side, model_params):
+    """The staged ensemble, or None when the child staged nothing. Raises when what is there cannot be loaded (an unsigned or
+    half-written folder fails the manifest check)."""
+    path = model_dir_for(sym, side, staged=True)
+    if not os.path.isdir(path):
+        return None
+    return Ensemble.load(path, cfg, model_params=model_params)
+
+
 def _handle_model_acceptance(sym, cfg, ens_per_symbol_long, ens_per_symbol_short, active_model_auc, live_monitor, notifier, optuna_params_per_symbol, processors=None):
-    """Loads newly trained models, compares them, and accepts them if they are an improvement.
+    """Judges the models the retrain child staged and promotes the ones that improve on the live model.
 
-    `processors` maps symbol -> SymbolProcessor; an accepted side is pushed into the running processor (K25), which keeps
-    its own copy of the models. A symbol without a processor (its MT5 client did not connect) is skipped."""
+    Each side is judged on its own, with the per-symbol `min_auc_improvement` (the threshold the child used). An accepted model is
+    promoted on disk first, then replaced in `main`'s dicts and pushed into the running processor (K25: `processors` maps symbol ->
+    SymbolProcessor; a symbol whose MT5 client did not connect has none). A rejected or unreadable one is deleted, so the live folder
+    is never touched by a model that was not accepted.
+    """
     logger.info(f"[{sym}] Handling model acceptance...")
-    try:
-        new_ens_long = load_ensemble(cfg, sym, "long")
-        new_ens_short = load_ensemble(cfg, sym, "short")
+    min_auc_improvement = cfg.get_symbol_value(sym, 'min_auc_improvement', cfg.risk.min_auc_improvement)
+    model_params = (optuna_params_per_symbol or {}).get(sym)
 
-        old_ens_long = ens_per_symbol_long[sym]
-        old_ens_short = ens_per_symbol_short[sym]
+    def alert(message, level):
+        if notifier:
+            notifier.send_message(message, level=level)
 
-        new_auc_long = getattr(new_ens_long, "ensemble_cv_auc_", 0.5)
-        new_auc_short = getattr(new_ens_short, "ensemble_cv_auc_", 0.5)
-        old_auc_long = getattr(old_ens_long, "ensemble_cv_auc_", 0.5)
-        old_auc_short = getattr(old_ens_short, "ensemble_cv_auc_", 0.5)
+    def judge(side, live_models):
+        label = side.upper()
+        try:
+            new_ens = _load_staged(cfg, sym, side, model_params)
+        except Exception as e:
+            logger.exception(f"[{sym}] Staged {label} model could not be loaded: {e}")
+            discard_staged_ensemble(sym, side)
+            alert(f"[{sym}] Staged {label} model could not be loaded and was discarded. Keeping old model.", "WARNING")
+            return
+        if new_ens is None:
+            logger.info(f"[{sym}] No new {label} model was staged (the retrain was no improvement, or this is a dry run). Keeping the current one.")
+            return
 
-        # Use the new helper to get the symbol-specific value, falling back to the global default
-        min_auc_improvement = cfg.get_symbol_value(sym, 'min_auc_improvement', 0.005)
-
-        long_accepted = new_auc_long >= old_auc_long + min_auc_improvement
-        short_accepted = new_auc_short >= old_auc_short + min_auc_improvement
-
-        if long_accepted:
-            ens_per_symbol_long[sym] = new_ens_long
-            _push_to_processor(processors, sym, long=new_ens_long)
-            active_model_auc[sym] = new_auc_long
-            live_monitor.update_ensemble_auc(new_auc_long)
-            message = f"[{sym}] New LONG model accepted (AUC: {old_auc_long:.4f} -> {new_auc_long:.4f})."
-            logger.info(message)
-            if notifier:
-                notifier.send_message(message, level="INFO")
-        else:
-            message = f"[{sym}] New LONG model rejected (AUC: {old_auc_long:.4f} -> {new_auc_long:.4f}). Keeping old model."
+        new_auc = getattr(new_ens, "ensemble_cv_auc_", None)
+        old_auc = getattr(live_models[sym], "ensemble_cv_auc_", None)   # None: no incumbent AUC, so any staged model with one is accepted
+        if new_auc is None or (old_auc is not None and new_auc < old_auc + min_auc_improvement):
+            shown = lambda v: "n/a" if v is None else f"{v:.4f}"  # noqa: E731
+            message = f"[{sym}] New {label} model rejected (AUC: {shown(old_auc)} -> {shown(new_auc)}). Keeping old model."
             logger.warning(message)
-            if notifier:
-                notifier.send_message(message, level="WARNING")
+            alert(message, "WARNING")
+            discard_staged_ensemble(sym, side)
+            return
 
-        if short_accepted:
-            ens_per_symbol_short[sym] = new_ens_short
-            _push_to_processor(processors, sym, short=new_ens_short)
-            message = f"[{sym}] New SHORT model accepted (AUC: {old_auc_short:.4f} -> {new_auc_short:.4f})."
-            logger.info(message)
-            if notifier:
-                notifier.send_message(message, level="INFO")
-        else:
-            message = f"[{sym}] New SHORT model rejected (AUC: {old_auc_short:.4f} -> {new_auc_short:.4f}). Keeping old model."
-            logger.warning(message)
-            if notifier:
-                notifier.send_message(message, level="WARNING")
+        try:
+            promote_staged_ensemble(sym, side)   # on disk first: a reconnect must not bring the old model back
+        except Exception as e:
+            logger.exception(f"[{sym}] Could not promote the staged {label} model: {e}")
+            discard_staged_ensemble(sym, side)
+            alert(f"[{sym}] Could not promote the new {label} model ({e}). Keeping old model.", "WARNING")
+            return
 
-    except Exception as e:
-        logger.exception(f"[{sym}] Error during model acceptance: {e}")
+        live_models[sym] = new_ens
+        processor = (processors or {}).get(sym)
+        if processor is not None:
+            processor.set_models(**{side: new_ens})
+        if side == "long":
+            active_model_auc[sym] = new_auc
+            live_monitor.update_ensemble_auc(new_auc)
+        message = f"[{sym}] New {label} model accepted (AUC: {'n/a' if old_auc is None else f'{old_auc:.4f}'} -> {new_auc:.4f})."
+        logger.info(message)
+        alert(message, "INFO")
+
+    for side, live_models in (("long", ens_per_symbol_long), ("short", ens_per_symbol_short)):
+        try:
+            judge(side, live_models)
+        except Exception as e:   # never raise into main's loop: it would reconnect, and the finished child stays tracked
+            logger.exception(f"[{sym}] Error during {side} model acceptance: {e}")
+            discard_staged_ensemble(sym, side)
 
 
 def _check_and_trigger_retraining(cfg: Cfg, sym: str, feature_cfg_per_symbol: Dict[str, FeatureCfg], dry_run: bool, notifier: TelegramNotifier, optuna_params_per_symbol: Dict[str, Any], retraining_processes: Dict[str, Process], retraining_status: Dict[str, bool], last_retrain_date: Dict[str, datetime.date], risk_controller: RiskController, mt5c: MT5Client):
