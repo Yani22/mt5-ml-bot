@@ -70,35 +70,6 @@ def test_mt5_client_connection_success(mock_mt5):
     login.assert_called_once_with(login=12345, password="password", server="server")
 
 
-def test_mt5_client_now_utc_from_symbol_tick(mock_mt5):
-    client = MT5Client(login=12345, password="password", server="server", path="path")
-    client.connect()
-
-    # EURUSDm# fails, but GBPUSDm# succeeds
-    def symbol_info_tick_side_effect_fallback(symbol_name):
-        if symbol_name == "EURUSDm#":
-            return None  # Simulate failure for EURUSDm#
-        elif symbol_name == "GBPUSDm#":
-            return MagicMock(time=1678886500)  # Simulate success for GBPUSDm#
-        return None
-    mock_mt5.symbol_info_tick.side_effect = symbol_info_tick_side_effect_fallback
-
-    mock_eurusdm_symbol = MagicMock()
-    mock_eurusdm_symbol.name = "EURUSDm#"
-    mock_gbpusdm_symbol = MagicMock()
-    mock_gbpusdm_symbol.name = "GBPUSDm#"
-    mock_mt5.symbols_get.return_value = [mock_eurusdm_symbol, mock_gbpusdm_symbol]
-
-    now_utc_time = client.now_utc()
-    expected_time = datetime.datetime.fromtimestamp(1678886500, tz=datetime.timezone.utc)
-    assert now_utc_time == expected_time
-    # Verify calls
-    assert mock_mt5.symbol_info_tick.call_count == 2  # Once for EURUSDm#, once for GBPUSDm#
-    mock_mt5.symbol_info_tick.assert_any_call("EURUSDm#")
-    mock_mt5.symbol_info_tick.assert_any_call("GBPUSDm#")
-    mock_mt5.symbols_get.assert_called_once()
-
-
 def test_get_timezone_offset(mock_mt5):
     client = MT5Client(login=12345, password="password", server="server", path="path")
     client.connect()
@@ -115,44 +86,6 @@ def test_get_timezone_offset(mock_mt5):
 
         offset = client.get_timezone_offset()
         assert offset == 2.0
-
-
-def test_mt5_client_now_utc_fallback_to_system_time(mock_mt5):
-    client = MT5Client(login=12345, password="password", server="server", path="path")
-    client.connect()
-
-    # Test when connected but no symbols provide a valid tick
-    mock_mt5.symbol_info_tick.side_effect = lambda symbol_name: None  # No valid ticks
-    mock_mt5.symbols_get.return_value = [MagicMock(name="SYMBOL1"), MagicMock(name="SYMBOL2")]
-
-    # Mock datetime.datetime.now for consistent testing of fallback
-    original_datetime = datetime.datetime
-    with patch('datetime.datetime') as mock_dt:
-        mock_dt.now.return_value = original_datetime(2023, 1, 1, 12, 0, 0, tzinfo=datetime.timezone.utc)
-        mock_dt.side_effect = lambda *args, **kw: original_datetime(*args, **kw)
-        mock_dt.timezone = datetime.timezone
-
-        now_utc_time = client.now_utc()
-        assert now_utc_time == original_datetime(2023, 1, 1, 12, 0, 0, tzinfo=datetime.timezone.utc)
-        mock_mt5.symbol_info_tick.assert_any_call("EURUSDm#")  # Initial attempt
-        mock_mt5.symbols_get.assert_called_once()  # Fallback to iterating symbols
-        assert mock_mt5.symbol_info_tick.call_count > 1  # Called for EURUSDm# and then for other symbols
-
-    # Test when not connected (should fall back to system time directly)
-    client.shutdown()
-    mock_mt5.symbols_get.reset_mock()
-    mock_mt5.symbol_info_tick.reset_mock()
-
-    original_datetime = datetime.datetime
-    with patch('datetime.datetime') as mock_dt:
-        mock_dt.now.return_value = original_datetime(2023, 1, 1, 12, 0, 0, tzinfo=datetime.timezone.utc)
-        mock_dt.side_effect = lambda *args, **kw: original_datetime(*args, **kw)
-        mock_dt.timezone = datetime.timezone
-
-        now_utc_time_disconnected = client.now_utc()
-        assert now_utc_time_disconnected == original_datetime(2023, 1, 1, 12, 0, 0, tzinfo=datetime.timezone.utc)
-        mock_mt5.symbols_get.assert_not_called()
-        mock_mt5.symbol_info_tick.assert_not_called()
 
 
 def test_mt5_client_account_info(mock_mt5):

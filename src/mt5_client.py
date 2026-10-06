@@ -48,6 +48,7 @@ class MT5Client:
         path: Optional[str] = None,
         max_retries: int = 3,
         retry_delay: float = 5.0,
+        time_symbols: Optional[list] = None,
     ):
         self._raw_login = login
         self.password = password
@@ -56,6 +57,9 @@ class MT5Client:
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self._attached_generation: Optional[int] = None  # see the `_connected` property
+        self.time_symbols = list(time_symbols or [])  # symbols asked for the server time (the ones the bot trades)
+        self._time_symbol: Optional[str] = None       # the symbol that last gave a tick
+        self._time_warned = False                     # the "no tick from the configured symbols" warning is logged once
 
         # attempt coercion to int but keep original if not possible
         self.login = None
@@ -178,28 +182,38 @@ class MT5Client:
             return None
 
     def now_utc(self):
-        """Returns the current UTC time from the MetaTrader 5 terminal."""
+        """Returns the current time from the MetaTrader 5 terminal (the server's clock, labelled UTC by this code base).
+
+        Asks the symbol that last worked, then `time_symbols`; only if none answers does it look at the Market Watch symbols and
+        keep the one with the newest tick (a closed market's last tick can be hours old). Falls back to the system clock."""
         if not self._connected:
             return datetime.datetime.now(datetime.timezone.utc)
 
         try:
-            # First, try to get server time from a common symbol like EURUSDm
-            common_symbol = "EURUSDm#"
-            tick = mt5.symbol_info_tick(common_symbol)
-            if tick and tick.time > 0:
-                return datetime.datetime.fromtimestamp(tick.time, tz=datetime.timezone.utc)
-            else:
-                logger.warning(f"MT5Client: Could not get server time from {common_symbol}. Trying other symbols.")
+            tried = []
+            for name in [self._time_symbol, *self.time_symbols]:
+                if not name or name in tried:
+                    continue
+                tried.append(name)
+                tick = mt5.symbol_info_tick(name)
+                if tick and tick.time > 0:
+                    self._time_symbol = name
+                    return datetime.datetime.fromtimestamp(tick.time, tz=datetime.timezone.utc)
 
-            # If that fails, iterate through all symbols to find one with a valid tick
-            symbols = mt5.symbols_get()
-            if symbols:
-                # Filter out the common symbol since it has already been checked
-                other_symbols = [s for s in symbols if s.name != common_symbol]
-                for symbol_info in other_symbols:
-                    tick = mt5.symbol_info_tick(symbol_info.name)
-                    if tick and tick.time > 0:
-                        return datetime.datetime.fromtimestamp(tick.time, tz=datetime.timezone.utc)
+            if not self._time_warned:
+                self._time_warned = True
+                logger.warning(f"MT5Client: no tick from {tried or 'any configured symbol'} for the server time; "
+                               f"using the freshest Market Watch tick instead.")
+            best = None
+            for info in mt5.symbols_get() or []:
+                if not getattr(info, "select", False) or info.name in tried:
+                    continue
+                tick = mt5.symbol_info_tick(info.name)
+                if tick and tick.time > 0 and (best is None or tick.time > best[0]):
+                    best = (tick.time, info.name)
+            if best:
+                self._time_symbol = best[1]
+                return datetime.datetime.fromtimestamp(best[0], tz=datetime.timezone.utc)
         except Exception as e:
             logger.warning(f"MT5Client: exception getting server time from tick: {e}")
             # Fallback to system time if we can't get server time from any tick

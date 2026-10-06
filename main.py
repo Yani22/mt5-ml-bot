@@ -160,6 +160,7 @@ def run(dry_run: bool = True):
                     os.getenv("MT5_PASSWORD"),
                     os.getenv("MT5_SERVER"),
                     os.getenv("MT5_PATH"),
+                    time_symbols=cfg.symbols,  # server time comes from a symbol this account trades (K30)
                 )
                 if not mt5c.connect():
                     logger.error("MT5 initial connection failed. Retrying in 60 seconds...")
