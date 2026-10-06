@@ -100,7 +100,7 @@ class HybridBacktester:
     def _close_costs(self, sym: str, lots: float) -> float:
         """Money (account currency) a round trip costs, charged when the position closes: one spread (the bars are bid-only and
         entry and exit both use the close, so a long or a short pays exactly one), slippage, and commission. Spread and slippage
-        are in pips. `risk.transaction_cost_pips` is no longer read."""
+        are in pips. There is no `risk.transaction_cost_pips`."""
         costs = self.cfg.trading_costs.defaults
         spread_pips = float(self.cfg.get_symbol_value(sym, "spread_pips", costs.spread_pips))
         pips = round_trip_pips(spread_pips, costs.slippage_pips, costs.adaptive_slippage, costs.adaptive_slippage_multiplier)

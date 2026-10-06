@@ -104,7 +104,6 @@ class RiskCfg:
     min_prob_long: float = 0.55
     min_prob_short: float = 0.55
     block_on_drawdown: float = 0.10
-    transaction_cost_pips: float = 1.5
     max_spread_atr: float = 1.0  # skip entries when spread / decision-bar ATR is above this; 0 = off (symbol_overrides can set it)
     session_filter: Optional[Dict[str, str]] = None
     min_ensemble_auc: float = 0.55
@@ -168,7 +167,7 @@ class FetchCfg:
     initial_fetch_bars: int = 30000
     save_raw_data_locally: bool = True
     raw_data_dir: str = "data/historical_data"
-    retrain_in_background: bool = True
+    retrain_in_background: bool = True  # unused: retraining always runs in a child process (K14); kept so config.yaml still loads
     retrain_time_utc: Optional[List[str]] = None  # "HH:MM" format or None
 
 
