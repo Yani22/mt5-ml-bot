@@ -40,7 +40,7 @@ ensemble_training:
 
 # --- Symbols & timeframe ---
 # CSV data needed per symbol: M5-<SYMBOL>, H1-<SYMBOL>, and M5-USDX-DEC25 if inter_market is enabled
-symbols: ["AUDUSDm#", "EURUSDm#", "GBPUSDm#"]
+symbols: ["USDJPY#"]
 timeframe: "M5"            # One of: M1, M5, M15, M30, H1, H4
 history_bars: 45000
 retrain_every_bars: 10000     # ~3.5 days at M5
@@ -77,13 +77,11 @@ models:
     n_estimators: 200
     learning_rate: 0.05
     max_depth: -1
-    subsample: 0.8
     colsample_bytree: 0.8
   tune:
     n_estimators: [100, 500]
     learning_rate: [0.01, 0.1, "log"]
     max_depth: [3, 10]
-    subsample: [0.6, 1.0]
     colsample_bytree: [0.6, 1.0]
 
 ensemble:
@@ -115,11 +113,11 @@ thompson_sampling:
   decay: 0.995 # Forgetting factor for non-stationarity
   reward_normalization_factor: 1000.0 # Divide PnL by this to normalize reward
   rule_rolling_window: 100 # Bars for rolling volatility/returns
-  vol_threshold: 0.0005 # Example threshold for inverse_vol_scale
+  vol_threshold: 0.0005 # ATR as a fraction of price (0.0005 = 0.05%); stops shrink once ATR/price exceeds twice this
   dd_cut_multiplier: 2.0 # Multiplier for max_drawdown in scaling
   consec_loss_cut: 0.2 # Multiplier for consecutive losses in scaling
   contextual_enabled: true           # Toggle contextual bandit
-  context_dim: 9                      # dim of context vector if contextual_enabled
+  context_dim: 9                      # ignored: fixed by the code (9 inputs)
   min_visits_for_exploration: 5        # number of visits before arm is considered "known"
   exploration_risk_mult: 0.5         # fraction of normal risk to use for exploratory arms
   warmstart_weight: 1.0              # weight for warmstart merging (1.0 = fully add backtest priors)
@@ -141,11 +139,11 @@ thompson_sampling:
 
 # --- Risk management ---
 risk:
-  risk_per_trade: 0.035
+  risk_per_trade: 0.01
   dynamic_risk:
     enabled: true
-    base_risk: 0.035      # Fraction of equity risked at auc_floor
-    max_risk: 0.05        # Fraction of equity risked at auc_ceiling
+    base_risk: 0.01       # Fraction of equity risked at auc_floor
+    max_risk: 0.01        # Fraction of equity risked at auc_ceiling
     auc_floor: 0.55       # The AUC score that corresponds to base_risk
     auc_ceiling: 0.65     # The AUC score that corresponds to max_risk
 
@@ -157,14 +155,14 @@ risk:
     auc_ceiling: 0.65     # Same AUC ceiling as risk
 
   max_positions: 3            # Max concurrent positions (live uses 3; earlier backtests used 1)
-  max_portfolio_risk: 0.15    # Total equity risk cap (live uses 0.15; earlier backtests used 0.05)
+  max_portfolio_risk: 0.03    # Total equity risk cap
   atr_multiplier_sl: 1.0
   atr_multiplier_tp: 2.0
   breakeven_at_1R: true
   trailing_atr_mult: 1.0
   min_prob_long: 0.55         # 0.51-0.55 = low confidence, 0.56-0.65 = high
   min_prob_short: 0.55        # 0.51-0.55 = low confidence, 0.56-0.65 = high
-  block_on_drawdown: 1.0      # pause if drawdown from equity peak exceeds this fraction; 1.0 = disabled
+  block_on_drawdown: 0.2      # pause if drawdown from equity peak exceeds this fraction; 1.0 = disabled
   min_auc_improvement: 0.0025 # minimum AUC improvement to accept a retrained model
   max_drawdown_for_pruning: 1.0 # Max drawdown allowed before Optuna trial pruning; 1.0 = disabled
   session_filter:
@@ -180,7 +178,7 @@ logging:
 
 # --- Monitoring / Safety ---
 watchdog:
-  enabled: false
+  enabled: true
   max_consecutive_losses: 5      # Stop trading if more than N losses in a row
   cooldown_hours: 1              # Pause trading for X hours if triggered
 
@@ -193,7 +191,7 @@ monitoring:
 
 # --- Asymmetric Compounding ---
 asymmetric_compounding:
-  enabled: true
+  enabled: false  # off: 1% per trade is a hard ceiling (a win streak could double it)
   win_streak_multiplier: 1.2
   loss_streak_divisor: 0.8
   max_streak_effect: 2.0
@@ -206,18 +204,8 @@ startup_logging: true             # log key settings at bot launch for transpare
 # --- Symbol Specific Overrides ---
 # Overrides any top-level setting for one symbol. Retraining times are staggered so symbols don't retrain at once.
 symbol_overrides:
-  "GBPUSDm#":
+  "USDJPY#":
     retrain_time_utc: "01:02"
-    atr_grid: [1.0, 1.5, 2.0, 2.5]
-    min_prob_grid_long: [0.53, 0.55, 0.57, 0.60, 0.63]
-    min_prob_grid_short: [0.53, 0.55, 0.57, 0.60, 0.63]
-  "AUDUSDm#":
-    retrain_time_utc: "01:12"
-    atr_grid: [1.0, 1.5, 2.0, 2.5]
-    min_prob_grid_long: [0.53, 0.55, 0.57, 0.60, 0.63]
-    min_prob_grid_short: [0.53, 0.55, 0.57, 0.60, 0.63]
-  "EURUSDm#":
-    retrain_time_utc: "01:22"
     atr_grid: [1.0, 1.5, 2.0, 2.5]
     min_prob_grid_long: [0.53, 0.55, 0.57, 0.60, 0.63]
     min_prob_grid_short: [0.53, 0.55, 0.57, 0.60, 0.63]
