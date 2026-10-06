@@ -53,6 +53,7 @@ def make_bt(monkeypatch, tmp_path, spread_pips=None):
     bt.cfg, bt.equity, bt.initial_equity, bt.positions = cfg, 10_000.0, 10_000.0, []
     bt.equity_curve, bt.pending, bt.signals, bt.skipped_for_size, bt.blocked_by_auc = [], {}, 0, 0, 0
     bt.skipped_for_spread = 0
+    bt._closed_results = []
     bt.bar_counters, bt.save_state_every_bars, bt.ts_param_history = {"USDJPY#": 0}, 10 ** 9, []
     bt.backtest_ts_state_file = str(tmp_path / "state.json")
     bt.risk_manager = RiskManager(cfg, BacktestSymbolClient({"USDJPY#": 150.0}), threading.Lock())
@@ -202,12 +203,76 @@ def test_a_loss_streak_cooldown_is_started_again_on_the_bar_it_expires(monkeypat
     bt.risk_manager.watchdog_cfg.enabled = True
     bt.risk_manager.watchdog_cfg.max_consecutive_losses = 3
     bt.risk_manager.watchdog_cfg.cooldown_hours = 1.0
-    bt.risk_controller.symbol_states["USDJPY#"].consecutive_losses = 5
-    frame, models, _ = build(p={i: 0.9 for i in range(40, N)})
-    assert run(bt, frame, models) == [] and bt.signals == 0
+    frame, models, idx = build(p={i: 0.9 for i in range(40, N)})
+    closed(bt, *[(-1.0, idx[0] - pd.Timedelta(hours=1, minutes=k)) for k in range(5)])
+    run(bt, frame, models)
+    assert bt.signals == 0 and bt.risk_manager.cooldown_until is not None
+
+
+def closed(bt, *results):
+    """Record closed trades (pnl, exit time) the way `_update_positions` does."""
+    for pnl, exit_time in results:
+        bt._record_close(exit_time, pnl)
+
+
+def test_a_loss_streak_older_than_the_lookback_no_longer_blocks_the_backtester(monkeypatch, tmp_path):
+    """Live counts only the losing deals of the last 48 hours (`_count_consecutive_losses`), so its watchdog releases. The backtester read
+    a counter with no window; with no trade it never changed, and a streak of 5 blocked every later bar (158,539 of them on USDJPY#)."""
+    bt = make_bt(monkeypatch, tmp_path)
+    bt.risk_manager.watchdog_cfg.enabled = True
+    bt.risk_manager.watchdog_cfg.max_consecutive_losses = 3
+    frame, models, idx = build(p={i: 0.9 for i in range(40, N)})
+    bt.risk_controller.symbol_states["USDJPY#"].consecutive_losses = 5   # the old counter: it blocked forever
+    closed(bt, *[(-1.0, idx[0] - pd.Timedelta(hours=49 + k)) for k in range(5)])
+    run(bt, frame, models)
+    assert bt.signals >= 1 and bt.risk_manager.cooldown_until is None
+
+
+def test_a_loss_streak_inside_the_lookback_still_blocks_the_backtester(monkeypatch, tmp_path):
+    bt = make_bt(monkeypatch, tmp_path)
+    bt.risk_manager.watchdog_cfg.enabled = True
+    bt.risk_manager.watchdog_cfg.max_consecutive_losses = 3
+    frame, models, idx = build(p={i: 0.9 for i in range(40, N)})
+    closed(bt, *[(-1.0, idx[0] - pd.Timedelta(hours=1 + k)) for k in range(5)])
+    run(bt, frame, models)
+    assert bt.signals == 0
+
+
+def test_a_win_inside_the_lookback_ends_the_streak_for_the_backtester(monkeypatch, tmp_path):
+    bt = make_bt(monkeypatch, tmp_path)
+    bt.risk_manager.watchdog_cfg.enabled = True
+    bt.risk_manager.watchdog_cfg.max_consecutive_losses = 3
+    frame, models, idx = build(p={i: 0.9 for i in range(40, N)})
+    closed(bt, (-1.0, idx[0] - pd.Timedelta(hours=3)), (-1.0, idx[0] - pd.Timedelta(hours=2)),
+           (-1.0, idx[0] - pd.Timedelta(hours=1)), (2.0, idx[0] - pd.Timedelta(minutes=30)))
+    run(bt, frame, models)
+    assert bt.signals >= 1
+
+
+def test_the_streak_is_counted_over_all_symbols_like_live(monkeypatch, tmp_path):
+    """Live counts every closed deal of the bot's magic number (all symbols), not one symbol's."""
+    bt = make_bt(monkeypatch, tmp_path)
+    bt.risk_manager.watchdog_cfg.enabled = True
+    bt.risk_manager.watchdog_cfg.max_consecutive_losses = 3
+    frame, models, idx = build(p={i: 0.9 for i in range(40, N)})
+    closed(bt, (-1.0, idx[0] - pd.Timedelta(hours=3)), (-1.0, idx[0] - pd.Timedelta(hours=2)), (-1.0, idx[0] - pd.Timedelta(hours=1)))
+    run(bt, frame, models)
+    assert bt.signals == 0
 
 
 def test_without_a_drawdown_or_a_loss_streak_the_gates_let_the_decision_through(monkeypatch, tmp_path):
     bt = make_bt(monkeypatch, tmp_path)
     frame, models, _ = build(p={40: 0.9})
     assert len(run(bt, frame, models)) == 1
+
+
+def test_the_watchdog_window_edges_and_the_future(monkeypatch, tmp_path):
+    bt = make_bt(monkeypatch, tmp_path)
+    now = pd.Timestamp("2026-01-10 12:00", tz="UTC")
+    closed(bt, (-1.0, now - pd.Timedelta(hours=49)), (-1.0, now - pd.Timedelta(hours=47)), (-1.0, now - pd.Timedelta(hours=1)),
+           (-1.0, now + pd.Timedelta(hours=1)))   # the last one closes after `now` (another symbol, run later)
+    assert bt._watchdog_losses(now.to_pydatetime()) == 2
+    closed(bt, (0.0, now - pd.Timedelta(minutes=10)))   # a zero result is skipped, not a win
+    assert bt._watchdog_losses(now.to_pydatetime()) == 2
+    closed(bt, (0.5, now - pd.Timedelta(minutes=5)))
+    assert bt._watchdog_losses(now.to_pydatetime()) == 0

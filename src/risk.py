@@ -17,6 +17,17 @@ from .notifier import TelegramNotifier  # NEW import
 import threading
 
 
+def trailing_losses(profits) -> int:
+    """Losing results at the end of `profits` (oldest first, net of costs): the watchdog's count, shared by live and the backtester."""
+    count = 0
+    for p in reversed(list(profits)):
+        if p < 0:
+            count += 1
+        else:
+            break
+    return count
+
+
 class RiskManager:
     """
     RiskManager handles dynamic position sizing, SL/TP, portfolio exposure caps,
@@ -277,13 +288,7 @@ class RiskManager:
                 # skip 0-profit deals (e.g., internal adjustments)
                 if abs(p) > 1e-9:
                     profits.append(p)
-            # count last consecutive negatives from end
-            count = 0
-            for p in reversed(profits):
-                if p < 0:
-                    count += 1
-                else:
-                    break
+            count = trailing_losses(profits)
             logger.debug(f"Consecutive losing closed trades in last {lookback_hours}h: {count}")
             return count
         except Exception as e:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd  # type: ignore
 from loguru import logger  # type: ignore
 import os
+import bisect
 import datetime
 import quantstats as qs  # type: ignore
 import optuna  # type: ignore
@@ -10,7 +11,7 @@ import numpy as np  # type: ignore
 
 from src.config import Cfg
 from src.features import FeatureCfg, ema_distance
-from src.risk import RiskManager
+from src.risk import RiskManager, trailing_losses
 from src.costs import round_trip_pips
 from src.decision import choose_direction
 from src.utils import setup_logging, load_optuna_params, log_symbol_specific_configs
@@ -41,6 +42,7 @@ class HybridBacktester:
         self.blocked_by_auc = 0  # signals the `min_ensemble_auc` gate refused (a run with 0 trades says why)
         self.skipped_for_spread = 0  # entries refused because the fill bar's spread was above `max_spread_atr` x ATR (live does the same)
         self.positions: list[SimPosition] = []
+        self._closed_results: list[tuple] = []  # (exit time, net P&L) of closed trades, sorted by time
         self.equity_curve = []
         lock = threading.Lock()
         if broker_client is None:
@@ -71,6 +73,21 @@ class HybridBacktester:
         except (TypeError, ValueError):
             raw_price = None
         return bar_spread(raw_price, fallback)
+
+    def _record_close(self, exit_time, pnl) -> None:
+        """Keep each closed trade's (exit time, net P&L) in time order, for `_watchdog_losses`."""
+        if pnl is not None and abs(pnl) > 1e-9:  # live skips zero-profit deals
+            bisect.insort(self._closed_results, (pd.Timestamp(exit_time), float(pnl)))
+
+    def _watchdog_losses(self, now: datetime.datetime, lookback_hours: int = 48) -> int:
+        """Losing trades in a row at the end of the trades closed in the last `lookback_hours` up to `now`, over all symbols: what live's
+        `_count_consecutive_losses` counts from the deal history. The streak must age out: a blocked bot places no trade, so a
+        counter that only a win resets never released the watchdog. Symbols run one after the other, so a trade closed after `now`
+        (another symbol's) is not counted."""
+        now = pd.Timestamp(now)
+        lo = bisect.bisect_left(self._closed_results, (now - pd.Timedelta(hours=lookback_hours),))
+        hi = bisect.bisect_right(self._closed_results, (now, float("inf")))
+        return trailing_losses(pnl for _, pnl in self._closed_results[lo:hi])
 
     def _manage_stops(self, sym: str, row: pd.Series, atr: float):
         """Breakeven at +1R and the ATR trail on the closed bar, by the rule live uses (`next_stop`). Called after the bar's exits, so
@@ -187,6 +204,7 @@ class HybridBacktester:
 
                 # Close the position object (SimPosition)
                 pos.close(price, row.name.to_pydatetime().replace(tzinfo=datetime.timezone.utc), net_pnl, self.equity)
+                self._record_close(pos.exit_time, net_pnl)
 
                 logger.info(
                     f"[{sym}] Closed {pos.direction} position at {pos.exit_price:.5f}. "
@@ -204,6 +222,7 @@ class HybridBacktester:
             net_pnl = gross_pnl - transaction_cost
 
             pos.close(last_price, last_row.name, net_pnl, self.equity + net_pnl)
+            self._record_close(pos.exit_time, net_pnl)
             self.equity += net_pnl
             logger.info(
                 f"[{pos.symbol}] Force-closed open {pos.direction} position at final price {last_price:.5f}. "
@@ -265,7 +284,7 @@ class HybridBacktester:
                 max_losses = getattr(risk_mgr.watchdog_cfg, "max_consecutive_losses", None)
                 if max_losses is not None and max_losses > 0:
                     # Get consecutive losses from the symbol's state within RiskController
-                    consecutive_losses = self.risk_controller.symbol_states[sym].consecutive_losses
+                    consecutive_losses = self._watchdog_losses(now=bar_time.to_pydatetime().replace(tzinfo=datetime.timezone.utc))
                     if consecutive_losses >= max_losses:
                         if risk_mgr.cooldown_until is None:
                             logger.warning(f"[{sym}][{bar_time}] Watchdog: consecutive losses {consecutive_losses} >= threshold {max_losses}. Triggering cooldown.")
@@ -468,6 +487,12 @@ if __name__ == "__main__":
     random.seed(42)
     cfg = Cfg.from_yaml("config.yaml")
     setup_logging(level=cfg.logging["level"], to_file=cfg.logging["to_file"], rotate=cfg.logging["rotate"], retention=cfg.logging["retention"])
+    # one log file per run, whatever `logging.to_file` says, so a finished run can be read back from a known path
+    run_log = os.path.join("logs", f"backtest_{'_'.join(s.rstrip('#') for s in cfg.symbols)}_"
+                                   f"{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.log")
+    os.makedirs("logs", exist_ok=True)
+    logger.add(run_log, level=cfg.logging["level"], enqueue=True)
+    logger.info(f"Backtest log file: {run_log}")
 
     mt5_client = None
     if cfg.data_source == "mt5":
