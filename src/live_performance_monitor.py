@@ -27,18 +27,11 @@ class LivePerformanceMonitor:
         self.cfg = cfg
         self.closed_trades: deque[ClosedTrade] = deque()  # Use deque for efficient appending/popping
         self.equity_curve: deque[Tuple[datetime.datetime, float]] = deque()
-        self.peak_equity: float = cfg.initial_equity  # Assuming initial_equity is set in Cfg or passed
+        self.peak_equity: float = cfg.initial_equity
         self.current_equity: float = cfg.initial_equity
         self.last_check_time: Optional[datetime.datetime] = None
         self.last_ensemble_auc: float = 0.0  # To track the latest AUC from retraining
         self.account_id: Optional[str] = None  # "login@server"; set before load_state so a state file is only used on its own account
-
-        # Ensure initial_equity is set in Cfg or handle it
-        if not hasattr(cfg, 'initial_equity'):
-            logger.warning("Cfg does not have 'initial_equity'. Initializing with 100.0.")
-            self.cfg.initial_equity = 100.0
-            self.peak_equity = 100.0
-            self.current_equity = 100.0
 
         logger.info(f"LivePerformanceMonitor initialized with initial equity: {self.current_equity}")
 
