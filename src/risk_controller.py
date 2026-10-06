@@ -326,19 +326,15 @@ class RiskController:
             return None
         return vol / price
 
-    def _calculate_rule_scale(self, symbol: str, context: Dict[str, Any]) -> float:
+    def _scale_factors(self, symbol: str, context: Dict[str, Any]) -> tuple:
         """
-        Computes a rule-based scaling factor (between 0 and 1, inclusive) based on
-        various performance and market context variables such as volatility, drawdown,
-        and consecutive losses. This scale is applied to certain risk parameters
-        to dynamically adjust risk exposure.
+        The three rule-based factors, each in (0, 1]: volatility, drawdown from the equity peak, and the loss streak.
+        Returns (vol_scale, drawdown_scale, consec_scale). Callers combine them: the stop uses the first (`_stop_scale`), the trade's
+        risk the other two (`_risk_scale`), and `_calculate_rule_scale` is the product.
 
         Args:
-            symbol: The trading symbol for which to calculate the rule scale.
+            symbol: The trading symbol the factors are for.
             context: A dictionary containing current market and performance context.
-
-        Returns:
-            A float representing the calculated rule scale, typically between 0.01 and 1.0.
         """
         sym_state = self.symbol_states[symbol]
         ts_cfg = self.cfg.thompson_sampling
@@ -350,29 +346,40 @@ class RiskController:
         max_drawdown = 1.0 - (equity / peak_equity) if peak_equity is not None and peak_equity > 0 else 0.0
         consecutive_losses = sym_state.consecutive_losses
 
-        rule_scale = 1.0
-
+        vol_scale = 1.0
         # 1. Inverse Volatility Scale
         vol_threshold = float(self.cfg.get_symbol_value(symbol, "vol_threshold", ts_cfg.vol_threshold) or 0.0)
         if vol is not None and vol_threshold > 0:  # Avoid division by zero
-            inverse_vol_scale = min(1.0, vol_threshold / vol + 0.5)  # Example scaling
-            rule_scale *= inverse_vol_scale
+            vol_scale = min(1.0, vol_threshold / vol + 0.5)  # Example scaling
 
         # 2. Drawdown Scale
+        drawdown_scale = 1.0
         if max_drawdown > 0 and ts_cfg.dd_cut_multiplier > 0:
             drawdown_scale = max(0.1, 1.0 - ts_cfg.dd_cut_multiplier * max_drawdown)
-            rule_scale *= drawdown_scale
 
         # 3. Consecutive Loss Scale
+        consec_scale = 1.0
         if consecutive_losses > 0 and ts_cfg.consec_loss_cut > 0:
             consec_scale = max(0.1, 1.0 - ts_cfg.consec_loss_cut * consecutive_losses / 5.0)  # Divide by 5 for example
-            rule_scale *= consec_scale
 
-        # Ensure rule_scale is within (0, 1]
-        rule_scale = np.clip(rule_scale, 0.01, 1.0)  # Min scale of 0.01 to avoid zeroing out
+        logger.debug(f"[{symbol}] Scales: vol {vol_scale:.2f}, drawdown {drawdown_scale:.2f} (DD:{max_drawdown:.2%}), losses {consec_scale:.2f} (CL:{consecutive_losses})")
+        return vol_scale, drawdown_scale, consec_scale
 
-        logger.debug(f"[{symbol}] Rule Scale: {rule_scale:.2f} (Vol:{vol}, DD:{max_drawdown:.2%}, CL:{consecutive_losses})")
-        return float(rule_scale)
+    def _calculate_rule_scale(self, symbol: str, context: Dict[str, Any]) -> float:
+        """The product of the volatility, drawdown and loss-streak scales, clipped to [0.01, 1]. Since fix 87 only the volatility scale
+        shapes the stop (`_stop_scale`); the other two lower the risk (`_risk_scale`). This product is what is logged as `rule_scale`."""
+        vol_scale, drawdown_scale, consec_scale = self._scale_factors(symbol, context)
+        return float(np.clip(vol_scale * drawdown_scale * consec_scale, 0.01, 1.0))
+
+    def _stop_scale(self, symbol: str, context: Dict[str, Any]) -> float:
+        """Scale of the stop and trailing distance: the volatility factor only, clipped to [0.01, 1]."""
+        return float(np.clip(self._scale_factors(symbol, context)[0], 0.01, 1.0))
+
+    def _risk_scale(self, symbol: str, context: Dict[str, Any]) -> float:
+        """Multiplier of the trade's risk: the drawdown and loss-streak factors, in [0.01, 1]. Sizing is risk-based (lots = risk / stop),
+        so shrinking the STOP in a drawdown bought more lots and a larger share of the spread, and lowered nothing."""
+        _, drawdown_scale, consec_scale = self._scale_factors(symbol, context)
+        return float(np.clip(drawdown_scale * consec_scale, 0.01, 1.0))
 
     def _context_vector(self, symbol: str, context: Dict[str, Any]) -> np.ndarray:
         """The contextual bandit's inputs, CONTEXT_VECTOR_DIM of them."""
@@ -458,9 +465,11 @@ class RiskController:
 
         # 2. Apply rule-based scaling
         rule_scale = self._calculate_rule_scale(symbol, context)
+        stop_scale = self._stop_scale(symbol, context)    # volatility only: the stop keeps the multiple the bandit chose
+        risk_scale = self._risk_scale(symbol, context)    # drawdown and loss streak lower the risk (fix 87)
 
-        # Apply rule_scale to ATR-related parameters
-        atr_choice = sym_state.atr_grid_values[atr_idx] * rule_scale
+        # Apply the stop scale to ATR-related parameters
+        atr_choice = sym_state.atr_grid_values[atr_idx] * stop_scale
         # For min_prob, scaling might be different or not applied directly
         min_prob_long_choice = sym_state.min_prob_grid_long_values[min_prob_long_idx]
         min_prob_short_choice = sym_state.min_prob_grid_short_values[min_prob_short_idx]
@@ -472,7 +481,7 @@ class RiskController:
 
         # Use the symbol-specific value for the trailing stop multiplier
         base_trailing_mult = self.cfg.get_symbol_value(symbol, 'trailing_atr_mult', 1.0)
-        trailing_atr_mult_choice = base_trailing_mult * rule_scale
+        trailing_atr_mult_choice = base_trailing_mult * stop_scale
 
         logger.debug(f"[{symbol}] TS Params: ATR={atr_choice:.2f} (idx:{atr_idx}), MinProbLong={min_prob_long_choice:.2f} (idx:{min_prob_long_idx}), MinProbShort={min_prob_short_choice:.2f} (idx:{min_prob_short_idx}), RuleScale={rule_scale:.2f}")
 
@@ -496,6 +505,7 @@ class RiskController:
             "min_prob_long_idx": min_prob_long_idx,
             "min_prob_short_idx": min_prob_short_idx,
             "rule_scale": rule_scale,
+            "risk_scale": risk_scale,
             "is_exploratory": is_exploratory,
             "exploration_risk_mult": exploration_risk_mult,
             "context_vector": x.tolist() if 'x' in locals() else None,

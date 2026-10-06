@@ -122,7 +122,7 @@ class HybridBacktester:
         lots, effective_risk = self.risk_manager.position_size(
             self.equity, atr, auc, total_open_risk=self._total_open_risk(), symbol=sym,
             exploration_mult=params.get("exploration_risk_mult", 1.0), ac_multiplier=params.get("ac_multiplier", 1.0),
-            sl_distance=abs(price - sl))
+            risk_scale=params.get("risk_scale", 1.0), sl_distance=abs(price - sl))
         if lots <= 0:
             self.skipped_for_size += 1
             logger.info(f"[{sym}] Trade skipped due to risk limits or position size zero.")

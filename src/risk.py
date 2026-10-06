@@ -121,7 +121,7 @@ class RiskManager:
         return float(val)
 
     # ---------- Position sizing ----------
-    def position_size(self, equity: float, atr: float, auc_score: float, total_open_risk: float = 0.0, symbol: str | None = None, exploration_mult: float = 1.0, ac_multiplier: float = 1.0, sl_distance: float | None = None) -> tuple[float, float]:
+    def position_size(self, equity: float, atr: float, auc_score: float, total_open_risk: float = 0.0, symbol: str | None = None, exploration_mult: float = 1.0, ac_multiplier: float = 1.0, sl_distance: float | None = None, risk_scale: float = 1.0) -> tuple[float, float]:
         """
         Calculates position size from the stop distance and the configured risk.
         total_open_risk is the MONEY (account currency) currently at risk in open positions; the portfolio cap
@@ -148,8 +148,8 @@ class RiskManager:
 
         open_risk_fraction = float(total_open_risk) / float(equity) if equity > 0 else 1.0
         max_risk_allowed = max(0.0, float(self.risk_cfg.max_portfolio_risk) - open_risk_fraction)
-        # Streak and exploration multipliers apply BEFORE the cap, so the cap is a hard limit.
-        effective_risk = min(risk_per_trade * exploration_mult * ac_multiplier, max_risk_allowed)
+        # Streak, exploration and drawdown (risk_scale) multipliers apply BEFORE the cap, so the cap is a hard limit.
+        effective_risk = min(risk_per_trade * exploration_mult * ac_multiplier * risk_scale, max_risk_allowed)
 
         risk_amt = float(equity) * float(effective_risk)
 

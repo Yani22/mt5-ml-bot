@@ -199,6 +199,7 @@ class SymbolProcessor:
                     total_open_risk=total_open_risk, symbol=self.symbol,
                     exploration_mult=dynamic_risk_params.get("exploration_risk_mult", 1.0),
                     ac_multiplier=dynamic_risk_params.get("ac_multiplier", 1.0),
+                    risk_scale=dynamic_risk_params.get("risk_scale", 1.0),
                     sl_distance=abs(price - sl)
                 )
 

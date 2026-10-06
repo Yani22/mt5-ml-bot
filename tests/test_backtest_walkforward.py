@@ -276,3 +276,13 @@ def test_the_watchdog_window_edges_and_the_future(monkeypatch, tmp_path):
     assert bt._watchdog_losses(now.to_pydatetime()) == 2
     closed(bt, (0.5, now - pd.Timedelta(minutes=5)))
     assert bt._watchdog_losses(now.to_pydatetime()) == 0
+
+
+def test_the_backtester_sizes_with_the_risk_scale_of_the_params(monkeypatch, tmp_path):
+    """A drawdown lowers the risk of the trade (fix 87): with a risk scale far below one minimum lot the signal is skipped at sizing."""
+    for scale, trades in ((1.0, 1), (0.0001, 0)):
+        bt = make_bt(monkeypatch, tmp_path)
+        bt.risk_controller.get_params = lambda sym, context, s=scale: dict(PARAMS, risk_scale=s)
+        frame, models, _ = build(p={40: 0.9})
+        assert len(run(bt, frame, models)) == trades
+        assert bt.skipped_for_size == 1 - trades
