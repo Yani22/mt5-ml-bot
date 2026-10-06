@@ -163,7 +163,7 @@ risk:
   min_prob_long: 0.55         # 0.51-0.55 = low confidence, 0.56-0.65 = high
   min_prob_short: 0.55        # 0.51-0.55 = low confidence, 0.56-0.65 = high
   block_on_drawdown: 0.2      # pause if drawdown from equity peak exceeds this fraction; 1.0 = disabled
-  min_auc_improvement: 0.0025 # minimum AUC improvement to accept a retrained model
+  min_auc_improvement: 0.0025 # unused since fix 65 (a retrained model always replaces the old one)
   max_drawdown_for_pruning: 1.0 # Max drawdown allowed before Optuna trial pruning; 1.0 = disabled
   session_filter:
     start: "00:00"
@@ -205,7 +205,6 @@ startup_logging: true             # log key settings at bot launch for transpare
 # Overrides any top-level setting for one symbol. Retraining times are staggered so symbols don't retrain at once.
 symbol_overrides:
   "USDJPY#":
-    retrain_time_utc: "01:02"
     atr_grid: [1.0, 1.5, 2.0, 2.5]
     min_prob_grid_long: [0.53, 0.55, 0.57, 0.60, 0.63]
     min_prob_grid_short: [0.53, 0.55, 0.57, 0.60, 0.63]
