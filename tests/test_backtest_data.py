@@ -58,3 +58,35 @@ def test_a_bar_without_an_open_is_an_error_not_a_nan_fill(monkeypatch, tmp_path)
     monkeypatch.setattr(backtest_data, "get_training_data", fake_training(seen, idx))
     with pytest.raises(ValueError, match="open"):
         backtest_data.load_backtest_frame(Cfg(), "USDJPY#", FeatureCfg(), 12, 0.0002, raw_dir=str(tmp_path))
+
+
+def fake_training_with_warmup(idx, warmup=5):
+    """The real pipeline: X and the labels cover every bar (leading rows have NaN features), `data` is dropna'd and starts later."""
+    def get_training_data(cfg, sym, **kw):
+        data = pd.DataFrame({"close": 1.0, "high": 1.0, "low": 1.0}, index=idx[warmup:])
+        X = pd.DataFrame({"f": 1.0}, index=idx)
+        X.iloc[:warmup] = float("nan")
+        return data, X, pd.Series(1, index=idx), pd.Series(0, index=idx)
+    return get_training_data
+
+
+def test_bars_x_and_labels_share_one_index_when_the_features_have_a_warmup(monkeypatch, tmp_path):
+    """The backtester reads bars and X by the same position. On USDJPY# the bars started 600 rows after X (the feature warm-up), so
+    every fill and exit came from bars 50 hours after the decision bar, and the loop ran past the end of the bars."""
+    idx = write(tmp_path)
+    monkeypatch.setattr(backtest_data, "get_training_data", fake_training_with_warmup(idx))
+    frame = backtest_data.load_backtest_frame(Cfg(), "USDJPY#", FeatureCfg(), 12, 0.0002, raw_dir=str(tmp_path))
+    assert frame.bars.index.equals(frame.X.index) and frame.X.index.equals(frame.y_long.index) and frame.X.index.equals(frame.y_short.index)
+    assert frame.bars.index[0] == frame.X.index[0] and len(frame.bars) == len(frame.X)
+    assert not frame.X.isna().any().any()           # the warm-up rows with NaN features are not traded on
+
+
+def test_a_misaligned_pipeline_result_is_an_error_not_a_shifted_backtest(monkeypatch, tmp_path):
+    idx = write(tmp_path)
+
+    def broken(cfg, sym, **kw):
+        data = pd.DataFrame({"close": 1.0, "high": 1.0, "low": 1.0}, index=idx[5:])
+        return data, pd.DataFrame({"f": 1.0}, index=idx[10:]), pd.Series(1, index=idx[:-3]), pd.Series(0, index=idx)
+    monkeypatch.setattr(backtest_data, "get_training_data", broken)
+    with pytest.raises(ValueError, match="index"):
+        backtest_data.load_backtest_frame(Cfg(), "USDJPY#", FeatureCfg(), 12, 0.0002, raw_dir=str(tmp_path))
