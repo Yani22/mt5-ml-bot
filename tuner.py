@@ -1,5 +1,7 @@
 # tuner.py
 from __future__ import annotations
+import hashlib
+import json
 import os
 import pandas as pd  # type: ignore
 import optuna  # type: ignore
@@ -10,7 +12,7 @@ from joblib import Parallel, delayed  # type: ignore
 import traceback  # Added for detailed error logging
 
 from src.config import Cfg, RiskCfg
-from src.features import FeatureCfg, add_relative_features, build_dynamic_features
+from src.features import FeatureCfg, add_relative_features, build_dynamic_features, model_matrix
 from src.data_colab import fetch_bars, merge_features_labels
 from src.utils import get_training_data, save_optuna_params
 from src.ensemble import Ensemble
@@ -58,11 +60,32 @@ from src.labels import generate_labels  # NEW IMPORT
 # ... (rest of imports) ...
 
 
+def fold_auc(y_val: pd.Series, p_val) -> float:
+    """AUC of one validation block. A fitted model drops the rows it cannot score (warmup NaN), so its output can be shorter
+    than the labels: score the labels it did score."""
+    if isinstance(p_val, pd.Series):
+        y_val = y_val.reindex(p_val.index)
+    return roc_auc_score(y_val, p_val)
+
+
+def study_signature(label: tuple, feature_ranges: dict, models: list, columns: list, cv_samples: int, roc_lags_options=None) -> str:
+    """A short hash of everything a trial's score depends on: the (fixed) label, the feature and model search spaces and
+    defaults, the model's input columns and the CV size. A change starts a new study instead of adding trials to an old one."""
+    payload = json.dumps({"label": list(label), "features": feature_ranges, "models": models, "columns": sorted(columns),
+                          "cv_samples": cv_samples, "roc_lags_options": roc_lags_options}, sort_keys=True, default=str)
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:10]
+
+
+def study_name_for(sym: str, history_bars: int, signature: str) -> str:
+    return f"feature_model_tuning_{sym.replace('#', '_')}_history_{history_bars}_{signature}"
+
+
 def objective(trial, df: pd.DataFrame, static_features: pd.DataFrame, symbol: str):
     try:
-        # --- 0. Suggest Label Parameters ---
-        prediction_horizon = trial.suggest_categorical("prediction_horizon", [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15])
-        min_pct_change = trial.suggest_categorical("min_pct_change", [0.00005, 0.00006, 0.00007, 0.00008, 0.00009, 0.0001, 0.0002])
+        # --- 0. The label is fixed by the config, not tuned: AUCs of different label definitions are not comparable, and
+        # tuning them picks the label that is easiest to predict, not one worth trading (C3).
+        prediction_horizon = cfg.prediction_horizon
+        min_pct_change = cfg.features.min_pct_change
 
         # --- 1. Suggest Feature Parameters ---
         feature_params_raw = suggest_params(trial, "feature", yaml_cfg.get("features", {}))
@@ -108,7 +131,7 @@ def objective(trial, df: pd.DataFrame, static_features: pd.DataFrame, symbol: st
         n_splits_calculated = min(5, max(2, len(X_train) // cv_samples_per_split))
         logger.debug(f"Calculated n_splits for TimeSeriesSplit: {n_splits_calculated}")
 
-        tscv = TimeSeriesSplit(n_splits=n_splits_calculated)
+        tscv = TimeSeriesSplit(n_splits=n_splits_calculated, gap=int(prediction_horizon))   # labels look this far ahead
         aucs = []
         for i, (tr_idx, val_idx) in enumerate(tscv.split(X_train)):
             X_tr, X_val = X_train.iloc[tr_idx], X_train.iloc[val_idx]
@@ -116,7 +139,7 @@ def objective(trial, df: pd.DataFrame, static_features: pd.DataFrame, symbol: st
 
             ens.fit(X_tr, y_tr, cv=False)
             p_val = ens.predict_proba(X_val)
-            auc = roc_auc_score(y_val, p_val)
+            auc = fold_auc(y_val, p_val)
             aucs.append(auc)
 
             trial.report(1 - auc, i)
@@ -132,6 +155,20 @@ def objective(trial, df: pd.DataFrame, static_features: pd.DataFrame, symbol: st
         tb_str = traceback.format_exc()
         logger.error(f"--- Trial Failed ---\nError: {e}\nTraceback:\n{tb_str}")
         return float('inf')
+
+
+def structure_best_params(best_params_flat: dict) -> dict:
+    """Splits Optuna's flat parameter names into the tuned-params file layout. The label (horizon, threshold) is NOT written:
+    the tuner does not tune it (C3), and a copy of today's config values would silently override a later edit of
+    `prediction_horizon` for every reader of the file while other code reads the config directly."""
+    structured = {"features": {}, "models": {}}
+    for key, value in best_params_flat.items():
+        if key.startswith("feature_"):
+            structured["features"][key.replace("feature_", "", 1)] = value
+        elif key.startswith("model_"):
+            parts = key.split('_')
+            structured["models"].setdefault(parts[1], {})['_'.join(parts[2:])] = value
+    return structured
 
 
 def run_tuning_for_symbol(sym: str):
@@ -156,7 +193,13 @@ def run_tuning_for_symbol(sym: str):
     # --- 2. Run Optuna Study ---
     objective_partial = partial(objective, df=df, static_features=static_features, symbol=sym)
 
-    study_name = f"feature_model_tuning_{sym.replace('#', '_')}_history_{cfg.history_bars}"
+    # One study per feature set, label and search space: an old study with the same name would keep adding trials scored on other
+    # features (C3). The columns are the model's input columns for the default feature config.
+    columns = list(model_matrix(add_relative_features(build_dynamic_features(df, static_features, FeatureCfg(), sym), df)).columns)
+    signature = study_signature((cfg.prediction_horizon, cfg.features.min_pct_change), yaml_cfg.get("features", {}),
+                                yaml_cfg.get("models", []), columns, yaml_cfg.get("cv_samples_per_split", 300),
+                                yaml_cfg.get("roc_lags_options"))
+    study_name = study_name_for(sym, cfg.history_bars, signature)
     storage_path = f"sqlite:///{os.path.join(PARAMS_DIR, study_name)}.db"
 
     pruner = optuna.pruners.MedianPruner()
@@ -166,25 +209,7 @@ def run_tuning_for_symbol(sym: str):
     study.optimize(objective_partial, n_trials=n_trials)
 
     # --- 5. Process and Save Best Parameters ---
-    best_params_flat = study.best_params
-    best_params_structured = {
-        "features": {},
-        "models": {},
-        "prediction_horizon": best_params_flat.get("prediction_horizon", cfg.prediction_horizon),
-        "min_pct_change": best_params_flat.get("min_pct_change", cfg.features.min_pct_change),
-    }
-
-    for key, value in best_params_flat.items():
-        if key.startswith("feature_"):
-            param_name = key.replace("feature_", "")
-            best_params_structured["features"][param_name] = value
-        elif key.startswith("model_"):
-            parts = key.split('_')
-            model_name = parts[1]
-            param_name = '_'.join(parts[2:])
-            if model_name not in best_params_structured["models"]:
-                best_params_structured["models"][model_name] = {}
-            best_params_structured["models"][model_name][param_name] = value
+    best_params_structured = structure_best_params(study.best_params)
 
     param_file = save_optuna_params(sym, best_params_structured)
 
