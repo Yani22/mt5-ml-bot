@@ -223,13 +223,23 @@ class Execution:
                         direction = "long" if pos.type == mt5.POSITION_TYPE_BUY else "short"
                         entry_time_dt = datetime.datetime.fromtimestamp(pos.time, tz=datetime.timezone.utc)
 
+                        pip_size = self.risk.get_pip_size(pos.symbol)
+                        pip_value = self.risk.get_pip_value(pos.symbol)
+                        # What the cap counts: the money at the broker stop. No stop (sl 0) would read as a distance of the
+                        # whole price, so that case takes the nominal risk instead. No `risk_amount` is stored: the arms of
+                        # this trade are unknown (atr_idx -1), so the bandits must not learn from it.
+                        has_stop = bool(pos.sl) and float(pos.sl) > 0
+                        stop_fields = self._stop_fields(pos.price_open, pos.sl, pos.volume, None, pip_size, pip_value) if has_stop else {}
+                        equity = float(getattr(self.monitor, "current_equity", 0.0) or 0.0)
+                        nominal = equity * self.risk._get_dynamic_value(self.risk.risk_cfg.dynamic_risk, 0.5, getattr(self.risk.risk_cfg, "risk_per_trade", 0.005))
+                        adopted_risk = self._cache_risk(pos.symbol, stop_fields, nominal)
                         self.risk.open_positions_cache[pos.ticket] = {
-                            "risk": 0.0, "ticket": pos.ticket, "symbol": pos.symbol,
+                            "risk": adopted_risk, "ticket": pos.ticket, "symbol": pos.symbol,
                             "entry_price": pos.price_open, "direction": direction, "lots": pos.volume,
                             "entry_time": entry_time_dt, "atr": 0.0, "entry_auc": 0.5,
                             "risk_fraction": 0.0, "entry_equity": 0.0, "sl": pos.sl, "tp": pos.tp,
-                            "pip_size": self.risk.get_pip_size(pos.symbol),
-                            "pip_value": self.risk.get_pip_value(pos.symbol),
+                            "pip_size": pip_size,
+                            "pip_value": pip_value,
                             "atr_idx": -1, "min_prob_long_idx": -1, "min_prob_short_idx": -1,
                             "adx": 0.0, "macd_diff": 0.0, "volatility_10": 0.0, "dist_from_ema_200": 0.0,
                             "inter_market_feature": 0.0, "mta_feature": 0.0
