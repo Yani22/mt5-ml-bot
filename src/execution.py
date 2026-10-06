@@ -15,8 +15,6 @@ from typing import List, Dict, Optional, Any
 from .ensemble import Ensemble
 from .risk import RiskManager
 import pandas as pd  # type: ignore
-import pandas as pd
-from loguru import logger
 import datetime
 from .notifier import TelegramNotifier
 

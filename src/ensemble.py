@@ -13,7 +13,7 @@ from sklearn.isotonic import IsotonicRegression  # type: ignore
 from loguru import logger  # type: ignore
 from sklearn.metrics import roc_auc_score, f1_score, precision_score, recall_score  # type: ignore
 from sklearn.model_selection import TimeSeriesSplit  # type: ignore
-from dataclasses import asdict, field
+from dataclasses import asdict
 from .config import TradingCostsDefaultsCfg
 
 
@@ -241,7 +241,7 @@ class Ensemble:
 
         # placeholder for threshold (after optimization)
         self.best_threshold_: Optional[float] = None
-        self.promising_thresholds_: List[float] = field(default_factory=list)  # NEW: for Thompson Sampling grids
+        self.promising_thresholds_: List[float] = []  # NEW: for Thompson Sampling grids
 
     def save(self, path: str):
         """Saves the entire ensemble to a directory."""

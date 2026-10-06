@@ -6,8 +6,6 @@ except ImportError:  # not available on Linux; only needed on the live (Windows)
 from .config import Cfg
 import pandas as pd  # type: ignore
 import numpy as np  # type: ignore
-from loguru import logger  # type: ignore
-from .config import Cfg
 import copy
 import datetime
 import math
