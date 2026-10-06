@@ -109,3 +109,30 @@ def test_a_missing_price_warns_once_per_symbol():
     jpy = [x for x in lines if JPY in x and "No usable price" in x]
     eur = [x for x in lines if EUR in x and "No usable price" in x]
     assert len(jpy) == 1 and len(eur) == 1
+
+
+# ---- T6: macd_diff is in price units; the contextual input is divided by price ---------------------------------
+
+def _x_for(rc, sym, ctx, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(rc.symbol_states[sym].contextual_bandit, "sample_arm", lambda x: seen.setdefault("x", np.array(x, dtype=float)) is None or 0)
+    rc.get_params(sym, {"ensemble_auc": 0.6, **ctx})
+    return seen["x"]
+
+
+def _ctx_rc():
+    rc = make_rc()
+    rc.cfg.thompson_sampling.contextual_enabled = True
+    return RiskController(rc.cfg)
+
+
+def test_the_macd_input_is_the_same_on_any_price_scale(monkeypatch):
+    rc = _ctx_rc()
+    eur = _x_for(rc, EUR, {"vol": 0.0005, "price": 1.08, "macd_diff": 1e-4 * 1.08}, monkeypatch)[6]
+    jpy = _x_for(rc, JPY, {"vol": 0.057, "price": 150.0, "macd_diff": 1e-4 * 150.0}, monkeypatch)[6]
+    assert eur == pytest.approx(0.1) and jpy == pytest.approx(0.1)
+
+
+def test_the_macd_input_is_zero_without_a_price(monkeypatch):
+    rc = _ctx_rc()
+    assert _x_for(rc, JPY, {"vol": 0.057, "macd_diff": 0.02}, monkeypatch)[6] == 0.0

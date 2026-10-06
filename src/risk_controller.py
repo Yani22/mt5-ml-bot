@@ -269,6 +269,15 @@ class RiskController:
     def update_last_daily_retrain_date(self, symbol: str, date: datetime.date):
         self.last_daily_retrain_date[symbol] = date
 
+    @staticmethod
+    def _price(context: Dict[str, Any]) -> Optional[float]:
+        """The decision bar's close from the context, or None when it is missing, not a number or not positive."""
+        try:
+            price = float(context.get("price"))
+        except (TypeError, ValueError):
+            return None
+        return price if np.isfinite(price) and price > 0 else None
+
     def _relative_vol(self, symbol: str, context: Dict[str, Any]) -> Optional[float]:
         """ATR as a fraction of the decision bar's close (price-scale free, so it means the same on EURUSD, USDJPY or gold).
         None when the context has no usable ATR or price: callers then skip the volatility scaling instead of using a price-unit ATR."""
@@ -276,11 +285,8 @@ class RiskController:
             vol = float(context.get("vol", 0.0))
         except (TypeError, ValueError):
             vol = 0.0
-        try:
-            price = float(context.get("price"))
-        except (TypeError, ValueError):
-            price = float("nan")
-        if not (np.isfinite(vol) and np.isfinite(price) and price > 0 and vol > 0):
+        price = self._price(context)
+        if not (np.isfinite(vol) and price is not None and vol > 0):
             if vol > 0 and not self._warned_no_price.get(symbol):
                 self._warned_no_price[symbol] = True
                 logger.warning(f"[{symbol}] No usable price in the risk context: the volatility scaling of the stop is skipped.")
@@ -386,7 +392,8 @@ class RiskController:
 
             # New context features
             adx = float(context.get("adx", 0.0))
-            macd_diff = float(context.get("macd_diff", 0.0))
+            price = self._price(context)
+            macd_diff = float(context.get("macd_diff", 0.0)) / price if price is not None else 0.0  # price units -> fraction of price
             volatility_10 = float(context.get("volatility_10", 0.0))
             dist_from_ema_200 = float(context.get("dist_from_ema_200", 0.0))
 
