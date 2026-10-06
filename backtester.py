@@ -479,8 +479,9 @@ class HybridBacktester:
                 feature_cfg = FeatureCfg(**feature_params)
 
                 # NEW: Get tuned prediction_horizon and min_pct_change, falling back to global defaults
-                tuned_prediction_horizon = optuna_params.get('prediction_horizon', self.cfg.prediction_horizon)
-                tuned_min_pct_change = optuna_params.get('min_pct_change', self.cfg.features.min_pct_change)
+                tuned = optuna_params or {}  # None when there is no tuned-params file
+                tuned_prediction_horizon = tuned.get('prediction_horizon', self.cfg.prediction_horizon)
+                tuned_min_pct_change = tuned.get('min_pct_change', self.cfg.features.min_pct_change)
 
                 # Load context data
                 from src.data_manager import DataManager

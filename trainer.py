@@ -60,8 +60,9 @@ def retrain_symbol(cfg: Cfg, symbol: str, dry_run: bool = True, mt5_instance=Non
     optuna_params = load_optuna_params(symbol, cfg)
     feature_params = optuna_params.get('features', {}) if optuna_params else {}
     feature_cfg = FeatureCfg(**feature_params)
-    tuned_prediction_horizon = optuna_params.get('prediction_horizon', cfg.prediction_horizon)  # Get tuned prediction_horizon
-    tuned_min_pct_change = optuna_params.get('min_pct_change', cfg.features.min_pct_change)  # Get tuned min_pct_change
+    tuned = optuna_params or {}  # None when there is no tuned-params file: use the config values
+    tuned_prediction_horizon = tuned.get('prediction_horizon', cfg.prediction_horizon)  # Get tuned prediction_horizon
+    tuned_min_pct_change = tuned.get('min_pct_change', cfg.features.min_pct_change)  # Get tuned min_pct_change
 
     logger.info(f"[{symbol}] Loading full history via DataManager...")
     dm = DataManager(cfg)

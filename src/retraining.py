@@ -37,8 +37,9 @@ def run_retraining_in_background(cfg, sym, feature_cfg, dry_run, notifier, optun
         data_manager = DataManager(cfg)
 
         # Retrieve tuned prediction_horizon and min_pct_change for this symbol
-        tuned_prediction_horizon = optuna_params_per_symbol[sym].get('prediction_horizon', cfg.prediction_horizon)
-        tuned_min_pct_change = optuna_params_per_symbol[sym].get('min_pct_change', feature_cfg.min_pct_change)
+        tuned = optuna_params_per_symbol[sym] or {}   # None when there is no tuned-params file: use the config values
+        tuned_prediction_horizon = tuned.get('prediction_horizon', cfg.prediction_horizon)
+        tuned_min_pct_change = tuned.get('min_pct_change', feature_cfg.min_pct_change)
 
         full_data, full_X, _ = data_manager.load_cached(sym, feature_cfg, count=cfg.retraining_window_bars, min_pct_change=tuned_min_pct_change)
 
