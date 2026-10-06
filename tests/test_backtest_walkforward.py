@@ -179,3 +179,35 @@ def test_the_spread_cap_can_be_turned_off_per_symbol(monkeypatch, tmp_path):
     bt.cfg.symbol_overrides = {"USDJPY#": {"max_spread_atr": 0}}
     frame, models, _ = build(p={40: 0.9}, edits={(41, "spread"): 150.0})
     assert len(run(bt, frame, models)) == 1 and bt.skipped_for_spread == 0
+
+
+# ---- the risk gates are re-checked on the bar a cooldown expires (live `should_trade` clears an expired cooldown FIRST) --------
+
+def test_a_drawdown_past_the_block_keeps_the_backtester_out_after_each_cooldown_expires(monkeypatch, tmp_path):
+    """Equity 7,000 against a peak of 10,000 (30% > the block). The cooldown (1 hour = 12 bars) starts on the first decision bar and
+    expires on bar 52; that bar must start a new one, not decide. Sized at 1% of 7,000 a trade is possible, so a missing position
+    is the gate, not the sizing."""
+    bt = make_bt(monkeypatch, tmp_path)
+    bt.equity = 7_000.0
+    bt.risk_manager.equity_peak = 10_000.0
+    bt.risk_manager.watchdog_cfg.cooldown_hours = 1.0
+    frame, models, _ = build(p={i: 0.9 for i in range(40, N)})
+    assert run(bt, frame, models) == []
+    assert bt.signals == 0 and bt.pending == {} and bt.risk_manager.cooldown_until is not None
+
+
+def test_a_loss_streak_cooldown_is_started_again_on_the_bar_it_expires(monkeypatch, tmp_path):
+    """The consecutive-loss watchdog uses the same `if cooldown_until is None` pattern as the drawdown block and had the same leak."""
+    bt = make_bt(monkeypatch, tmp_path)
+    bt.risk_manager.watchdog_cfg.enabled = True
+    bt.risk_manager.watchdog_cfg.max_consecutive_losses = 3
+    bt.risk_manager.watchdog_cfg.cooldown_hours = 1.0
+    bt.risk_controller.symbol_states["USDJPY#"].consecutive_losses = 5
+    frame, models, _ = build(p={i: 0.9 for i in range(40, N)})
+    assert run(bt, frame, models) == [] and bt.signals == 0
+
+
+def test_without_a_drawdown_or_a_loss_streak_the_gates_let_the_decision_through(monkeypatch, tmp_path):
+    bt = make_bt(monkeypatch, tmp_path)
+    frame, models, _ = build(p={40: 0.9})
+    assert len(run(bt, frame, models)) == 1

@@ -251,6 +251,9 @@ class HybridBacktester:
                 break  # no next bar to fill a decision on
 
             # --- Drawdown and Cooldown Check ---
+            # Clear a cooldown that has just expired BEFORE the checks below (live `should_trade` does the same), so a drawdown or
+            # a loss streak that still holds starts a new cooldown on this bar instead of letting this bar decide.
+            risk_mgr.cooldown_active(now=bar_time.to_pydatetime().replace(tzinfo=datetime.timezone.utc))
             risk_mgr._update_equity_peak(self.equity)
             if risk_mgr._drawdown_exceeded(self.equity):
                 if risk_mgr.cooldown_until is None:  # Only trigger if not already in cooldown
