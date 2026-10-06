@@ -13,7 +13,11 @@ from src.features import FeatureCfg
 from src.risk import RiskManager
 from src.costs import round_trip_pips
 from src.decision import choose_direction
-from src.utils import get_training_data, load_ensemble, save_ensemble, setup_logging, safe_retrain_ensemble, load_optuna_params, log_symbol_specific_configs
+from src.utils import setup_logging, load_optuna_params, log_symbol_specific_configs
+from src.backtest_data import load_backtest_frame
+from src.backtest_fills import bar_spread, entry_price, exit_hit, next_stop
+from src.backtest_models import WalkForwardModels, make_fit_fn
+from src.backtest_symbols import BacktestSymbolClient
 from src.trade import SimPosition
 from src.risk_controller import RiskController
 from src.trade_types import ClosedTrade  # NEW: Import ClosedTrade for backtester
@@ -33,13 +37,18 @@ class HybridBacktester:
         self.signals = 0  # trade signals that reached position sizing
         self.skipped_for_size = 0  # ...of which sizing rejected (lot below broker minimum or risk caps)
         self.consecutive_losses = 0  # NEW: Efficiently track consecutive losses
+        self.pending = {}  # symbol -> the order decided on the previous bar, filled at this bar's open
+        self.blocked_by_auc = 0  # signals the `min_ensemble_auc` gate refused (a run with 0 trades says why)
+        self.skipped_for_spread = 0  # entries refused because the fill bar's spread was above `max_spread_atr` x ATR (live does the same)
         self.positions: list[SimPosition] = []
         self.equity_curve = []
         lock = threading.Lock()
+        if broker_client is None:
+            broker_client = BacktestSymbolClient()  # no terminal: derive the symbol facts (FX with USD only)
         self.risk_manager = RiskManager(cfg, broker_client, lock)
         self.bar_counters = {sym: 0 for sym in cfg.symbols}
         self.risk_controller = RiskController(cfg)  # Instantiate RiskController
-        self.risk_controller.load_state()  # Load previous state if it exists
+        # no `load_state()`: a saved state already knows which arms won on these bars, so a backtest starts with empty bandits
         self.ts_param_history = []  # To store Thompson Sampling parameter evolution
         self.save_state_every_bars = getattr(cfg, "save_ts_state_every_bars", 500)
         ts_ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -49,44 +58,63 @@ class HybridBacktester:
         os.makedirs("results", exist_ok=True)
 
         logger.info(f"Initializing backtester with starting equity: {self.equity}")
-        self.ens_per_symbol_long = {sym: load_ensemble(cfg, sym, "long") for sym in cfg.symbols}
-        self.ens_per_symbol_short = {sym: load_ensemble(cfg, sym, "short") for sym in cfg.symbols}
 
-    def _manage_trailing_stops(self, sym: str, row: pd.Series, atr: float):
-        """Simulated version of the live trailing stop logic."""
-        risk_cfg = self.risk_manager.risk_cfg
-        if not (risk_cfg.breakeven_at_1R or risk_cfg.trailing_atr_mult > 0):
-            return  # No trailing logic enabled
+    def _spread_price(self, sym: str, raw_points) -> float:
+        """A bar's spread in price units: the file's points x the symbol's point, or the `trading_costs` spread (pips) when the bar
+        has none (0, NaN, no file)."""
+        info = self.risk_manager.mt5_client.symbol_info(sym)
+        points_per_pip = 10 if getattr(info, "digits", None) in (3, 5) else 1
+        costs = self.cfg.trading_costs.defaults
+        fallback = float(self.cfg.get_symbol_value(sym, "spread_pips", costs.spread_pips)) * points_per_pip * info.point
+        try:
+            raw_price = float(raw_points) * info.point
+        except (TypeError, ValueError):
+            raw_price = None
+        return bar_spread(raw_price, fallback)
 
+    def _manage_stops(self, sym: str, row: pd.Series, atr: float):
+        """Breakeven at +1R and the ATR trail on the closed bar, by the rule live uses (`next_stop`). Called after the bar's exits, so
+        a moved stop first applies on the next bar."""
+        breakeven = bool(self.cfg.get_symbol_value(sym, "breakeven_at_1R", True))
+        trailing = float(self.cfg.get_symbol_value(sym, "trailing_atr_mult", 0.0) or 0.0)
+        if not (breakeven or trailing > 0):
+            return
+        spread = self._spread_price(sym, row.get("spread"))
         for pos in [p for p in self.positions if p.symbol == sym and p.status == "open"]:
-            price = row["close"]
-            new_sl = pos.sl
+            placed_mult = abs(pos.entry_price - pos.initial_sl) / pos.atr if pos.atr else None
+            pos.sl = next_stop(pos.direction, pos.entry_price, pos.sl, pos.atr, placed_mult, row["close"], spread, atr, breakeven, trailing)
 
-            # --- Breakeven Logic ---
-            if risk_cfg.breakeven_at_1R:
-                one_r_price_move = risk_cfg.atr_multiplier_sl * pos.atr
-                if pos.direction == "long" and price >= pos.entry_price + one_r_price_move and pos.sl < pos.entry_price:
-                    new_sl = pos.entry_price
-                    logger.info(f"[{sym}] Moving SL to breakeven for long position at {new_sl:.5f}")
-                elif pos.direction == "short" and price <= pos.entry_price - one_r_price_move and pos.sl > pos.entry_price:
-                    new_sl = pos.entry_price
-                    logger.info(f"[{sym}] Moving SL to breakeven for short position at {new_sl:.5f}")
-
-            # --- ATR Trailing Logic ---
-            if risk_cfg.trailing_atr_mult > 0:
-                trailing_atr_dist = atr * risk_cfg.trailing_atr_mult
-                if pos.direction == "long":
-                    potential_new_sl = price - trailing_atr_dist
-                    if potential_new_sl > new_sl:
-                        new_sl = potential_new_sl
-                        logger.debug(f"[{sym}] Trailing SL for long position to {new_sl:.5f}")
-                else:  # Short position
-                    potential_new_sl = price + trailing_atr_dist
-                    if potential_new_sl < new_sl:
-                        new_sl = potential_new_sl
-                        logger.debug(f"[{sym}] Trailing SL for short position to {new_sl:.5f}")
-
-            pos.sl = new_sl
+    def _open_pending(self, sym: str, row: pd.Series):
+        """Fills the order queued on the previous bar at this bar's open (a long at the ask), sizing it on the real stop distance."""
+        order = self.pending.pop(sym, None)
+        if not order:
+            return
+        direction, atr, auc, params = order["direction"], order["atr"], order["auc"], order["params"]
+        spread = self._spread_price(sym, row.get("spread"))
+        cap = float(self.cfg.get_symbol_value(sym, "max_spread_atr", 1.0) or 0.0)    # the live guard (fix 20): no entry in a wide spread
+        if cap > 0 and not spread <= cap * atr + 1e-12:
+            self.skipped_for_spread += 1
+            logger.info(f"[{sym}][{row.name}] Entry skipped: spread {spread:.6f} is above {cap:.2f} x the decision ATR {atr:.6f}.")
+            return
+        price = entry_price(direction, row["open"], spread)
+        sl, tp = self.risk_manager.stop_targets(price, atr, direction, auc, sym, sl_mult=params["atr_multiplier_sl"], tp_mult=params["atr_multiplier_tp"])
+        self.signals += 1
+        if sl <= 0 or tp <= 0:
+            self.skipped_for_size += 1
+            return
+        lots, effective_risk = self.risk_manager.position_size(
+            self.equity, atr, auc, total_open_risk=self._total_open_risk(), symbol=sym,
+            exploration_mult=params.get("exploration_risk_mult", 1.0), ac_multiplier=params.get("ac_multiplier", 1.0),
+            sl_distance=abs(price - sl))
+        if lots <= 0:
+            self.skipped_for_size += 1
+            logger.info(f"[{sym}] Trade skipped due to risk limits or position size zero.")
+            return
+        self.positions.append(SimPosition(
+            sym, direction, lots, price, sl, tp, row.name, atr, auc, effective_risk, entry_equity=self.equity,
+            atr_idx=params["atr_idx"], min_prob_long_idx=params.get("min_prob_long_idx", -1),
+            min_prob_short_idx=params.get("min_prob_short_idx", -1), trade_context=params.get("context_vector")))
+        logger.info(f"[{sym}][{row.name}] Opened {direction} at {price:.5f}. Lots: {lots:.2f}, SL: {sl:.5f}, TP: {tp:.5f}, AUC: {auc:.4f}")
 
     def _open_stop_money(self, pos) -> float:
         """Money (account currency) at the stop as it was placed, the live convention (fixes 8 and 54): breakeven and trailing
@@ -98,12 +126,11 @@ class HybridBacktester:
         return sum(self._open_stop_money(p) for p in self.positions if p.status == "open")
 
     def _close_costs(self, sym: str, lots: float) -> float:
-        """Money (account currency) a round trip costs, charged when the position closes: one spread (the bars are bid-only and
-        entry and exit both use the close, so a long or a short pays exactly one), slippage, and commission. Spread and slippage
-        are in pips. There is no `risk.transaction_cost_pips`."""
+        """Money (account currency) charged when the position closes: slippage (pips) and commission. The spread is not here: a long
+        is filled at the ask and a short is bought back at the ask, so each bar's spread is already in the fill prices. There is no
+        `risk.transaction_cost_pips`."""
         costs = self.cfg.trading_costs.defaults
-        spread_pips = float(self.cfg.get_symbol_value(sym, "spread_pips", costs.spread_pips))
-        pips = round_trip_pips(spread_pips, costs.slippage_pips, costs.adaptive_slippage, costs.adaptive_slippage_multiplier)
+        pips = round_trip_pips(0.0, costs.slippage_pips, costs.adaptive_slippage, costs.adaptive_slippage_multiplier)
         return self.risk_manager.pips_to_money(sym, pips, lots) + costs.commission_per_trade * lots
 
     def _update_positions(self, sym, row):
@@ -112,19 +139,10 @@ class HybridBacktester:
 
         # This loop identifies trades that close on the current bar
         for pos in [p for p in self.positions if p.symbol == sym and p.status == "open"]:
-            price = row["close"]
+            hit = exit_hit(pos.direction, pos.sl, pos.tp, row["open"], row["high"], row["low"], self._spread_price(sym, row.get("spread")))
             exit_reason = None
-
-            if pos.direction == "long":
-                if price <= pos.sl:
-                    exit_reason = "Stop Loss"
-                elif price >= pos.tp:
-                    exit_reason = "Take Profit"
-            elif pos.direction == "short":
-                if price >= pos.sl:
-                    exit_reason = "Stop Loss"
-                elif price <= pos.tp:
-                    exit_reason = "Take Profit"
+            if hit:
+                price, exit_reason = hit
 
             if exit_reason:
                 gross_pnl = self.risk_manager.move_value(sym, (price - pos.entry_price) if pos.direction == "long" else (pos.entry_price - price), pos.lots)
@@ -177,12 +195,12 @@ class HybridBacktester:
                     f"Entry: {pos.entry_price:.5f}, PnL: {pos.pnl:.2f}, Final Equity: {self.equity:.2f}"
                 )
 
-    def _force_close_open_positions(self, sym: str, data: pd.DataFrame):
-        """Close any positions left open for `sym` at the last bar of `data`."""
+    def _force_close_open_positions(self, sym: str, bars: pd.DataFrame):
+        """Close any positions left open for `sym` at the last bar: a long at the bid (the close), a short at the ask."""
         logger.info(f"Closing any remaining open positions for {sym}...")
         for pos in [p for p in self.positions if p.symbol == sym and p.status == "open"]:
-            last_row = data.iloc[-1]
-            last_price = last_row["close"]
+            last_row = bars.iloc[-1]
+            last_price = last_row["close"] + (self._spread_price(sym, last_row.get("spread")) if pos.direction == "short" else 0.0)
             gross_pnl = self.risk_manager.move_value(sym, (last_price - pos.entry_price) if pos.direction == "long" else (pos.entry_price - last_price), pos.lots)
             transaction_cost = self._close_costs(sym, pos.lots)
             net_pnl = gross_pnl - transaction_cost
@@ -193,44 +211,6 @@ class HybridBacktester:
                 f"[{pos.symbol}] Force-closed open {pos.direction} position at final price {last_price:.5f}. "
                 f"PnL: {net_pnl:.2f}, Final Equity: {self.equity:.2f}"
             )
-
-    def _perform_retraining(self, sym: str, bar_time: pd.Timestamp, i: int, data: pd.DataFrame, X: pd.DataFrame, y_long: pd.Series, y_short: pd.Series):
-        """
-        Handles the logic for retraining the model.
-        """
-        if not self.cfg.backtesting.enable_retraining:
-            logger.debug(f"[{sym}] Retraining disabled by configuration. Skipping.")
-            return self.ens_per_symbol_long[sym], self.ens_per_symbol_short[sym]
-
-        if self.bar_counters[sym] > 0 and self.bar_counters[sym] % self.cfg.retrain_every_bars == 0:
-            window_size = min(self.cfg.history_bars, i + 1)
-
-            # --- FIX: Guard against retraining with insufficient data ---
-            # A safe threshold to ensure enough samples for cross-validation.
-            # This value should be comfortably larger than the sum of CV splits and min samples per model.
-            MIN_BARS_FOR_RETRAIN = 100
-            if window_size < MIN_BARS_FOR_RETRAIN:
-                logger.warning(f"[{sym}] Skipping retraining at {bar_time}: not enough data in window ({window_size} < {MIN_BARS_FOR_RETRAIN} bars).")
-                return self.ens_per_symbol_long[sym], self.ens_per_symbol_short[sym]
-
-            train_data = data.iloc[i - window_size + 1: i + 1]
-            logger.info(
-                f"[{sym}] Ensemble retraining at {bar_time} using last {len(train_data)} bars..."
-            )
-
-            ens_old_long = self.ens_per_symbol_long[sym]
-            ens_old_short = self.ens_per_symbol_short[sym]
-
-            # Use the shared safe_retrain_ensemble function
-            # IMPORTANT: A dry_run=True flag should be added here to prevent overwriting prod models.
-            ens_new_long = safe_retrain_ensemble(self.cfg, sym, ens_old_long, train_data[X.columns], y_long.loc[train_data.index], train_data["close"] if "close" in train_data.columns else None, dry_run=True, model_type="long")
-            ens_new_short = safe_retrain_ensemble(self.cfg, sym, ens_old_short, train_data[X.columns], y_short.loc[train_data.index], train_data["close"] if "close" in train_data.columns else None, dry_run=True, model_type="short")
-
-            # Update the ensemble in the backtester's state
-            self.ens_per_symbol_long[sym] = ens_new_long
-            self.ens_per_symbol_short[sym] = ens_new_short
-
-        return self.ens_per_symbol_long[sym], self.ens_per_symbol_short[sym]
 
     def _check_and_prune(self, trial: optuna.Trial, i: int):
         """Checks if the trial should be pruned."""
@@ -246,24 +226,29 @@ class HybridBacktester:
             if trial.should_prune():
                 raise optuna.TrialPruned()
 
-    def _process_bar(self, sym: str, data: pd.DataFrame, X: pd.DataFrame, y_long: pd.Series, y_short: pd.Series, trial: optuna.Trial | None = None, pruning_interval: int = 0):
-        """Processes each bar of data for a given symbol."""
-        ens_long = self.ens_per_symbol_long[sym]
-        ens_short = self.ens_per_symbol_short[sym]
+    def _process_bar(self, sym: str, frame, models, trial: optuna.Trial | None = None, pruning_interval: int = 0):
+        """Walk-forward replay of one symbol. A decision on bar i (features known at its close) queues an order that fills at the
+        open of bar i + 1; exits are checked on every bar's high and low; the models for bar i were fitted on past bars only."""
+        bars, X = frame.bars, frame.X
         risk_mgr = self.risk_manager
+        client = risk_mgr.mt5_client
 
-        logger.info(f"Processing {len(data)} bars for {sym}...")
-        # Iterate over the aligned features (X), which do not include the forming bar
-        for i in range(20, len(X)):
-            bar_time = X.index[i]  # Use X's index for bar_time
-            current_row = data.loc[[bar_time]].iloc[0]  # Get the corresponding row from the original data using X's index
+        logger.info(f"Processing {len(X)} bars for {sym}...")
+        for i in range(models.start, len(X)):
+            bar_time = X.index[i]
+            current_row = bars.iloc[i]
             self.bar_counters[sym] += 1
-            last_features = X.iloc[[i]]  # X is already aligned, so X.iloc[[i]] is correct
             atr = X["atr_14"].iloc[i]
+            last_features = X.iloc[[i]]
+            if hasattr(client, "update_price"):
+                client.update_price(sym, current_row["close"])  # the tick value of a USD-base pair moves with the price
 
-            # Manage existing positions first
-            self._manage_trailing_stops(sym, current_row, atr)
+            # An order decided on the previous bar fills at this bar's open; this bar's range can already stop it out
+            self._open_pending(sym, current_row)
             self._update_positions(sym, current_row)
+            self._manage_stops(sym, current_row, atr)  # a moved stop applies from the next bar
+            if i == len(X) - 1:
+                break  # no next bar to fill a decision on
 
             # --- Drawdown and Cooldown Check ---
             risk_mgr._update_equity_peak(self.equity)
@@ -304,12 +289,7 @@ class HybridBacktester:
                             raise optuna.TrialPruned()
                 continue
 
-            # Retrain if needed
-            ens_long, ens_short = self._perform_retraining(sym, bar_time, i, data, X, y_long, y_short)
-
-            # Decide on new trades
-            prob_long = ens_long.predict_proba(last_features).iloc[0]
-            prob_short = ens_short.predict_proba(last_features).iloc[0]
+            prob_long, prob_short, auc_long, auc_short = models.probs(i)
 
             # Get dynamic risk parameters from RiskController
             context = {
@@ -318,7 +298,7 @@ class HybridBacktester:
                 "bar_time": bar_time,
                 "equity": self.equity,
                 "peak_equity": self.risk_manager.equity_peak,
-                "ensemble_auc": (ens_long.ensemble_cv_auc_ + ens_short.ensemble_cv_auc_) / 2,  # Pass current model confidence
+                "ensemble_auc": (auc_long + auc_short) / 2,  # Pass current model confidence
                 "adx": float(last_features["adx"].iloc[0]) if "adx" in last_features.columns else 0.0,
                 "macd_diff": float(last_features["macd_diff"].iloc[0]) if "macd_diff" in last_features.columns else 0.0,
                 "volatility_10": float(last_features["volatility_10"].iloc[0]) if "volatility_10" in last_features.columns else 0.0,
@@ -338,48 +318,25 @@ class HybridBacktester:
 
             direction, auc_score, conflict = choose_direction(
                 prob_long, prob_short, min_prob_long, min_prob_short,
-                ens_long.ensemble_cv_auc_, ens_short.ensemble_cv_auc_, min_ensemble_auc)
+                auc_long, auc_short, min_ensemble_auc)
             if conflict:
                 logger.info(f"[{sym}] Conflicting signals skipped: prob_long={prob_long:.3f} and prob_short={prob_short:.3f}.")
             elif direction is None:
-                if prob_long >= min_prob_long and ens_long.ensemble_cv_auc_ < min_ensemble_auc:
-                    logger.info(f"[{sym}] Long trade blocked due to low ensemble confidence (AUC={ens_long.ensemble_cv_auc_:.4f} < {min_ensemble_auc:.4f}).")
-                if prob_short >= min_prob_short and ens_short.ensemble_cv_auc_ < min_ensemble_auc:
-                    logger.info(f"[{sym}] Short trade blocked due to low ensemble confidence (AUC={ens_short.ensemble_cv_auc_:.4f} < {min_ensemble_auc:.4f}).")
+                blocked = False
+                if prob_long >= min_prob_long and auc_long < min_ensemble_auc:
+                    logger.info(f"[{sym}] Long trade blocked due to low ensemble confidence (AUC={auc_long:.4f} < {min_ensemble_auc:.4f}).")
+                    blocked = True
+                if prob_short >= min_prob_short and auc_short < min_ensemble_auc:
+                    logger.info(f"[{sym}] Short trade blocked due to low ensemble confidence (AUC={auc_short:.4f} < {min_ensemble_auc:.4f}).")
+                    blocked = True
+                if blocked:
+                    self.blocked_by_auc += 1
 
             if direction:
-                self.signals += 1
-                total_open_risk = self._total_open_risk()
-
-                # Determine pip_value for position sizing
-                pip_value = self.risk_manager.get_pip_value(sym)
-                pip_size = self.risk_manager.get_pip_size(sym)
-
-                lots, effective_risk = self.risk_manager.position_size(
-                    self.equity, atr, auc_score, total_open_risk=total_open_risk, symbol=sym,
-                    exploration_mult=dynamic_risk_params.get("exploration_risk_mult", 1.0),
-                    ac_multiplier=dynamic_risk_params.get("ac_multiplier", 1.0)
-                )
-
-                if lots > 0:
-                    price = current_row["close"]
-                    # Use dynamic SL/TP multipliers
-                    sl, tp = self.risk_manager.stop_targets(price, atr, direction, auc_score, sym, sl_mult=atr_multiplier_sl, tp_mult=atr_multiplier_tp)
-                    pos = SimPosition(
-                        sym, direction, lots, price, sl, tp, bar_time, atr, auc_score, effective_risk,
-                        entry_equity=self.equity,
-                        atr_idx=atr_idx,
-                        min_prob_long_idx=min_prob_long_idx,
-                        min_prob_short_idx=min_prob_short_idx,  # Store discrete choices
-                        trade_context=dynamic_risk_params.get("context_vector")  # NEW: Store the context vector
-                    )
-                    self.positions.append(pos)
-                    logger.info(
-                        f"[{sym}][{bar_time}] Opened {direction} position at {price:.5f}. "f"Lots: {lots:.2f}, SL: {sl:.5f}, TP: {tp:.5f}, AUC: {auc_score:.4f}"
-                    )
+                if sym in self.pending or any(p.symbol == sym and p.status == "open" for p in self.positions):
+                    logger.info(f"[{sym}] Signal skipped: a position is already open on this symbol.")
                 else:
-                    self.skipped_for_size += 1
-                    logger.info(f"[{sym}] Trade skipped due to risk limits or position size zero.")
+                    self.pending[sym] = dict(direction=direction, auc=auc_score, atr=atr, params=dynamic_risk_params)
             else:
                 logger.info(f"[{sym}] No trade signal. Probs: (Long: {prob_long:.3f}, Short: {prob_short:.3f}) ")
 
@@ -430,6 +387,8 @@ class HybridBacktester:
             logger.exception(f"Failed to generate QuantStats report: {e}")
 
         logger.info(f"=== Hybrid Adaptive Backtest Complete. Final Equity: {self.equity:.2f} === ")
+        logger.info(f"Trades: {len(self.positions)}; signals refused by the min_ensemble_auc gate: {self.blocked_by_auc}; "
+                    f"entries skipped for a wide spread: {self.skipped_for_spread}.")
         if self.signals and self.skipped_for_size / self.signals > 0.2:
             logger.warning(
                 f"{self.skipped_for_size}/{self.signals} signals were skipped at sizing (lot below the broker minimum or risk caps). "
@@ -494,37 +453,23 @@ class HybridBacktester:
                 tuned_prediction_horizon = tuned.get('prediction_horizon', self.cfg.prediction_horizon)
                 tuned_min_pct_change = tuned.get('min_pct_change', self.cfg.features.min_pct_change)
 
-                # Load context data
-                from src.data_manager import DataManager
-                dm = DataManager(self.cfg)
-                mta_df = None
-                if self.cfg.context_features.mta.enabled:
-                    mta_df = dm.load_local_history(sym, self.cfg.context_features.mta.timeframe)
-                inter_market_df = None
-                if self.cfg.context_features.inter_market.enabled:
-                    im_sym = self.cfg.context_features.inter_market.symbol
-                    inter_market_df = dm.load_local_history(im_sym, self.cfg.timeframe)
-
-                data, X, y_long, y_short = get_training_data(
-                    self.cfg,
-                    sym,
-                    feature_cfg=feature_cfg,
-                    source=self.cfg.data_source,
-                    min_pct_change=tuned_min_pct_change,  # Use tuned min_pct_change
-                    mta_df=mta_df,
-                    inter_market_df=inter_market_df,
-                    return_long_short_labels=True,
-                    prediction_horizon=tuned_prediction_horizon
-                )
-                if data.empty:
+                frame = load_backtest_frame(self.cfg, sym, feature_cfg, tuned_prediction_horizon, tuned_min_pct_change)
+                if frame.bars.empty:
                     logger.warning(f"No data for {sym}, skipping.")
                     continue
+                min_improvement = self.cfg.get_symbol_value(sym, 'min_auc_improvement', self.cfg.risk.min_auc_improvement)
+                models = WalkForwardModels(frame.X, frame.y_long, frame.y_short, frame.bars["close"], self.cfg.backtesting.train_bars,
+                                           self.cfg.retrain_every_bars, tuned_prediction_horizon,
+                                           make_fit_fn(self.cfg, sym, optuna_params, min_improvement))
+                if len(frame.X) <= models.start + 1:
+                    logger.warning(f"{sym}: {len(frame.X)} bars do not go past backtesting.train_bars={models.start}; nothing to trade.")
+                    continue
 
-                self._process_bar(sym, data, X, y_long, y_short, trial, pruning_interval)
+                self._process_bar(sym, frame, models, trial, pruning_interval)
 
                 logger.info(f"--- Completed Backtest for Symbol: {sym} ---")
 
-                self._force_close_open_positions(sym, data)
+                self._force_close_open_positions(sym, frame.bars)
         except KeyboardInterrupt:
             logger.warning("Backtest interrupted by user. Generating results for completed portion...")
 

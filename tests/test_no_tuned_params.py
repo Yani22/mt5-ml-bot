@@ -54,13 +54,12 @@ def test_the_trainer_uses_the_config_defaults_when_there_are_no_tuned_params(mon
 def test_the_backtester_uses_the_config_defaults_when_there_are_no_tuned_params(monkeypatch):
     seen = {}
 
-    def get_training_data(cfg, sym, **k):
-        seen.update(k)
+    def load_backtest_frame(cfg, sym, feature_cfg, horizon, min_pct_change, **k):
+        seen.update(prediction_horizon=horizon, min_pct_change=min_pct_change)
         raise Stop
 
     monkeypatch.setattr(backtester, "load_optuna_params", lambda sym, cfg: None)
-    monkeypatch.setattr("src.data_manager.DataManager", lambda cfg: NS())   # the real one retries the MT5 connect for a minute
-    monkeypatch.setattr(backtester, "get_training_data", get_training_data)
+    monkeypatch.setattr(backtester, "load_backtest_frame", load_backtest_frame)
     bt = object.__new__(backtester.HybridBacktester)
     bt.cfg = NS(symbols=[SYM], prediction_horizon=12, features=NS(min_pct_change=0.0002), data_source="csv", history_bars=100,
                 fetch=NS(raw_data_dir="data/historical_data"),

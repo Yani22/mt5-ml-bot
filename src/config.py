@@ -58,7 +58,8 @@ class InterMarketCfg:
 @dataclass
 class BacktestingCfg:
     initial_equity: float = 10000.0
-    enable_retraining: bool = True
+    enable_retraining: bool = True  # unused since the walk-forward backtester (kept: config.yaml sets it and an unknown key stops start-up)
+    train_bars: int = 45000  # the first bars of a backtest only train; trading starts after them
 
 
 @dataclass

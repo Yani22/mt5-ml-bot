@@ -58,18 +58,19 @@ def open_long(bt, entry, sl, tp, sym="EURUSD#", lots=1.0):
     return pos
 
 
-def at(price):
-    return pd.Series({"close": price}, name=ROW_TIME)
+def at(price, spread=0.0):
+    """A bar that opens, trades and closes at `price` (a stop or target is hit exactly when `price` reaches it); `spread` in points."""
+    return pd.Series({"open": price, "high": price, "low": price, "close": price, "spread": spread}, name=ROW_TIME)
 
 
 # ---- costs at a stop or target -------------------------------------------------------------------------------------------
 
-def test_a_target_hit_pays_one_spread_and_the_slippage_in_pips():
+def test_a_target_hit_pays_the_slippage_in_pips_and_no_spread_at_the_close():
     bt = make_bt()
     pos = open_long(bt, 1.1000, 1.0990, 1.1020)
     bt._update_positions("EURUSD#", at(1.1020))
-    # gross $200; spread 1.0 pip = 10 points = $10; slippage 0.1 pip = 1 point = $1
-    assert pos.pnl == pytest.approx(189.0)
+    # gross $200; slippage 0.1 pip = 1 point = $1; the spread is in the entry price, not charged here (changed: it was $10 here)
+    assert pos.pnl == pytest.approx(199.0)
 
 
 def test_slippage_alone_is_charged_in_pips_not_points():
@@ -83,15 +84,19 @@ def test_a_jpy_pair_is_charged_in_account_currency():
     bt = make_bt(USDJPY)
     pos = open_long(bt, 150.000, 149.850, 150.150, sym="USDJPY#")
     bt._update_positions("USDJPY#", at(150.150))
-    # gross 150 points x $0.6667 = $100; spread 10 points and slippage 1 point = 11 x $0.6667
-    assert pos.pnl == pytest.approx(100.0 - 11 * 2 / 3)
+    # gross 150 points x $0.6667 = $100; slippage 1 point = $0.6667 (the spread is in the fill prices; it was 11 points here)
+    assert pos.pnl == pytest.approx(100.0 - 2 / 3)
 
 
-def test_a_symbol_override_sets_that_symbols_spread():
+def test_a_symbol_override_sets_the_spread_used_for_a_bar_that_has_none():
     bt = make_bt(overrides={"EURUSD#": {"spread_pips": 2.0}})
-    pos = open_long(bt, 1.1000, 1.0990, 1.1020)
-    bt._update_positions("EURUSD#", at(1.1020))
-    assert pos.pnl == pytest.approx(200.0 - 20.0 - 1.0)
+    assert bt._spread_price("EURUSD#", float("nan")) == pytest.approx(2.0 * 10 * 1e-5)    # pips -> points -> price
+    assert bt._spread_price("EURUSD#", 3.0) == pytest.approx(3.0 * 1e-5)                  # a bar's own spread (points) wins
+
+
+def test_the_default_spread_fills_in_for_a_bar_with_a_zero_spread():
+    bt = make_bt(spread=1.0)
+    assert bt._spread_price("EURUSD#", 0.0) == pytest.approx(10 * 1e-5)
 
 
 def test_the_closed_trade_sent_to_the_bandit_carries_the_net_pnl():
@@ -99,7 +104,7 @@ def test_the_closed_trade_sent_to_the_bandit_carries_the_net_pnl():
     pos = open_long(bt, 1.1000, 1.0990, 1.1020)
     bt._update_positions("EURUSD#", at(1.1020))
     (trade,) = bt.risk_controller.trades
-    assert trade.pnl == pytest.approx(pos.pnl) == pytest.approx(189.0)      # the net figure is what is recorded
+    assert trade.pnl == pytest.approx(pos.pnl) == pytest.approx(199.0)      # the net figure is what is recorded
 
 
 def test_the_risk_amount_of_a_jpy_trade_is_in_account_currency():
@@ -115,9 +120,18 @@ def test_the_risk_amount_of_a_jpy_trade_is_in_account_currency():
 def test_the_forced_close_charges_the_same_costs_as_any_other_close():
     bt = make_bt()
     pos = open_long(bt, 1.1000, 1.0990, 1.1050)
-    bt._force_close_open_positions("EURUSD#", pd.DataFrame({"close": [1.1020]}, index=[ROW_TIME]))
-    assert pos.pnl == pytest.approx(189.0)
-    assert bt.equity == pytest.approx(10_000.0 + 189.0)
+    bt._force_close_open_positions("EURUSD#", pd.DataFrame({"close": [1.1020], "spread": [10.0]}, index=[ROW_TIME]))
+    assert pos.pnl == pytest.approx(199.0)       # a long closes at the bid (the close); slippage only
+    assert bt.equity == pytest.approx(10_000.0 + 199.0)
+
+
+def test_a_short_is_closed_at_the_ask_so_the_last_bars_spread_costs_it():
+    bt = make_bt()
+    pos = SimPosition("EURUSD#", "short", 1.0, 1.1000, 1.1010, 1.0950, T0, 0.0010, 0.6, 0.01, entry_equity=10_000.0)
+    bt.positions.append(pos)
+    bt._force_close_open_positions("EURUSD#", pd.DataFrame({"close": [1.0980], "spread": [10.0]}, index=[ROW_TIME]))
+    assert pos.exit_price == pytest.approx(1.0981)              # close + 10 points
+    assert pos.pnl == pytest.approx(190.0 - 1.0)
 
 
 # ---- pips and config ------------------------------------------------------------------------------------------------------

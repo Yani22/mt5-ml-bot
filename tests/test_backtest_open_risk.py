@@ -39,6 +39,7 @@ def test_the_closed_trade_reward_uses_the_placed_stop_after_breakeven():
     assert trade.sl_atr_mult == pytest.approx(1.0)           # 10 pips against an ATR of 10 pips
 
 
-def test_the_decision_loop_sums_the_open_risk_through_the_helper():
-    src = inspect.getsource(backtester.HybridBacktester._process_bar)
+def test_the_fill_sums_the_open_risk_through_the_helper():
+    # the order is sized when it fills at the next open (`_open_pending`), no longer in the decision loop
+    src = inspect.getsource(backtester.HybridBacktester._open_pending)
     assert "self._total_open_risk()" in src and "p.entry_equity * p.risk_fraction" not in src
