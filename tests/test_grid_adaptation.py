@@ -102,3 +102,20 @@ def test_the_prior_of_a_merged_A_matrix_is_counted_once(tmp_path):
     lam = 1.0
     assert np.allclose(arm1, back_arm1)                  # lambda*I (live) + (back - lambda*I), not 2*lambda*I + data
     assert np.allclose(np.diag(arm1)[0], back_arm1[0, 0]) and lam == pytest.approx(1.0)
+
+
+# ---- the contextual bandit's statistics through a grid change ----
+def test_a_transferred_contextual_arm_is_lambda_i_plus_the_old_data_with_a_consistent_inverse():
+    from src.linear_thompson import LinearThompson
+    old = LinearThompson(num_arms=3, dim=2, lambda_prior=1.0)
+    x = np.array([1.0, 2.0])
+    old.update(0, x, 0.5)
+    old.update(1, x, -0.25)
+    new = LinearThompson(num_arms=2, dim=2, lambda_prior=1.0)
+    RiskController._transfer_contextual_bandit_state(old, [1.0, 1.5, 2.0], new, [1.0, 2.0])
+    # old arms 0 and 1 (values 1.0 and 1.5) are both closest to new arm 0 only when 1.5 rounds that way; check the sums, not the mapping
+    total_data = (old.A[0] - np.eye(2)) + (old.A[1] - np.eye(2)) + (old.A[2] - np.eye(2))
+    assert np.allclose(sum(a - np.eye(2) for a in new.A), total_data)
+    assert np.allclose(sum(new.b), old.b[0] + old.b[1] + old.b[2])
+    for arm in range(2):
+        assert np.allclose(new.invA[arm], np.linalg.inv(new.A[arm]))       # the sampler reads invA, not A

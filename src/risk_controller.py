@@ -957,10 +957,14 @@ class RiskController:
         for old_idx, old_val in enumerate(old_grid):
             # Find the index of the closest value in the new grid
             new_idx = int(np.argmin(np.abs(np.array(new_grid) - old_val)))
-            # Transfer A and b matrices. If multiple old arms map to the same new arm,
-            # their statistics will be summed up.
-            new_bandit.A[new_idx] += old_bandit.A[old_idx]
+            # Transfer the DATA of A and b: every arm's A starts as lambda * I, so the old arm's prior is taken out before it is added (the
+            # new arm has its own). If multiple old arms map to the same new arm, their data is summed up.
+            new_bandit.A[new_idx] += old_bandit.A[old_idx] - old_bandit.lambda_prior * np.eye(old_bandit.dim)
             new_bandit.b[new_idx] += old_bandit.b[old_idx]
+
+        # `sample_arm` reads the cached inverses, so they must follow the matrices that were just changed
+        for arm in range(new_bandit.num_arms):
+            new_bandit.invA[arm] = np.linalg.inv(new_bandit.A[arm])
 
         logger.debug(f"Transferred contextual bandit state from {len(old_grid)} to {len(new_grid)} arms.")
 
