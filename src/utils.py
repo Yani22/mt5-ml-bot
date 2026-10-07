@@ -8,6 +8,7 @@ import sys
 from loguru import logger  # type: ignore
 import pandas as pd  # type: ignore
 from src.features import FeatureCfg, build_features
+from src.ignored_settings import ignored_setting_warnings
 from src.labels import generate_labels, generate_long_short_labels
 from src.ensemble import Ensemble
 from src.config import Cfg, ConfigError, check_tuned_params
@@ -403,6 +404,8 @@ def log_startup_summary(cfg: "Cfg"):
     logger.info(f"Thompson Sampling Enabled: {cfg.thompson_sampling.enabled}")
     logger.info(f"Max Portfolio Risk: {cfg.risk.max_portfolio_risk}")
     logger.info(f"Dynamic Risk Enabled: {cfg.risk.dynamic_risk['enabled']}")
+    for message in ignored_setting_warnings(cfg):
+        logger.warning(f"Setting without effect: {message}")
     logger.info("--- End of Summary ---")
 
 
