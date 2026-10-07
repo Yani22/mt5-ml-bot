@@ -1,5 +1,6 @@
 # src/notifier.py
 import os
+import re
 
 import requests
 from loguru import logger  # type: ignore
@@ -42,10 +43,26 @@ class TelegramNotifier:
         }
 
         try:
-            response = requests.post(self.base_url, data=payload, timeout=TELEGRAM_TIMEOUT)
-            response.raise_for_status()  # Raise an exception for HTTP errors
+            self._post(payload)
             logger.debug(f"Telegram message sent: {message}")
+        except requests.exceptions.HTTPError as e:
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            if status == 400 and payload.get("parse_mode"):
+                # HTML mode refuses a stray `<` or `&` (an exception text, an object repr). The alert matters more than its formatting:
+                # send it again as plain text, without the tags we added ourselves.
+                plain = {"chat_id": self.chat_id, "text": re.sub(r"</?(b|i|u|s|code|pre|em|strong)>", "", full_message)}
+                try:
+                    self._post(plain)
+                    logger.warning("Telegram refused the message as HTML (HTTP 400); it was sent as plain text.")
+                except requests.exceptions.RequestException as e2:
+                    logger.error(f"Failed to send Telegram message: {self._redact(e2)}")
+            else:
+                logger.error(f"Failed to send Telegram message: {self._redact(e)}")
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to send Telegram message: {self._redact(e)}")
         except Exception as e:
             logger.error(f"An unexpected error occurred while sending Telegram message: {self._redact(e)}")
+
+    def _post(self, payload: dict) -> None:
+        response = requests.post(self.base_url, data=payload, timeout=TELEGRAM_TIMEOUT)
+        response.raise_for_status()  # Raise an exception for HTTP errors
