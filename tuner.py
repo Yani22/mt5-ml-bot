@@ -12,7 +12,7 @@ from joblib import Parallel, delayed  # type: ignore
 import traceback  # Added for detailed error logging
 
 from src.config import Cfg
-from src.features import add_relative_features, build_dynamic_features, model_matrix, resolve_feature_cfg
+from src.features import build_features, model_matrix, resolve_feature_cfg
 from src.data_colab import merge_features_labels
 from src.utils import get_training_data, save_optuna_params
 from src.ensemble import Ensemble
@@ -80,7 +80,14 @@ def study_name_for(sym: str, history_bars: int, signature: str) -> str:
     return f"feature_model_tuning_{sym.replace('#', '_')}_history_{history_bars}_{signature}"
 
 
-def objective(trial, df: pd.DataFrame, static_features: pd.DataFrame, symbol: str):
+def trial_matrix(df: pd.DataFrame, feature_cfg, symbol: str, mta_df=None, inter_market_df=None) -> pd.DataFrame:
+    """The matrix one trial scores: exactly what the bot builds with these settings (`build_features`, the static, dynamic, relative
+    and context columns together), not a copy of a matrix built with other settings with some columns overwritten."""
+    return build_features(df.copy(), feature_cfg, cfg, symbol=symbol, mta_df=mta_df, inter_market_df=inter_market_df)
+
+
+def objective(trial, df: pd.DataFrame, static_features: pd.DataFrame, symbol: str, mta_df=None, inter_market_df=None):
+    """`static_features` is kept for the call signature and no longer used: every trial builds its own matrix (`trial_matrix`)."""
     try:
         # --- 0. The label is fixed by the config, not tuned: AUCs of different label definitions are not comparable, and
         # tuning them picks the label that is easiest to predict, not one worth trading (C3).
@@ -103,7 +110,7 @@ def objective(trial, df: pd.DataFrame, static_features: pd.DataFrame, symbol: st
         feature_cfg = resolve_feature_cfg(cfg, feature_params_raw)
 
         # --- 2. Build Features for this Trial (using cached static features) ---
-        X = add_relative_features(build_dynamic_features(df, static_features, feature_cfg, symbol), df)   # the matrix the live models are trained on
+        X = trial_matrix(df, feature_cfg, symbol, mta_df, inter_market_df)   # the matrix the live models are trained on
 
         # --- Generate Labels for this Trial ---
         y = generate_labels(df, prediction_horizon, min_pct_change)
@@ -177,13 +184,14 @@ def run_tuning_for_symbol(sym: str):
     # --- 1. Get all data and static features from the centralized pipeline ---
     # For tuning, we pass a default FeatureConfig and set build_dynamic=False.
     # The dynamic features will be built inside the objective function for each trial.
-    static_features, _, df = get_training_data(  # Unpack X, discard y, get df
+    static_features, _, df, mta_df, inter_market_df = get_training_data(  # X (built with the configured features), y, df and the context frames
         cfg,
         sym,
         feature_cfg=cfg.features,  # the configured untuned features; the trials rebuild the dynamic ones
         source=cfg.data_source if hasattr(cfg, "data_source") else "csv",
         build_dynamic=False,  # Instruct the pipeline to return intermediate artifacts for tuner
-        return_long_short_labels=False  # We will generate labels inside the objective
+        return_long_short_labels=False,  # We will generate labels inside the objective
+        return_context=True,
     )
 
     if df.empty:
@@ -191,11 +199,11 @@ def run_tuning_for_symbol(sym: str):
         return
 
     # --- 2. Run Optuna Study ---
-    objective_partial = partial(objective, df=df, static_features=static_features, symbol=sym)
+    objective_partial = partial(objective, df=df, static_features=static_features, symbol=sym, mta_df=mta_df, inter_market_df=inter_market_df)
 
     # One study per feature set, label and search space: an old study with the same name would keep adding trials scored on other
     # features (C3). The columns are the model's input columns for the default feature config.
-    columns = list(model_matrix(add_relative_features(build_dynamic_features(df, static_features, cfg.features, sym), df)).columns)
+    columns = list(model_matrix(trial_matrix(df, cfg.features, sym, mta_df, inter_market_df)).columns)
     signature = study_signature((cfg.prediction_horizon, cfg.features.min_pct_change), yaml_cfg.get("features", {}),
                                 yaml_cfg.get("models", []), columns, yaml_cfg.get("cv_samples_per_split", 300),
                                 yaml_cfg.get("roc_lags_options"))

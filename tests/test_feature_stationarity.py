@@ -138,7 +138,7 @@ def test_the_builders_the_h1_bot_and_the_research_scripts_call_add_no_relative_c
 
 
 def test_the_tuner_and_the_main_pipeline_build_the_relative_columns():
-    """tuner.py cannot be imported on Linux, so its source is checked (as in fix 9)."""
-    assert "add_relative_features(build_dynamic_features(" in open("tuner.py").read()
+    """The tuner scores `build_features` output (`trial_matrix`), the same call the main pipeline makes, so the relative columns are in it."""
+    assert "build_features(df.copy(), feature_cfg" in open("tuner.py").read()
     X = F.build_features(ohlc(n=1500), FeatureCfg(), __import__("src.config", fromlist=["Cfg"]).Cfg(), symbol="TEST")
     assert NEW <= set(X.columns)

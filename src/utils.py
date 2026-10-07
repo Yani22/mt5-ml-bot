@@ -116,7 +116,7 @@ def load_optuna_params(symbol: str, cfg: Cfg) -> dict | None:
     return loaded_params
 
 
-def get_training_data(cfg: Cfg, symbol: str, feature_cfg: FeatureCfg, count: int | None = None, source: str = "csv", load_all_data: bool = False, build_dynamic: bool = True, min_pct_change: float = 0.0, prediction_horizon: int = 0, mta_df: pd.DataFrame | None = None, inter_market_df: pd.DataFrame | None = None, return_long_short_labels: bool = False):
+def get_training_data(cfg: Cfg, symbol: str, feature_cfg: FeatureCfg, count: int | None = None, source: str = "csv", load_all_data: bool = False, build_dynamic: bool = True, min_pct_change: float = 0.0, prediction_horizon: int = 0, mta_df: pd.DataFrame | None = None, inter_market_df: pd.DataFrame | None = None, return_long_short_labels: bool = False, return_context: bool = False):
     """
     New centralized data pipeline.
     - If build_dynamic is True, returns (data, X, y) or (data, X, y_long, y_short) for trainers/backtesters.
@@ -191,6 +191,8 @@ def get_training_data(cfg: Cfg, symbol: str, feature_cfg: FeatureCfg, count: int
         logger.info(f"[{symbol}] Data pipeline complete for tuner. Returning features and labels.")
         if return_long_short_labels:
             return X, y_long, y_short, df
+        elif return_context:
+            return X, y, df, mta_df, inter_market_df   # the tuner rebuilds the whole matrix per trial and needs the context frames
         else:
             return X, y, df  # Return X, y, df for consistency
 
