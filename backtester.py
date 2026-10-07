@@ -18,6 +18,7 @@ from src.costs import round_trip_pips
 from src.decision import choose_direction
 from src.utils import setup_logging, load_optuna_params, log_symbol_specific_configs
 from src.backtest_data import load_backtest_frame
+from src.periods import periods_per_year
 from src.backtest_fills import bar_spread, entry_price, exit_hit, next_stop
 from src.backtest_models import WalkForwardModels, make_fit_fn
 from src.backtest_symbols import BacktestSymbolClient
@@ -446,7 +447,8 @@ class HybridBacktester:
             if not eq_df.empty:
                 try:
                     report_path = f"results/report_{symbol_str}_hybrid_adaptive.html"
-                    qs.reports.html(eq_df["equity"], output=report_path, title=f"{symbol_str} Hybrid Adaptive Strategy")
+                    qs.reports.html(eq_df["equity"], output=report_path, title=f"{symbol_str} Hybrid Adaptive Strategy",
+                                    periods_per_year=periods_per_year(eq_df.index))
                     logger.info(f"QuantStats report saved to {report_path}")
                 except Exception as e:
                     logger.warning(f"Failed to generate QuantStats report: {e}")

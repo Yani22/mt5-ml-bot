@@ -4,6 +4,8 @@ import sys
 import os
 import quantstats as qs  # type: ignore
 
+from src.periods import periods_per_year
+
 
 def analyze_trades(df: pd.DataFrame, name: str, equity_df: pd.DataFrame | None = None):
     """Analyzes a dataframe of trades and prints a summary."""
@@ -83,25 +85,26 @@ def analyze_trades(df: pd.DataFrame, name: str, equity_df: pd.DataFrame | None =
 
         # Calculate daily returns
         returns = equity_df['equity'].pct_change().dropna()
+        periods = periods_per_year(returns.index)   # one equity point per bar: quantstats' default of 252 is for daily data
 
         if not returns.empty:
             # Compound Annual Growth Rate (CAGR)
-            cagr = qs.stats.cagr(returns)
+            cagr = qs.stats.cagr(returns, periods=periods)
 
             # Annualized Volatility
-            annual_volatility = qs.stats.volatility(returns, annualize=True)
+            annual_volatility = qs.stats.volatility(returns, periods=periods, annualize=True)
 
             # Sharpe Ratio
-            sharpe_ratio = qs.stats.sharpe(returns, annualize=True) if returns.std() > 0 else 0.0
+            sharpe_ratio = qs.stats.sharpe(returns, periods=periods, annualize=True) if returns.std() > 0 else 0.0
 
             # Max Drawdown
             max_drawdown = qs.stats.max_drawdown(returns)
 
             # Calmar Ratio
-            calmar_ratio = qs.stats.calmar(returns, periods=252) if max_drawdown != 0 else 0.0
+            calmar_ratio = qs.stats.calmar(returns, periods=periods) if max_drawdown != 0 else 0.0
 
             # Sortino Ratio
-            sortino_ratio = qs.stats.sortino(returns, annualize=True) if returns[returns < 0].std() > 0 else 0.0
+            sortino_ratio = qs.stats.sortino(returns, periods=periods, annualize=True) if returns[returns < 0].std() > 0 else 0.0
 
             # Value at Risk (VaR) - 95% confidence
             var_95 = qs.stats.var(returns)
