@@ -1,14 +1,11 @@
 # src/execution.py
 from __future__ import annotations
 import math
-import os
 from typing import TYPE_CHECKING
 try:
     import MetaTrader5 as mt5  # type: ignore
 except ImportError:  # not available on Linux; only needed on the live (Windows) path
     mt5 = None
-import copy
-import json
 from dataclasses import dataclass
 from loguru import logger  # type: ignore
 import time
@@ -65,41 +62,6 @@ class Execution:
         self._open_tickets = {}   # ticket -> dict of trade details from risk.open_positions_cache
         self._seen_closed = set()  # to avoid reporting the same trade twice
         self._last_deal_time = 0  # Timestamp of the last deal processed
-        self.state_file = "results/open_positions_state.json"  # File to persist open positions state
-        os.makedirs(os.path.dirname(self.state_file), exist_ok=True)  # Ensure directory exists
-
-    def _save_open_positions_state(self):
-        """Saves the current open_positions_cache to a JSON file."""
-        try:
-            # Convert datetime objects to ISO format strings for JSON serialization
-            serializable_cache = copy.deepcopy(self.risk.open_positions_cache)
-            for pos_id, details in serializable_cache.items():
-                if "entry_time" in details and isinstance(details["entry_time"], datetime.datetime):
-                    details["entry_time"] = details["entry_time"].isoformat()
-
-            with open(self.state_file, 'w') as f:
-                json.dump(serializable_cache, f, indent=4)
-            logger.info(f"Open positions state saved to {self.state_file}")
-        except Exception as e:
-            logger.exception(f"Failed to save open positions state: {e}")
-
-    def _load_open_positions_state(self) -> Dict[int, Dict[str, Any]]:
-        """Loads the open_positions_cache from a JSON file."""
-        if not os.path.exists(self.state_file):
-            return {}
-        try:
-            with open(self.state_file, 'r') as f:
-                loaded_state = json.load(f)
-
-            # Convert ISO format strings back to datetime objects
-            for pos_id, details in loaded_state.items():
-                if "entry_time" in details and isinstance(details["entry_time"], str):
-                    details["entry_time"] = datetime.datetime.fromisoformat(details["entry_time"])
-            logger.info(f"Open positions state loaded from {self.state_file}")
-            return loaded_state
-        except Exception as e:
-            logger.exception(f"Failed to load open positions state: {e}")
-            return {}
 
     def _drop_unusable_cache_entries(self, simulated_too: bool) -> None:
         """Caller holds cache_lock. Drops entries that can never be reconciled: those without a symbol (the shape
@@ -412,9 +374,8 @@ class Execution:
 
     def check_closed_trades(self, latest_prices: Dict[str, float], now_utc: datetime.datetime) -> List[ClosedTrade]:
         """
-        Reconciles the internal cache of open positions with the broker's state (live)
-        or simulates closures based on price action (dry-run).
-        Returns a list of newly detected closed trades.
+        Dry-run only: simulates closures of the cached positions from the latest prices (a live run returns an empty list; live
+        closures come from `reconcile_open_positions_with_mt5`). Returns a list of newly detected closed trades.
         """
         with self.risk.cache_lock:
             closed_trades_list = []
@@ -484,11 +445,12 @@ class Execution:
                             gross_pnl = (entry_price - exit_price) / pip_size * pip_value * lots
 
                         # Apply transaction costs (spread and commission)
-                        # One spread per round trip (bar-close prices are bid-only), in pips -> account currency.
                         spread_pips = float(self.risk.cfg.get_symbol_value(symbol, 'spread_pips', self.risk.cfg.trading_costs.defaults.spread_pips))
                         commission_per_lot = getattr(self.risk.cfg.trading_costs.defaults, 'commission_per_trade', 0.0)
 
-                        transaction_cost = self.risk.pips_to_money(symbol, spread_pips, lots) + (commission_per_lot * lots)
+                        # A long was entered at the ask (its spread is in `entry_price`); a short buys back at the ask and pays it here.
+                        exit_spread_pips = spread_pips if direction == "short" else 0.0
+                        transaction_cost = self.risk.pips_to_money(symbol, exit_spread_pips, lots) + (commission_per_lot * lots)
                         pnl = gross_pnl - transaction_cost
 
                         # Get current equity for the ClosedTrade object (simulated)
@@ -531,85 +493,7 @@ class Execution:
 
                 return closed_trades_list
 
-            # --- LIVE MODE LOGIC (existing code) ---
-            try:
-                # Get the ground truth of open positions from the broker
-                open_positions_on_broker = self.mt5_client.positions_get() or []
-                open_position_ids_on_broker = {pos.ticket for pos in open_positions_on_broker}
-
-                # Get the list of positions we are tracking internally
-                tracked_position_ids = list(self.risk.open_positions_cache.keys())
-
-                # Find positions that are in our cache but not in the broker's list of open positions
-                closed_pids = [pid for pid in tracked_position_ids if pid not in open_position_ids_on_broker]
-
-                for pid in closed_pids:
-                    trade_details = self.risk.open_positions_cache.get(pid)
-                    if not trade_details:
-                        continue
-
-                    # Fetch the deal history for this specific closed position to find the PnL
-                    deals = self.mt5_client.history_deals_get(position=pid)
-                    if not deals:
-                        logger.warning(f"Position {pid} is closed but no deal history found. Removing from cache.")
-                        self.risk.open_positions_cache.pop(pid, None)
-                        continue
-
-                    # Find the closing deal to get the final profit and exit details
-                    final_profit = self._position_net_pnl(deals)  # deal.profit alone excludes commission, swap and fee
-                    last_exit_time = None
-                    last_exit_price = None
-                    for deal in sorted(deals, key=lambda d: d.time):
-                        if deal.entry == mt5.DEAL_ENTRY_OUT:
-                            last_exit_time = deal.time
-                            last_exit_price = deal.price
-                    if last_exit_time is None:
-                        logger.warning(f"Position {pid} is closed but no 'out' deal found. Removing from cache.")
-                        self.risk.open_positions_cache.pop(pid, None)
-                        continue
-
-                    # Get current equity for the ClosedTrade object
-                    account_info = self.mt5_client.account_info()
-                    actual_equity = getattr(account_info, "equity", 0.0) if account_info else 0.0
-                    exit_time_dt = datetime.datetime.fromtimestamp(last_exit_time, tz=datetime.timezone.utc)
-
-                    # Create the comprehensive ClosedTrade object
-                    closed_trade = ClosedTrade(
-                        ticket=pid,
-                        symbol=trade_details.get("symbol", "UNKNOWN"),
-                        direction=trade_details.get("direction", ""),
-                        lots=trade_details.get("lots", 0.0),
-                        entry_price=trade_details.get("entry_price", 0.0),
-                        exit_price=last_exit_price or 0.0,
-                        entry_time=trade_details.get("entry_time"),
-                        exit_time=exit_time_dt,
-                        pnl=final_profit,
-                        risk_fraction=trade_details.get("risk_fraction", 0.0),
-                        atr=trade_details.get("atr", 0.0),
-                        atr_idx=trade_details.get("atr_idx", -1),
-                        min_prob_long_idx=trade_details.get("min_prob_long_idx", -1),
-                        min_prob_short_idx=trade_details.get("min_prob_short_idx", -1),
-                        entry_auc=trade_details.get("entry_auc", 0.5),
-                        entry_equity=trade_details.get("entry_equity", 0.0),
-                        exit_equity=actual_equity,
-                        adx=trade_details.get("adx", 0.0),
-                        macd_diff=trade_details.get("macd_diff", 0.0),
-                        volatility_10=trade_details.get("volatility_10", 0.0),
-                        dist_from_ema_200=trade_details.get("dist_from_ema_200", 0.0),
-                        risk_amount=trade_details.get("risk_amount"), sl_atr_mult=trade_details.get("sl_atr_mult")
-                    )
-                    closed_trades_list.append(closed_trade)
-                    logger.info(f"Detected closed trade via reconciliation: {closed_trade}")
-
-                    # Remove the now-closed position from our internal cache
-                    self.risk.open_positions_cache.pop(pid, None)
-
-            except Exception as e:
-                logger.exception(f"Failed to check/reconcile closed trades: {e}")
-
-            # Sort closed trades by exit_time before returning
-            closed_trades_list.sort(key=lambda trade: trade.exit_time)
-            return closed_trades_list
+            return closed_trades_list   # live results come from `reconcile_open_positions_with_mt5`, never from here
 
     def trade(self, symbol: str, direction: str, lots: float, price: float, sl: float, tp: float, equity: float, pip_size: float, pip_value: float, now_utc: datetime.datetime, X: pd.DataFrame | None = None, atr: float | None = None, auc_score: float | None = 0.5, total_open_risk: float = 0.0, atr_idx: int = -1, min_prob_long_idx: int = -1, min_prob_short_idx: int = -1, context_vector: Optional[list[float]] = None) -> OrderResult:
         type_map = {"long": self.mt5_client.ORDER_TYPE_BUY, "short": self.mt5_client.ORDER_TYPE_SELL}

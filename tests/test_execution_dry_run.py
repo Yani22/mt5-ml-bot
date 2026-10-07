@@ -75,8 +75,8 @@ def test_symbol_guard_blocks_a_second_dry_run_position_on_the_same_symbol():
     assert rm.position_size(1000.0, 0.0006, 0.6, 0.0, "EURUSD#") == (0.0, 0.0)
 
 
-# gross +2.4 / -1.2, minus one 1.0-pip spread on 0.02 lots ($0.20): fix 28 charges the dry-run spread, in pips
-@pytest.mark.parametrize("price, exit_price, pnl", [(1.1020, 1.1013, 2.2), (1.0990, 1.0995, -1.4)])
+# gross +2.4 / -1.2 for a long entered at the ask: its spread is already in the entry price, so nothing more is charged at the exit
+@pytest.mark.parametrize("price, exit_price, pnl", [(1.1020, 1.1013, 2.4), (1.0990, 1.0995, -1.2)])
 def test_dry_run_position_closes_at_target_or_stop_through_reconcile(price, exit_price, pnl):
     ex, rm = make(dry_run=True, prices={"EURUSD#": price})
     open_long(ex)
@@ -179,8 +179,8 @@ def test_dry_run_cache_records_money_risked_and_the_stop_in_atr():
     assert pos["sl_atr_mult"] == pytest.approx(1.0)
 
 
-# risk_amount is 1.2; the stop loses 1.2 + the $0.20 spread, the target wins 2.4 - the spread
-@pytest.mark.parametrize("price, r_multiple", [(1.0990, -1.4 / 1.2), (1.1020, 2.2 / 1.2)])
+# risk_amount is 1.2: a long's stop loses exactly that and its target wins 2.4 (the spread is in the ask entry)
+@pytest.mark.parametrize("price, r_multiple", [(1.0990, -1.0), (1.1020, 2.0)])
 def test_closed_trade_pnl_over_risk_amount_is_the_r_multiple(price, r_multiple):
     ex, rm = make(dry_run=True, prices={"EURUSD#": price})
     open_long(ex)
