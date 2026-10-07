@@ -5,6 +5,7 @@ import os
 # import yaml # Removed
 from loguru import logger  # type: ignore
 from dotenv import load_dotenv  # type: ignore
+from src.atomic_io import atomic_write_text
 from src.config import Cfg
 from src.utils import setup_logging
 
@@ -40,13 +41,22 @@ def fetch_and_save_bars(symbol: str, timeframe: str, count: int, save_dir: str):
         df = pd.DataFrame(rates)
         df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
         df = df.set_index("time").sort_index()
+        df.index = df.index.as_unit("us")   # the unit the cached CSV frames load with
+        df = df.iloc[:-1]                   # the last bar is still forming: the live bot never trains on it either
 
         # Select and rename columns to match original data.py output
         df = df[["open", "high", "low", "close", "tick_volume"]].rename(columns={"tick_volume": "volume"})
 
+        # Add to the cache, never replace it: an older, longer history in the file must survive. A bar fetched again takes the new values.
+        if os.path.exists(file_path):
+            existing = pd.read_csv(file_path, index_col=0, parse_dates=True)
+            existing.index = pd.to_datetime(existing.index, utc=True).as_unit("us")
+            df = pd.concat([existing, df])
+            df = df[~df.index.duplicated(keep="last")].sort_index()
+
         os.makedirs(save_dir, exist_ok=True)
-        df.to_csv(file_path)
-        logger.success(f"[{symbol}] Fetched {len(df)} bars and saved to {file_path}")
+        atomic_write_text(file_path, df.to_csv())
+        logger.success(f"[{symbol}] Fetched bars; {file_path} now holds {len(df)} bars")
     except Exception as e:
         logger.error(f"[{symbol}] Error fetching or saving bars: {e}")
 
