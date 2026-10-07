@@ -24,6 +24,9 @@ from .notifier import TelegramNotifier
 RETCODE_DONE = 10009
 RETCODE_DONE_PARTIAL = 10010
 FILLED_RETCODES = (RETCODE_DONE, RETCODE_DONE_PARTIAL)
+# A position that has left the broker's list keeps its cache entry until a closing deal shows in the history; after this many seconds
+# without one the entry is dropped with an alert and no result is learned from it.
+CLOSE_DEAL_WAIT_SECONDS = 180.0
 # Rejections that guarantee nothing was executed: requote, prices changed, no quotes, too frequent requests.
 # Only these may be sent again; any other result (none, an exception, timeout, a rejection) is sent once.
 RETRY_SAFE_RETCODES = (10004, 10020, 10021, 10024)
@@ -137,9 +140,15 @@ class Execution:
             self._drop_unusable_cache_entries(simulated_too=True)
 
             closed_trades_list = []
+            pending_alerts: List[str] = []
             try:
                 # Get the ground truth of open positions from the broker
-                mt5_positions = self.mt5_client.positions_get() or []
+                mt5_positions = self.mt5_client.positions_get()
+                if mt5_positions is None:
+                    # None is "could not ask" (an error or a dropped connection); an empty list is "no open positions". Treating the
+                    # first as the second would report every tracked position closed.
+                    logger.warning("Reconcile skipped: the terminal's position list could not be read.")
+                    return []
                 broker_positions_map = {p.ticket: p for p in mt5_positions}
                 broker_tickets = set(broker_positions_map.keys())
 
@@ -157,7 +166,9 @@ class Execution:
                 cached_tickets = list(self.risk.open_positions_cache.keys())
 
                 # --- 1. Process Closed Trades ---
-                # A trade is closed if it's in our cache but NOT on the broker anymore.
+                # A trade is closed if it's in our cache but NOT on the broker anymore, and a closing deal says so: the position
+                # list can lag the history, and the history can lag the list.
+                closing_kinds = self._closing_deal_kinds(mt5)
                 for ticket in cached_tickets:
                     if ticket not in broker_tickets:
                         pos_details = self.risk.open_positions_cache[ticket]
@@ -168,26 +179,25 @@ class Execution:
                             logger.info(f"[{symbol}] Dropping foreign closed position {ticket} from the cache.")
                             del self.risk.open_positions_cache[ticket]
                             continue
-                        pnl = 0.0
-                        exit_price = 0.0
-                        exit_time_dt = datetime.datetime.now(datetime.timezone.utc)
+                        closing = [d for d in (deals or []) if d.entry in closing_kinds]
+                        if not closing:
+                            # No closing deal yet (or the history could not be read): keep the entry and look again next time. A made-up
+                            # result must not reach the bandit, the loss streak or the monitor.
+                            first_seen = pos_details.setdefault("close_first_seen", time.time())
+                            if time.time() - first_seen > CLOSE_DEAL_WAIT_SECONDS:
+                                logger.error(f"[{symbol}] Position {ticket} left the broker's list {CLOSE_DEAL_WAIT_SECONDS:.0f}s ago and no "
+                                             f"closing deal has shown up; dropping it without learning from it.")
+                                pending_alerts.append(f"<b>WARNING:</b> [{symbol}] position {ticket} is gone from the terminal but has no "
+                                                      f"closing deal after {CLOSE_DEAL_WAIT_SECONDS:.0f}s; dropped from tracking, check the history.")
+                                del self.risk.open_positions_cache[ticket]
+                            else:
+                                logger.warning(f"[{symbol}] Position {ticket} is gone from the broker's list but has no closing deal yet; waiting.")
+                            continue
 
-                        if deals:
-                            latest_exit_time = 0
-                            latest_exit_price = 0.0
-
-                            for deal in sorted(deals, key=lambda d: d.time):
-                                if deal.entry == mt5.DEAL_ENTRY_OUT:
-                                    if deal.time > latest_exit_time:
-                                        latest_exit_time = deal.time
-                                        latest_exit_price = deal.price
-
-                            pnl = self._position_net_pnl(deals)
-                            if latest_exit_time > 0:
-                                exit_time_dt = datetime.datetime.fromtimestamp(latest_exit_time, tz=datetime.timezone.utc)
-                                exit_price = latest_exit_price
-                        else:
-                            logger.warning(f"[{symbol}] Position {ticket} closed, but no deal found in history for PnL calculation. PnL will be 0.")
+                        latest = max(closing, key=lambda d: d.time)
+                        pnl = self._position_net_pnl(deals)
+                        exit_price = latest.price
+                        exit_time_dt = datetime.datetime.fromtimestamp(latest.time, tz=datetime.timezone.utc)
 
                         closed_trade = ClosedTrade(
                             ticket=ticket, symbol=symbol, direction=pos_details.get('direction'),
@@ -200,7 +210,7 @@ class Execution:
                             min_prob_short_idx=pos_details.get("min_prob_short_idx", -1),
                             entry_auc=pos_details.get("entry_auc", 0.5),
                             entry_equity=pos_details.get("entry_equity", 0.0),
-                            exit_equity=self.monitor.current_equity,
+                            exit_equity=self._fresh_equity(),
                             adx=pos_details.get("adx", 0.0), macd_diff=pos_details.get("macd_diff", 0.0),
                             volatility_10=pos_details.get("volatility_10", 0.0),
                             dist_from_ema_200=pos_details.get("dist_from_ema_200", 0.0),
@@ -251,16 +261,51 @@ class Execution:
                 else:
                     logger.debug("Reconciliation complete. No changes detected.")
 
-                return closed_trades_list
-
             except Exception as e:
                 logger.exception(f"Failed to reconcile positions with MT5: {e}")
                 failure = e
+            else:
+                failure = None
 
         # Notify after the cache lock is released: the send is a network call.
         if self.notifier:
-            self.notifier.send_message(f"<b>ERROR:</b> Failed to reconcile cache with MT5: {failure}", level="ERROR")
-        return []
+            for text in pending_alerts:
+                self.notifier.send_message(text, level="WARNING")
+            if failure is not None:
+                self.notifier.send_message(f"<b>ERROR:</b> Failed to reconcile cache with MT5: {failure}", level="ERROR")
+        return closed_trades_list if failure is None else []
+
+    @staticmethod
+    def _closing_deal_kinds(mt5_module) -> set:
+        """Deal `entry` values that end a position: out, out-by (a hedge closed by its opposite) and in/out (a reversal)."""
+        kinds = {getattr(mt5_module, name, None) for name in ("DEAL_ENTRY_OUT", "DEAL_ENTRY_OUT_BY", "DEAL_ENTRY_INOUT")}
+        return {k for k in kinds if k is not None}
+
+    @staticmethod
+    def _positive_price(value):
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return None
+        return value if math.isfinite(value) and value > 0 else None
+
+    def _position_price(self, ticket):
+        """`price_open` of one open position, or None when it cannot be read."""
+        try:
+            found = self.mt5_client.positions_get(ticket=ticket)
+            return self._positive_price(getattr(found[0], "price_open", None)) if found else None
+        except Exception:
+            return None
+
+    def _fresh_equity(self) -> float:
+        """The account's equity now, or the monitor's last value when the terminal cannot say."""
+        try:
+            equity = getattr(self.mt5_client.account_info(), "equity", None)
+            if equity is not None and math.isfinite(float(equity)) and float(equity) > 0:
+                return float(equity)
+        except Exception:
+            pass
+        return float(getattr(self.monitor, "current_equity", 0.0) or 0.0)
 
     @staticmethod
     def _stop_fields(price, sl, lots, atr, pip_size, pip_value) -> Dict[str, Any]:
@@ -632,6 +677,7 @@ class Execution:
         res = self._send_order_with_retry(request)
         retcode = getattr(res, "retcode", None)
         position_id = None
+        fill_price = None
         if retcode in FILLED_RETCODES:
             if retcode == RETCODE_DONE_PARTIAL and getattr(res, "volume", 0):
                 lots = float(res.volume)  # partial fill: track what was actually filled
@@ -640,6 +686,7 @@ class Execution:
             deals = self.mt5_client.history_deals_get(ticket=deal_ticket) if deal_ticket else None
             if deals:
                 position_id = deals[0].position_id
+                fill_price = self._positive_price(getattr(deals[0], "price", None))
             else:
                 logger.error(f"[{symbol}] Order filled but the deal {deal_ticket} could not be fetched; looking for the position.")
         if position_id is None:
@@ -656,6 +703,7 @@ class Execution:
                     self.notifier.send_message(error_msg, level="CRITICAL")
                 return OrderResult(False, getattr(res, "order", None) if res else None, f"Order failed: {res}")
             position_id, found_lots = found
+            fill_price = fill_price or self._position_price(position_id)
             if retcode not in FILLED_RETCODES or retcode == RETCODE_DONE_PARTIAL:
                 lots = found_lots
             logger.warning(f"[{symbol}] Order result was {res}, but position {position_id} ({lots} lots) is at the broker; tracking it.")
@@ -666,7 +714,11 @@ class Execution:
 
         # compute effective risk and store in cache keyed by the reliable position_id
         try:
-            stop_fields = self._stop_fields(price, sl, lots, atr, pip_size, pip_value)  # lots are the filled lots here
+            # What breakeven, the R of the trade and the money at the stop are measured from is the price the order FILLED at.
+            entry_price = fill_price or price
+            if fill_price and abs(fill_price - price) > 0:
+                logger.info(f"[{symbol}] Filled at {fill_price:.5f}, requested {price:.5f}.")
+            stop_fields = self._stop_fields(entry_price, sl, lots, atr, pip_size, pip_value)  # lots are the filled lots here
             risk_per_trade = self.risk._get_dynamic_value(self.risk.risk_cfg.dynamic_risk, auc_score, getattr(self.risk.risk_cfg, "risk_per_trade", 0.005))
             risk_amt = self._cache_risk(symbol, stop_fields, equity * risk_per_trade)
 
@@ -676,7 +728,7 @@ class Execution:
                     "risk": float(risk_amt),  # Store the dollar amount at risk
                     "ticket": position_id,  # Store position_id for consistency
                     "symbol": symbol,  # Store symbol
-                    "entry_price": price,
+                    "entry_price": entry_price,
                     "direction": direction,
                     "lots": float(lots),
                     "entry_time": now_utc,  # Use current UTC time

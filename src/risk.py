@@ -452,8 +452,10 @@ class RiskManager:
             return  # No trailing logic enabled for this symbol
 
         with self.cache_lock:
+            # a position that already left the terminal's list and waits for its closing deal (reconcile sets `close_first_seen`) has no
+            # stop left to move
             positions_to_manage = [(key, dict(p)) for key, p in self.open_positions_cache.items()
-                                   if p.get("symbol") == symbol and not p.get("dry_run")]
+                                   if p.get("symbol") == symbol and not p.get("dry_run") and not p.get("close_first_seen")]
 
         if not positions_to_manage:
             return
