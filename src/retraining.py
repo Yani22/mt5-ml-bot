@@ -15,7 +15,7 @@ from src.mt5_client import MT5Client
 from src.notifier import TelegramNotifier
 from src.risk_controller import RiskController
 from src.utils import (retrain_is_usable, discard_staged_ensemble, load_ensemble, model_dir_for, promote_staged_ensemble,
-                       safe_retrain_ensemble)
+                       safe_retrain_ensemble, setup_logging_from_config)
 
 
 def retraining_status_for(symbols, retraining_processes) -> Dict[str, bool]:
@@ -34,6 +34,7 @@ def run_retraining_in_background(cfg, sym, feature_cfg, dry_run, notifier, optun
     A wrapper function to run the entire retraining pipeline for both long and short models in a separate process.
     Tuned parameters come from optuna_params/<symbol>_best_params.json; config.yaml is never modified.
     """
+    setup_logging_from_config(getattr(cfg, "logging", None))   # a spawned child starts with loguru's defaults, not the parent's sinks
     try:
         # The child saves into models/_staging/, never into the live folder; `_handle_model_acceptance` promotes what it accepts.
         for side in ("long", "short"):
