@@ -94,13 +94,20 @@ def _merge_bandit_states(lstate: Dict[str, Any], bstate: Dict[str, Any], warmsta
     """Merges the bandit states from a backtest into a live state."""
     merged = lstate.copy()
 
-    # Merge bandit blocks
+    # Merge bandit blocks. Arms are paired by index, so a backtest with other grid values is not merged: its arm 1 is another setting.
+    grid_of = {"atr_bandit": "atr_grid_values", "contextual_bandit": "atr_grid_values",
+               "min_prob_bandit_long": "min_prob_grid_long_values", "min_prob_bandit_short": "min_prob_grid_short_values"}
     for bandit_key in ["atr_bandit", "min_prob_bandit_long", "min_prob_bandit_short", "contextual_bandit"]:
         b_band = bstate.get(bandit_key)
         l_band = lstate.get(bandit_key)
 
         if not b_band:
             continue  # Nothing to merge from backtest
+
+        l_grid, b_grid = lstate.get(grid_of[bandit_key]), bstate.get(grid_of[bandit_key])
+        if l_band and l_grid is not None and b_grid is not None and list(l_grid) != list(b_grid):
+            logger.warning(f"Not merging the backtest's {bandit_key}: its grid {b_grid} differs from the live grid {l_grid}.")
+            continue
 
         if not l_band:
             # If live bandit state doesn't exist, create it from backtest state
@@ -119,9 +126,12 @@ def _merge_bandit_states(lstate: Dict[str, Any], bstate: Dict[str, Any], warmsta
             if key in b_band:
                 merged_band[key] = _merge_numeric_lists(l_band.get(key, []), b_band.get(key, []), warmstart_weight)
 
-        # Merge context matrices
+        # Merge context matrices. Every arm's `A` starts as lambda * I, so the backtest's prior is taken out before it is added: the live
+        # matrix already holds one.
         if "A" in b_band:
-            merged_band["A"] = _merge_matrix(l_band.get("A", []), b_band.get("A", []), warmstart_weight)
+            lam = float(b_band.get("lambda_prior", 1.0))
+            back_A = [(np.array(a) - lam * np.eye(np.array(a).shape[0])).tolist() for a in b_band.get("A", [])]
+            merged_band["A"] = _merge_matrix(l_band.get("A", []), back_A, warmstart_weight)
         if "b" in b_band:
             merged_band["b"] = _merge_matrix(l_band.get("b", []), b_band.get("b", []), warmstart_weight)
 

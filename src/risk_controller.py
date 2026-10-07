@@ -733,20 +733,23 @@ class RiskController:
         if self.notifier:
             self.notifier.send_message(f"<b>RISK ALERT:</b> [{symbol}] Bandit reset triggered!", level="WARNING")
         # Reset ThompsonBandits to initial state
+        atr_grid = list(self.cfg.get_symbol_value(symbol, 'atr_grid', ts_cfg.atr_grid))
+        grid_long = list(self.cfg.get_symbol_value(symbol, 'min_prob_grid_long', ts_cfg.min_prob_grid_long))
+        grid_short = list(self.cfg.get_symbol_value(symbol, 'min_prob_grid_short', ts_cfg.min_prob_grid_short))
         sym_state.atr_bandit = ThompsonBandit(
-            num_arms=len(ts_cfg.atr_grid),
+            num_arms=len(atr_grid),
             prior_mean=ts_cfg.prior_mean,
             prior_var=ts_cfg.prior_var,
             min_var=1e-6
         )
         sym_state.min_prob_bandit_long = ThompsonBandit(
-            num_arms=len(ts_cfg.min_prob_grid_long),
+            num_arms=len(grid_long),
             prior_mean=ts_cfg.prior_mean,
             prior_var=ts_cfg.prior_var,
             min_var=1e-6
         )
         sym_state.min_prob_bandit_short = ThompsonBandit(
-            num_arms=len(ts_cfg.min_prob_grid_short),
+            num_arms=len(grid_short),
             prior_mean=ts_cfg.prior_mean,
             prior_var=ts_cfg.prior_var,
             min_var=1e-6
@@ -756,12 +759,12 @@ class RiskController:
         # Reset contextual bandit if enabled
         if getattr(ts_cfg, "contextual_enabled", False) and sym_state.contextual_bandit is not None:
             ctx_dim = CONTEXT_VECTOR_DIM
-            sym_state.contextual_bandit = LinearThompson(num_arms=len(ts_cfg.atr_grid), dim=ctx_dim, lambda_prior=1.0, noise_var=float(ts_cfg.obs_var or 1.0))
+            sym_state.contextual_bandit = LinearThompson(num_arms=len(atr_grid), dim=ctx_dim, lambda_prior=1.0, noise_var=float(ts_cfg.obs_var or 1.0))
 
         # Reset dynamic grids to initial config values
-        sym_state.atr_grid_values = list(ts_cfg.atr_grid)
-        sym_state.min_prob_grid_long_values = list(ts_cfg.min_prob_grid_long)
-        sym_state.min_prob_grid_short_values = list(ts_cfg.min_prob_grid_short)
+        sym_state.atr_grid_values = atr_grid
+        sym_state.min_prob_grid_long_values = grid_long
+        sym_state.min_prob_grid_short_values = grid_short
 
         # Reset adaptation counters
         sym_state.atr_updates_since_last_adaptation = 0
@@ -842,6 +845,33 @@ class RiskController:
             logger.warning(f"[{symbol}] Bandit reset triggered: {trigger_reason}")
             self._reset_bandit_state(symbol, current_time)
 
+    @staticmethod
+    def _best_visited_arm(bandit: ThompsonBandit) -> Optional[int]:
+        """The arm with the best mean reward among the arms that were pulled, or None when none was. An arm never pulled has no mean
+        (it used to count as 0.0, which beats every arm that lost, so the grid was narrowed around a value nobody had tried)."""
+        visited = bandit.counts > 0
+        if not visited.any():
+            return None
+        means = np.where(visited, bandit.sum_rewards / np.where(visited, bandit.counts, 1.0), -np.inf)
+        return int(np.argmax(means))
+
+    def _adapt_one_grid(self, symbol, bandit, grid, make_bandit, transfer):
+        """Refines one grid around its best visited arm. Returns (bandit, grid): the new ones when the grid changed, else the old."""
+        ts_cfg = self.cfg.thompson_sampling
+        best = self._best_visited_arm(bandit)
+        if best is None:
+            logger.debug(f"[{symbol}] Grid adaptation skipped: no arm was pulled yet.")
+            return bandit, grid
+        new_grid = self._refine_grid(current_grid=grid, best_arm_index=best, refinement_factor=ts_cfg.adaptation_refinement_factor,
+                                     min_grid_size=ts_cfg.min_grid_size, max_grid_size=ts_cfg.max_grid_size)
+        if new_grid == grid:
+            logger.debug(f"[{symbol}] Grid adaptation resulted in no change.")
+            return bandit, grid
+        logger.info(f"[{symbol}] Grid adapted. Old: {grid}, New: {new_grid}")
+        new_bandit = make_bandit(bandit, len(new_grid))
+        transfer(bandit, grid, new_bandit, new_grid)
+        return new_bandit, new_grid
+
     def _check_and_trigger_adaptation(self, symbol: str):
         """
         Checks if adaptive grid conditions are met for a given symbol and triggers
@@ -853,116 +883,34 @@ class RiskController:
         if not ts_cfg.adaptive_grids_enabled:
             return
 
+        def plain(old, arms):
+            return ThompsonBandit(num_arms=arms, prior_mean=old.prior_mean, prior_var=old.prior_var, min_var=old.min_var)
+
         # --- ATR Grid Adaptation ---
         if sym_state.atr_updates_since_last_adaptation >= ts_cfg.adaptation_interval_updates:
             logger.info(f"[{symbol}] Triggering ATR grid adaptation.")
-            # Determine the best arm for ATR
-            if sym_state.contextual_bandit is not None:
-                # For contextual bandit, we need to find the arm with the highest estimated value
-                # This is a simplification; a more robust approach might involve simulating contexts
-                # For now, we'll use the arm with the highest mean reward from the underlying LinearThompson
-                best_arm_index = np.argmax(sym_state.contextual_bandit.b[:, 0] / np.diag(sym_state.contextual_bandit.A[:, :, 0]))  # Simplified
-            else:
-                best_arm_index = np.argmax(sym_state.atr_bandit.sum_rewards / (sym_state.atr_bandit.counts + 1e-6))  # Avoid div by zero
-
-            old_atr_grid = sym_state.atr_grid_values
-            new_atr_grid = self._refine_grid(
-                current_grid=old_atr_grid,
-                best_arm_index=int(best_arm_index),
-                refinement_factor=ts_cfg.adaptation_refinement_factor,
-                min_grid_size=ts_cfg.min_grid_size,
-                max_grid_size=ts_cfg.max_grid_size
-            )
-
-            if new_atr_grid != old_atr_grid:
-                logger.info(f"[{symbol}] ATR grid adapted. Old: {old_atr_grid}, New: {new_atr_grid}")
+            # The plain ATR bandit records every pull and reward, also in contextual mode (see `update`), so it picks the best arm for both.
+            old_grid = sym_state.atr_grid_values
+            new_plain, new_grid = self._adapt_one_grid(symbol, sym_state.atr_bandit, old_grid, plain, self._transfer_bandit_state)
+            if new_grid != old_grid:
                 if sym_state.contextual_bandit is not None:
-                    old_bandit = sym_state.contextual_bandit
-                    new_bandit = LinearThompson(
-                        num_arms=len(new_atr_grid),
-                        dim=old_bandit.dim,
-                        lambda_prior=old_bandit.lambda_prior,
-                        noise_var=old_bandit.noise_var
-                    )
-                    self._transfer_contextual_bandit_state(old_bandit, old_atr_grid, new_bandit, new_atr_grid)
-                    sym_state.contextual_bandit = new_bandit
-                else:
-                    old_bandit = sym_state.atr_bandit
-                    new_bandit = ThompsonBandit(
-                        num_arms=len(new_atr_grid),
-                        prior_mean=old_bandit.prior_mean,
-                        prior_var=old_bandit.prior_var,
-                        min_var=old_bandit.min_var
-                    )
-                    self._transfer_bandit_state(old_bandit, old_atr_grid, new_bandit, new_atr_grid)
-                    sym_state.atr_bandit = new_bandit
-                sym_state.atr_grid_values = new_atr_grid
-                sym_state.atr_updates_since_last_adaptation = 0  # Reset counter
-            else:
-                logger.debug(f"[{symbol}] ATR grid adaptation resulted in no change.")
-                sym_state.atr_updates_since_last_adaptation = 0  # Reset counter even if no change
+                    old_ctx = sym_state.contextual_bandit
+                    new_ctx = LinearThompson(num_arms=len(new_grid), dim=old_ctx.dim, lambda_prior=old_ctx.lambda_prior,
+                                             noise_var=old_ctx.noise_var)
+                    self._transfer_contextual_bandit_state(old_ctx, old_grid, new_ctx, new_grid)
+                    sym_state.contextual_bandit = new_ctx
+                sym_state.atr_bandit = new_plain
+                sym_state.atr_grid_values = new_grid
+            sym_state.atr_updates_since_last_adaptation = 0
 
-        # --- Min Prob Long Grid Adaptation ---
+        # --- Min Prob grids: one counter serves both sides, so decide once, then adapt both ---
         if sym_state.min_prob_updates_since_last_adaptation >= ts_cfg.adaptation_interval_updates:
-            logger.info(f"[{symbol}] Triggering Min Prob Long grid adaptation.")
-            best_arm_index = np.argmax(sym_state.min_prob_bandit_long.sum_rewards / (sym_state.min_prob_bandit_long.counts + 1e-6))
-
-            old_min_prob_grid_long = sym_state.min_prob_grid_long_values
-            new_min_prob_grid_long = self._refine_grid(
-                current_grid=old_min_prob_grid_long,
-                best_arm_index=int(best_arm_index),
-                refinement_factor=ts_cfg.adaptation_refinement_factor,
-                min_grid_size=ts_cfg.min_grid_size,
-                max_grid_size=ts_cfg.max_grid_size
-            )
-
-            if new_min_prob_grid_long != old_min_prob_grid_long:
-                logger.info(f"[{symbol}] Min Prob Long grid adapted. Old: {old_min_prob_grid_long}, New: {new_min_prob_grid_long}")
-                old_bandit = sym_state.min_prob_bandit_long
-                new_bandit = ThompsonBandit(
-                    num_arms=len(new_min_prob_grid_long),
-                    prior_mean=old_bandit.prior_mean,
-                    prior_var=old_bandit.prior_var,
-                    min_var=old_bandit.min_var
-                )
-                self._transfer_bandit_state(old_bandit, old_min_prob_grid_long, new_bandit, new_min_prob_grid_long)
-                sym_state.min_prob_bandit_long = new_bandit
-                sym_state.min_prob_grid_long_values = new_min_prob_grid_long
-                sym_state.min_prob_updates_since_last_adaptation = 0
-            else:
-                logger.debug(f"[{symbol}] Min Prob Long grid adaptation resulted in no change.")
-                sym_state.min_prob_updates_since_last_adaptation = 0
-
-        # --- Min Prob Short Grid Adaptation ---
-        if sym_state.min_prob_updates_since_last_adaptation >= ts_cfg.adaptation_interval_updates:
-            logger.info(f"[{symbol}] Triggering Min Prob Short grid adaptation.")
-            best_arm_index = np.argmax(sym_state.min_prob_bandit_short.sum_rewards / (sym_state.min_prob_bandit_short.counts + 1e-6))
-
-            old_min_prob_grid_short = sym_state.min_prob_grid_short_values
-            new_min_prob_grid_short = self._refine_grid(
-                current_grid=old_min_prob_grid_short,
-                best_arm_index=int(best_arm_index),
-                refinement_factor=ts_cfg.adaptation_refinement_factor,
-                min_grid_size=ts_cfg.min_grid_size,
-                max_grid_size=ts_cfg.max_grid_size
-            )
-
-            if new_min_prob_grid_short != old_min_prob_grid_short:
-                logger.info(f"[{symbol}] Min Prob Short grid adapted. Old: {old_min_prob_grid_short}, New: {new_min_prob_grid_short}")
-                old_bandit = sym_state.min_prob_bandit_short
-                new_bandit = ThompsonBandit(
-                    num_arms=len(new_min_prob_grid_short),
-                    prior_mean=old_bandit.prior_mean,
-                    prior_var=old_bandit.prior_var,
-                    min_var=old_bandit.min_var
-                )
-                self._transfer_bandit_state(old_bandit, old_min_prob_grid_short, new_bandit, new_min_prob_grid_short)
-                sym_state.min_prob_bandit_short = new_bandit
-                sym_state.min_prob_grid_short_values = new_min_prob_grid_short
-                sym_state.min_prob_updates_since_last_adaptation = 0
-            else:
-                logger.debug(f"[{symbol}] Min Prob Short grid adaptation resulted in no change.")
-                sym_state.min_prob_updates_since_last_adaptation = 0
+            logger.info(f"[{symbol}] Triggering min-prob grid adaptation (long and short).")
+            sym_state.min_prob_bandit_long, sym_state.min_prob_grid_long_values = self._adapt_one_grid(
+                symbol, sym_state.min_prob_bandit_long, sym_state.min_prob_grid_long_values, plain, self._transfer_bandit_state)
+            sym_state.min_prob_bandit_short, sym_state.min_prob_grid_short_values = self._adapt_one_grid(
+                symbol, sym_state.min_prob_bandit_short, sym_state.min_prob_grid_short_values, plain, self._transfer_bandit_state)
+            sym_state.min_prob_updates_since_last_adaptation = 0
 
     @staticmethod
     def _transfer_bandit_state(old_bandit: ThompsonBandit, old_grid: List[float], new_bandit: ThompsonBandit, new_grid: List[float]):
