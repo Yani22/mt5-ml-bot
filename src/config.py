@@ -13,6 +13,9 @@ logger = logging.getLogger(__name__)
 # of the context_features flags). `thompson_sampling.context_dim` in the YAML is ignored.
 CONTEXT_VECTOR_DIM = 9
 
+# The bar sizes the data code and `timeframe_to_mt5_timeframe` know.
+SUPPORTED_TIMEFRAMES = ("M1", "M5", "M15", "M30", "H1", "H4", "D1")
+
 
 class ConfigError(ValueError):
     """config.yaml, or a file it points to (the tuned-params JSON), has something the code does not understand. The bot refuses to start on it."""
@@ -677,6 +680,8 @@ class Cfg:
         with open(path, "r") as f:
             raw = yaml.safe_load(f) or {}
         defaults = Cfg()   # the one place a missing key gets its value
+        if "timeframe" in raw and raw["timeframe"] not in SUPPORTED_TIMEFRAMES:
+            raise ConfigError(f"config.yaml: `timeframe` must be one of {', '.join(SUPPORTED_TIMEFRAMES)}, got {raw['timeframe']!r}")
 
         # Auto-switch data_source to csv on non-windows
         if platform.system() != "Windows" and raw.get("data_source") == "mt5":

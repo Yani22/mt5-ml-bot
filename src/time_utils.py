@@ -16,7 +16,9 @@ def timeframe_to_mt5_timeframe(timeframe_str: str):
         "H4": mt5.TIMEFRAME_H4,
         "D1": mt5.TIMEFRAME_D1,
     }
-    return timeframe_map.get(timeframe_str, mt5.TIMEFRAME_M1)
+    if timeframe_str not in timeframe_map:
+        raise ValueError(f"Unsupported timeframe {timeframe_str!r}; use one of {', '.join(timeframe_map)}")
+    return timeframe_map[timeframe_str]
 
 
 def timeframe_to_seconds(timeframe: int | str) -> int:
@@ -43,6 +45,8 @@ def timeframe_to_seconds(timeframe: int | str) -> int:
             return 2592000  # Approximate for 30 days
         raise ValueError(f"Unsupported MT5 integer timeframe: {timeframe}")
     elif isinstance(timeframe, str):
+        if timeframe.startswith('MN'):
+            return 30 * 24 * 60 * 60  # MN1 (approx)
         if timeframe.startswith('M'):
             minutes = int(timeframe[1:])
             return minutes * 60
@@ -53,8 +57,6 @@ def timeframe_to_seconds(timeframe: int | str) -> int:
             return 24 * 60 * 60  # D1
         elif timeframe.startswith('W'):
             return 7 * 24 * 60 * 60  # W1
-        elif timeframe.startswith('MN'):
-            return 30 * 24 * 60 * 60  # MN1 (approx)
         raise ValueError(f"Unsupported string timeframe: {timeframe}")
     else:
         raise TypeError(f"timeframe must be int or str, got {type(timeframe)}")
