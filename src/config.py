@@ -551,7 +551,7 @@ class ThompsonSamplingCfg:
     context_dim: int = CONTEXT_VECTOR_DIM     # ignored: the size is fixed by the vector RiskController builds
     min_visits_for_exploration: int = 5        # number of visits before arm is considered "known"
     exploration_risk_mult: float = 0.5         # fraction of normal risk to use for exploratory arms
-    warmstart_weight: float = 1.0              # how strongly to weight backtest priors when merging (1.0 = equal)
+    warmstart_weight: float = 0.0              # how strongly to weight backtest priors when merging (0 = off, 1.0 = equal)
 
     # Adaptive Grid Configuration
     adaptive_grids_enabled: bool = False
@@ -676,6 +676,7 @@ class Cfg:
         import platform
         with open(path, "r") as f:
             raw = yaml.safe_load(f) or {}
+        defaults = Cfg()   # the one place a missing key gets its value
 
         # Auto-switch data_source to csv on non-windows
         if platform.system() != "Windows" and raw.get("data_source") == "mt5":
@@ -735,7 +736,7 @@ class Cfg:
         _same_setting(ensemble_training_raw.get("min_samples_for_ensemble"), raw.get("min_samples_for_ensemble"),
                       "`min_samples_for_ensemble` (top level and `ensemble_training`)")
         min_samples_for_ensemble = _scalar(
-            ensemble_training_raw, "min_samples_for_ensemble", int, _scalar(raw, "min_samples_for_ensemble", int, 1000))
+            ensemble_training_raw, "min_samples_for_ensemble", int, _scalar(raw, "min_samples_for_ensemble", int, defaults.min_samples_for_ensemble))
         watchdog_obj = _block(WatchdogCfg, raw.get("watchdog"), "watchdog")
         mon_obj = _block(MonitoringCfg, raw.get("monitoring"), "monitoring")
 
@@ -761,7 +762,7 @@ class Cfg:
         bt_obj = _block(BacktestingCfg, raw.get("backtesting"), "backtesting")
         ac_obj = _block(AsymmetricCompoundingCfg, raw.get("asymmetric_compounding"), "asymmetric_compounding")
 
-        symbols = raw.get("symbols", ["EURUSD"])
+        symbols = raw.get("symbols", defaults.symbols)
         _refuse_wrong_type(symbols, List[str], "symbols")
         symbol_overrides = raw.get("symbol_overrides") or {}
         _refuse_wrong_override_types(symbol_overrides)
@@ -772,17 +773,17 @@ class Cfg:
 
         return Cfg(
             symbols=symbols,
-            timeframe=_scalar(raw, "timeframe", str, "M5"),
-            history_bars=_scalar(raw, "history_bars", int, 2000),
-            retrain_every_bars=_scalar(raw, "retrain_every_bars", int, 250),
-            prediction_horizon=_scalar(raw, "prediction_horizon", int, 6),
-            data_source=_scalar(raw, "data_source", str, "csv"),
-            use_gpu=_scalar(raw, "use_gpu", bool, False),
-            cv_samples_per_split=_scalar(raw, "cv_samples_per_split", int, 300),
-            optuna_n_trials=_scalar(raw, "optuna_n_trials", int, 100),
-            optuna_pruning_interval=_scalar(raw, "optuna_pruning_interval", int, 100),  # New
-            n_jobs=_scalar(raw, "n_jobs", int, -1),  # New
-            initial_equity=float(bt_obj.initial_equity if "backtesting" in raw else _scalar(raw, "initial_equity", float, 100.0)),
+            timeframe=_scalar(raw, "timeframe", str, defaults.timeframe),
+            history_bars=_scalar(raw, "history_bars", int, defaults.history_bars),
+            retrain_every_bars=_scalar(raw, "retrain_every_bars", int, defaults.retrain_every_bars),
+            prediction_horizon=_scalar(raw, "prediction_horizon", int, defaults.prediction_horizon),
+            data_source=_scalar(raw, "data_source", str, defaults.data_source),
+            use_gpu=_scalar(raw, "use_gpu", bool, defaults.use_gpu),
+            cv_samples_per_split=_scalar(raw, "cv_samples_per_split", int, defaults.cv_samples_per_split),
+            optuna_n_trials=_scalar(raw, "optuna_n_trials", int, defaults.optuna_n_trials),
+            optuna_pruning_interval=_scalar(raw, "optuna_pruning_interval", int, defaults.optuna_pruning_interval),  # New
+            n_jobs=_scalar(raw, "n_jobs", int, defaults.n_jobs),  # New
+            initial_equity=float(bt_obj.initial_equity if "backtesting" in raw else _scalar(raw, "initial_equity", float, defaults.initial_equity)),
             features=features_obj,
             context_features=context_features_obj,
             models=models,
@@ -795,10 +796,10 @@ class Cfg:
             thompson_sampling=ts_obj,
             trading_costs=tc_obj,
             min_samples_for_ensemble=min_samples_for_ensemble,
-            force_retrain_on_startup=_scalar(raw, "force_retrain_on_startup", bool, False),
-            retraining_window_bars=_scalar(raw, "retraining_window_bars", Optional[int], None),
-            startup_logging=_scalar(raw, "startup_logging", bool, True),
-            magic_number=_scalar(raw, "magic_number", int, 424242),
+            force_retrain_on_startup=_scalar(raw, "force_retrain_on_startup", bool, defaults.force_retrain_on_startup),
+            retraining_window_bars=_scalar(raw, "retraining_window_bars", Optional[int], defaults.retraining_window_bars),
+            startup_logging=_scalar(raw, "startup_logging", bool, defaults.startup_logging),
+            magic_number=_scalar(raw, "magic_number", int, defaults.magic_number),
             symbol_overrides=symbol_overrides,
             backtesting=bt_obj,
             asymmetric_compounding=ac_obj,
