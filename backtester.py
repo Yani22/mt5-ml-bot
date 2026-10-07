@@ -11,7 +11,7 @@ import numpy as np  # type: ignore
 from scipy import stats  # type: ignore
 
 from src.config import Cfg
-from src.features import FeatureCfg, ema_distance
+from src.features import ema_distance, resolve_feature_cfg
 from src.risk import RiskManager, trailing_losses
 from src.time_utils import server_time_to_utc
 from src.costs import round_trip_pips
@@ -507,7 +507,7 @@ class HybridBacktester:
                 # Load best feature params from optuna study
                 optuna_params = load_optuna_params(sym, self.cfg)
                 feature_params = optuna_params.get('features', {}) if optuna_params else {}
-                feature_cfg = FeatureCfg(**feature_params)
+                feature_cfg = resolve_feature_cfg(self.cfg, feature_params)
 
                 # NEW: Get tuned prediction_horizon and min_pct_change, falling back to global defaults
                 tuned = optuna_params or {}  # None when there is no tuned-params file

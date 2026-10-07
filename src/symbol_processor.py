@@ -9,7 +9,7 @@ import time
 from src.config import Cfg
 from src.mt5_client import MT5Client
 from src.data_manager import DataManager
-from src.features import FeatureCfg, ema_distance_at
+from src.features import FeatureCfg, ema_distance_at, resolve_feature_cfg
 from src.ensemble import Ensemble
 from src.risk_controller import RiskController
 from src.live_performance_monitor import LivePerformanceMonitor
@@ -50,7 +50,7 @@ class SymbolProcessor:
         # Load best feature params from optuna study
         optuna_params = load_optuna_params(self.symbol, self.cfg)
         feature_params = optuna_params.get('features', {}) if optuna_params else {}
-        self.feature_cfg = FeatureCfg(**feature_params)
+        self.feature_cfg = resolve_feature_cfg(self.cfg, feature_params)
 
         # Load ensembles
         self.ens_long = load_ensemble(self.cfg, self.symbol, "long")

@@ -11,7 +11,7 @@ from loguru import logger  # type: ignore
 import numpy as np
 
 from src.config import Cfg
-from src.features import FeatureCfg
+from src.features import resolve_feature_cfg
 from src.utils import load_ensemble, safe_retrain_ensemble, load_optuna_params, get_training_data
 from src.ensemble import Ensemble
 import pandas as pd  # type: ignore
@@ -55,7 +55,7 @@ def retrain_symbol(cfg: Cfg, symbol: str, dry_run: bool = True, mt5_instance=Non
 
     optuna_params = load_optuna_params(symbol, cfg)
     feature_params = optuna_params.get('features', {}) if optuna_params else {}
-    feature_cfg = FeatureCfg(**feature_params)
+    feature_cfg = resolve_feature_cfg(cfg, feature_params)
     tuned = optuna_params or {}  # None when there is no tuned-params file: use the config values
     tuned_prediction_horizon = tuned.get('prediction_horizon', cfg.prediction_horizon)  # Get tuned prediction_horizon
     tuned_min_pct_change = tuned.get('min_pct_change', cfg.features.min_pct_change)  # Get tuned min_pct_change

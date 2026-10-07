@@ -3,7 +3,8 @@ import os
 import time
 from dotenv import load_dotenv
 from loguru import logger
-from src.config import Cfg, FeatureCfg
+from src.config import Cfg
+from src.features import resolve_feature_cfg
 from src.mt5_client import MT5Client, teardown_connection
 from src.risk import RiskManager
 from src.execution import Execution
@@ -129,7 +130,7 @@ def run(dry_run: bool = True):
         optuna_params = load_optuna_params(sym, cfg)
         optuna_params_per_symbol[sym] = optuna_params
         feature_params = optuna_params.get('features', {}) if optuna_params else {}
-        feature_cfg_per_symbol[sym] = FeatureCfg(**feature_params)
+        feature_cfg_per_symbol[sym] = resolve_feature_cfg(cfg, feature_params)
 
     retraining_processes = {}
     retraining_status = {sym: False for sym in cfg.symbols}  # Track if retraining is active

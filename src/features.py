@@ -1,4 +1,5 @@
 # src/features.py
+import dataclasses
 import pandas as pd  # type: ignore
 import numpy as np  # type: ignore
 import ta  # type: ignore
@@ -24,6 +25,15 @@ def is_model_column(name: str) -> bool:
 def model_matrix(X: pd.DataFrame) -> pd.DataFrame:
     """The columns the models are trained and asked on: `X` without the absolute price levels."""
     return X[[c for c in X.columns if is_model_column(c)]]
+
+
+def resolve_feature_cfg(cfg, tuned_features=None) -> FeatureCfg:
+    """The feature settings to build with: the config's `features` block, with any keys of the symbol's tuned-params file on top. The
+    block is what the YAML says (the tuner reads the same block as its search ranges and takes the first entry as the value), so a
+    run with no tuned file builds what the config shows instead of the dataclass defaults."""
+    configured = cfg.features
+    base = dataclasses.asdict(configured) if dataclasses.is_dataclass(configured) else dict(vars(configured))   # a stand-in object works too
+    return FeatureCfg(**{**base, **(tuned_features or {})})
 
 
 EMA_DIST_SPAN = 200

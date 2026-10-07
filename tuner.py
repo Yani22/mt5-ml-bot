@@ -12,7 +12,7 @@ from joblib import Parallel, delayed  # type: ignore
 import traceback  # Added for detailed error logging
 
 from src.config import Cfg
-from src.features import FeatureCfg, add_relative_features, build_dynamic_features, model_matrix
+from src.features import add_relative_features, build_dynamic_features, model_matrix, resolve_feature_cfg
 from src.data_colab import merge_features_labels
 from src.utils import get_training_data, save_optuna_params
 from src.ensemble import Ensemble
@@ -100,7 +100,7 @@ def objective(trial, df: pd.DataFrame, static_features: pd.DataFrame, symbol: st
         roc_lags_choice = trial.suggest_categorical("feature_roc_lags", roc_lags_options)
         feature_params_raw["roc_lags"] = roc_lags_choice
 
-        feature_cfg = FeatureCfg(**feature_params_raw)
+        feature_cfg = resolve_feature_cfg(cfg, feature_params_raw)
 
         # --- 2. Build Features for this Trial (using cached static features) ---
         X = add_relative_features(build_dynamic_features(df, static_features, feature_cfg, symbol), df)   # the matrix the live models are trained on
@@ -180,7 +180,7 @@ def run_tuning_for_symbol(sym: str):
     static_features, _, df = get_training_data(  # Unpack X, discard y, get df
         cfg,
         sym,
-        feature_cfg=FeatureCfg(),  # Pass a default/dummy config
+        feature_cfg=cfg.features,  # the configured untuned features; the trials rebuild the dynamic ones
         source=cfg.data_source if hasattr(cfg, "data_source") else "csv",
         build_dynamic=False,  # Instruct the pipeline to return intermediate artifacts for tuner
         return_long_short_labels=False  # We will generate labels inside the objective
@@ -195,7 +195,7 @@ def run_tuning_for_symbol(sym: str):
 
     # One study per feature set, label and search space: an old study with the same name would keep adding trials scored on other
     # features (C3). The columns are the model's input columns for the default feature config.
-    columns = list(model_matrix(add_relative_features(build_dynamic_features(df, static_features, FeatureCfg(), sym), df)).columns)
+    columns = list(model_matrix(add_relative_features(build_dynamic_features(df, static_features, cfg.features, sym), df)).columns)
     signature = study_signature((cfg.prediction_horizon, cfg.features.min_pct_change), yaml_cfg.get("features", {}),
                                 yaml_cfg.get("models", []), columns, yaml_cfg.get("cv_samples_per_split", 300),
                                 yaml_cfg.get("roc_lags_options"))
