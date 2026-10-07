@@ -745,7 +745,8 @@ class Cfg:
         if isinstance(retrain_time, str):
             fetch_raw["retrain_time_utc"] = [retrain_time]
         if not fetch_raw.get("retrain_time_utc"):
-            logger.warning("Could not find a valid `retrain_time_utc` in config.yaml; falling back to `retrain_every_bars`.")
+            logger.warning("No `fetch.retrain_time_utc` in config.yaml: the live bot will never retrain (`retrain_every_bars` is only the "
+                           "backtester's block length). Set a time such as \"23:55\" to retrain daily.")
         fetch_obj = _block(FetchCfg, fetch_raw, "fetch")
 
         ts_obj = _block(ThompsonSamplingCfg, raw.get("thompson_sampling"), "thompson_sampling")

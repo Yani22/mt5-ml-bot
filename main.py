@@ -8,7 +8,7 @@ from src.features import resolve_feature_cfg
 from src.mt5_client import MT5Client, teardown_connection
 from src.risk import RiskManager
 from src.execution import Execution
-from src.utils import setup_logging, load_ensemble, load_optuna_params, log_startup_summary, _initialize_metrics_csv, log_metrics_to_csv
+from src.utils import setup_logging, setup_logging_from_config, load_ensemble, load_optuna_params, log_startup_summary, _initialize_metrics_csv, log_metrics_to_csv
 from src.live_performance_monitor import LivePerformanceMonitor, equity_from_account
 from src.notifier import TelegramNotifier
 
@@ -26,7 +26,7 @@ from src.retraining import _check_and_trigger_retraining, _handle_model_acceptan
 
 # --- Initial Setup ---
 load_dotenv()
-setup_logging()
+setup_logging(to_file=False)   # console only until the config is read; `run` applies the `logging:` block
 _initialize_metrics_csv()
 
 
@@ -106,7 +106,7 @@ def run(dry_run: bool = True):
     RECONNECTION_RETRY_SECONDS = 60
     cfg = Cfg.from_yaml("config.yaml")
     apply_mode_state_paths(cfg, dry_run)  # dry-run learning must not seed live bandit/monitor state
-    setup_logging(level=cfg.logging['level'])
+    setup_logging_from_config(cfg.logging)
 
     cfg.dashboard_every_bars = getattr(cfg, "dashboard_every_bars", 10)
 

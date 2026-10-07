@@ -63,7 +63,7 @@ class _Stop(BaseException):
 
 @pytest.mark.parametrize("dry_run", [True, False])
 def test_run_wires_mode_paths_into_cfg_before_anything_else(monkeypatch, dry_run):
-    """Stops at setup_logging, the statement right after the config load, so no MT5 code is reached."""
+    """Stops at setup_logging_from_config, the statement right after the config load, so no MT5 code is reached."""
     seen = {}
     cfg = _cfg()
     configured = cfg.thompson_sampling.state_file, cfg.monitoring.monitor_state_file
@@ -74,7 +74,7 @@ def test_run_wires_mode_paths_into_cfg_before_anything_else(monkeypatch, dry_run
         seen["paths"] = (cfg.thompson_sampling.state_file, cfg.monitoring.monitor_state_file)
         raise _Stop
 
-    monkeypatch.setattr(main, "setup_logging", stop)
+    monkeypatch.setattr(main, "setup_logging_from_config", stop)
     with pytest.raises(_Stop):
         main.run(dry_run=dry_run)
     expected = tuple(mode_state_path(p, True) for p in configured) if dry_run else configured

@@ -60,6 +60,13 @@ def setup_logging(level="INFO", to_file=True, rotate="10 MB", retention="7 days"
         logger.add("logs/bot.log", level=level, rotation=rotate, retention=retention, enqueue=True)
 
 
+def setup_logging_from_config(logging_cfg: dict) -> None:
+    """`setup_logging` with the `logging:` block of config.yaml (level, to_file, rotate, retention); a missing key keeps its default."""
+    logging_cfg = logging_cfg or {}
+    setup_logging(level=logging_cfg.get("level", "INFO"), to_file=logging_cfg.get("to_file", True),
+                  rotate=logging_cfg.get("rotate", "10 MB"), retention=logging_cfg.get("retention", "7 days"))
+
+
 def optuna_params_filename(symbol: str) -> str:
     """File name for a symbol's tuned params, shared by the tuner (writer) and the bot (reader). The '#' is dropped."""
     return f"{symbol.replace('#', '')}_best_params.json"
