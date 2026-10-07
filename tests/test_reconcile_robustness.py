@@ -171,3 +171,37 @@ def test_a_missing_fill_price_keeps_the_requested_one():
     ex = Execution({}, {}, rm, client, NS(), dry_run=False, monitor=NS(current_equity=1000.0))
     ex.trade(SYMBOL, "long", 0.02, 1.1001, 1.0995, 1.1013, 1000.0, 1e-5, 1.0, NOW, atr=0.0006, auc_score=0.6)
     assert rm.open_positions_cache[555]["entry_price"] == pytest.approx(1.1001)
+
+
+# ---- a position that was flagged as closing and then shows up again ----
+def test_a_position_back_on_the_list_is_managed_again():
+    cfg = Cfg()
+    cfg.data_source = "mt5"
+    sent = []
+
+    class Client(FakeClient):
+        def symbol_info_tick(self, symbol):
+            return NS(bid=1.1100, ask=1.1101)
+
+        def symbol_info(self, symbol):
+            return NS(point=1e-5, digits=5, trade_contract_size=100000, trade_stops_level=0)
+
+        def order_send(self, request):
+            sent.append(request)
+            return NS(retcode=mt5.TRADE_RETCODE_DONE, comment="")
+
+    client = Client(positions=[], deals={777: [ENTRY_DEAL]})
+    rm = RiskManager(cfg, client, threading.Lock())
+    ex = Execution({}, {}, rm, client, NS(), dry_run=False, monitor=NS(current_equity=1000.0))
+    rm.open_positions_cache[777] = {**CACHE_ENTRY, "ticket": 777, "sl_atr_mult": 1.0}
+    ex.reconcile_open_positions_with_mt5()
+    assert "close_first_seen" in rm.open_positions_cache[777]
+    rm.manage_open_positions(SYMBOL, 0.0006)
+    assert sent == []                                   # flagged: no stop move for a position that may be gone
+
+    client.positions = [NS(ticket=777, magic=OURS, type=0, symbol=SYMBOL, volume=0.02, price_open=1.1001, sl=1.0995, tp=1.1013,
+                           time=OPENED)]
+    ex.reconcile_open_positions_with_mt5()              # the terminal lists it again
+    assert "close_first_seen" not in rm.open_positions_cache[777]
+    rm.manage_open_positions(SYMBOL, 0.0006)
+    assert sent and sent[0]["position"] == 777          # breakeven / trailing act on it again

@@ -127,6 +127,12 @@ class Execution:
                         del self.risk.open_positions_cache[ticket]
                 cached_tickets = list(self.risk.open_positions_cache.keys())
 
+                # A position the terminal lists again is not waiting to be closed (an incomplete read earlier flagged it): clear the flag, or
+                # breakeven and the trail would skip it for good.
+                for ticket in cached_tickets:
+                    if ticket in broker_tickets:
+                        self.risk.open_positions_cache[ticket].pop("close_first_seen", None)
+
                 # --- 1. Process Closed Trades ---
                 # A trade is closed if it's in our cache but NOT on the broker anymore, and a closing deal says so: the position
                 # list can lag the history, and the history can lag the list.
