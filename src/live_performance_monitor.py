@@ -8,6 +8,7 @@ import json  # NEW
 import math
 import os  # NEW
 
+from src.atomic_io import atomic_write_json, quarantine
 from src.balance_flows import BalanceFlowCursor, shift_peak
 from src.config import Cfg
 from src.trade_types import ClosedTrade  # Import the new ClosedTrade dataclass
@@ -117,8 +118,7 @@ class LivePerformanceMonitor:
                 "last_ensemble_auc": self.last_ensemble_auc,
                 "balance_flows": self.flow_cursor.to_state(),
             }
-            with open(state_path, 'w') as f:
-                json.dump(state, f, indent=4)
+            atomic_write_json(state_path, state, indent=4)
             logger.debug(f"LivePerformanceMonitor state saved to {state_path}")
         except Exception as e:
             logger.error(f"Failed to save LivePerformanceMonitor state: {e}")
@@ -139,10 +139,10 @@ class LivePerformanceMonitor:
                                f"{self.account_id!r}. Not loading it; starting fresh at the current equity.")
                 return
 
-            # Reconstruct deque and ClosedTrade objects
-            self.closed_trades.clear()
+            # Parse everything into locals first: a half-parsed file must not leave a half-loaded monitor.
+            closed_trades = []
             for trade_data in state.get("closed_trades", []):
-                trade = ClosedTrade(
+                closed_trades.append(ClosedTrade(
                     ticket=trade_data.get("ticket"),
                     symbol=trade_data.get("symbol"),
                     direction=trade_data.get("direction"),
@@ -164,21 +164,28 @@ class LivePerformanceMonitor:
                     macd_diff=trade_data.get("macd_diff"),
                     volatility_10=trade_data.get("volatility_10"),
                     dist_from_ema_200=trade_data.get("dist_from_ema_200")
-                )
-                self.closed_trades.append(trade)
+                ))
+            equity_curve = [(datetime.datetime.fromisoformat(ts_str), eq) for ts_str, eq in state.get("equity_curve", [])]
+            peak_equity = state.get("peak_equity", self.cfg.initial_equity)
+            current_equity = state.get("current_equity", self.cfg.initial_equity)
+            last_check_time = datetime.datetime.fromisoformat(state["last_check_time"]) if state.get("last_check_time") else None
+            last_ensemble_auc = state.get("last_ensemble_auc", 0.0)
+            flow_cursor = BalanceFlowCursor.from_state(state.get("balance_flows"))
 
-            self.equity_curve.clear()
-            for ts_str, eq in state.get("equity_curve", []):
-                self.equity_curve.append((datetime.datetime.fromisoformat(ts_str), eq))
-
-            self.peak_equity = state.get("peak_equity", self.cfg.initial_equity)
-            self.current_equity = state.get("current_equity", self.cfg.initial_equity)
-            self.last_check_time = datetime.datetime.fromisoformat(state["last_check_time"]) if state.get("last_check_time") else None
-            self.last_ensemble_auc = state.get("last_ensemble_auc", 0.0)
-            self.flow_cursor = BalanceFlowCursor.from_state(state.get("balance_flows"))
+            self.closed_trades = deque(closed_trades)
+            self.equity_curve = deque(equity_curve)
+            self.peak_equity = peak_equity
+            self.current_equity = current_equity
+            self.last_check_time = last_check_time
+            self.last_ensemble_auc = last_ensemble_auc
+            self.flow_cursor = flow_cursor
 
             logger.debug(f"LivePerformanceMonitor state loaded from {state_path}")
         except Exception as e:
-            logger.error(f"Failed to load LivePerformanceMonitor state from {state_path}: {e}")
-            # Optionally, re-initialize to a clean state if loading fails
-            self.__init__(self.cfg)  # Re-initialize to default state
+            moved = quarantine(state_path)
+            logger.error(f"Failed to load LivePerformanceMonitor state from {state_path}: {e}. The file was moved to {moved}; "
+                         f"starting fresh on this account.")
+            # Start fresh but keep the account stamp: without it `save_state` refuses to write for the rest of the run.
+            account_id = self.account_id
+            self.__init__(self.cfg)
+            self.account_id = account_id

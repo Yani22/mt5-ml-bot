@@ -3,6 +3,7 @@ import numpy as np  # type: ignore
 from loguru import logger  # type: ignore
 import datetime
 from collections import deque
+from src.atomic_io import atomic_write_json, quarantine
 import json
 import os
 from typing import List, Dict, Optional, Any
@@ -642,8 +643,7 @@ class RiskController:
                 "bar_counters": self.bar_counters,
                 "warmstart_sources": self.warmstart_sources,
             }
-            with open(state_path, 'w') as f:
-                json.dump(state, f, indent=4, default=_json_serial)
+            atomic_write_json(state_path, state, indent=4, default=_json_serial)
             logger.debug(f"RiskController state saved to {state_path}")
         except Exception as e:
             logger.error(f"Failed to save RiskController state: {e}")
@@ -679,9 +679,11 @@ class RiskController:
             # Return the open positions cache, ensuring keys are integers
             return {int(k): v for k, v in state.get("open_positions_cache", {}).items()}
         except Exception as e:
-            logger.error(f"Failed to load RiskController state from {state_path}: {e}")
+            moved = quarantine(state_path)   # the next save must not overwrite the only copy of what was learned
+            logger.error(f"Failed to load RiskController state from {state_path}: {e}. The file was moved to {moved}; starting with fresh bandits.")
             if self.notifier:
-                self.notifier.send_message(f"<b>ERROR:</b> Failed to load RiskController state from {state_path}: {e}", level="ERROR")
+                self.notifier.send_message(f"<b>ERROR:</b> Failed to load RiskController state from {state_path}: {e}. "
+                                           f"It was moved to {moved}; the bandits start fresh.", level="ERROR")
             return {}
 
     def diagnostics(self) -> Dict[str, Any]:
