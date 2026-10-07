@@ -19,7 +19,7 @@ roc_lags_options:
 
 # --- Backtesting Settings ---
 backtesting:
-  initial_equity: 20.00
+  initial_equity: 130.00
   enable_retraining: False # Whether backtester.py retrains during the run
 
 # --- ML & CV Settings ---
