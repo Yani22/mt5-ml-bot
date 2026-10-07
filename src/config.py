@@ -449,7 +449,7 @@ class FeatureCfg:
     rsi_os_level: int = 30
     adx_trend_thresh: int = 25
     timeframe_minutes: int = 5
-    min_pct_change: float = 0.0001  # New: Minimum percentage change for label generation
+    min_pct_change: float = 0.0001  # label dead zone: a long label needs the forward move above +this fraction of price (0.0001 = 0.01%, about 1.5 pips on USDJPY), a short label below -this
 
 
 @dataclass
@@ -512,7 +512,7 @@ class TradingCostsDefaultsCfg:
     slippage_pips: float = 0.5
     spread_pips: float = 1.0   # backtester: one spread charged per round trip (bars are bid-only); symbol_overrides can set it per symbol
     commission_per_trade: float = 0.0
-    adaptive_slippage: bool = True
+    adaptive_slippage: bool = True           # only multiplies slippage_pips by adaptive_slippage_multiplier; it does not read the spread
     retry_order_send: int = 3
     adaptive_slippage_multiplier: float = 1.0
 
