@@ -115,7 +115,7 @@ def _merge_bandit_states(lstate: Dict[str, Any], bstate: Dict[str, Any], warmsta
         merged_band = l_band.copy()
 
         # Merge numeric lists
-        for key in ["counts", "sum_rewards", "sum_squared_rewards"]:
+        for key in ["counts", "visits", "sum_rewards", "sum_squared_rewards"]:
             if key in b_band:
                 merged_band[key] = _merge_numeric_lists(l_band.get(key, []), b_band.get(key, []), warmstart_weight)
 

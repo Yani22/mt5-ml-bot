@@ -45,6 +45,8 @@ class ThompsonBandit:
         self.counts = np.zeros(self.num_arms, dtype=float)
         self.sum_rewards = np.zeros(self.num_arms, dtype=float)
         self.sum_squared_rewards = np.zeros(self.num_arms, dtype=float)
+        # How often each arm was pulled. Unlike `counts` it never decays: it decides whether an arm is still "exploratory".
+        self.visits = np.zeros(self.num_arms, dtype=float)
 
     def _emp_mean_var(self, i: int):
         n = self.counts[i]
@@ -79,6 +81,7 @@ class ThompsonBandit:
             self.sum_squared_rewards *= decay
 
         self.counts[arm_index] += 1.0
+        self.visits[arm_index] += 1.0
         self.sum_rewards[arm_index] += reward
         self.sum_squared_rewards[arm_index] += reward * reward
 
@@ -89,6 +92,7 @@ class ThompsonBandit:
             "prior_var": self.prior_var,
             "min_var": self.min_var,
             "counts": self.counts.tolist(),
+            "visits": self.visits.tolist(),
             "sum_rewards": self.sum_rewards.tolist(),
             "sum_squared_rewards": self.sum_squared_rewards.tolist(),
         }
@@ -97,6 +101,7 @@ class ThompsonBandit:
     def from_state(cls, state):
         inst = cls(state["num_arms"], state.get("prior_mean", 0.0), state.get("prior_var", 1.0), state.get("min_var", 1e-6))
         inst.counts = np.array(state.get("counts", inst.counts))
+        inst.visits = np.array(state.get("visits", inst.counts))   # a state saved before visits were kept apart: its counts
         inst.sum_rewards = np.array(state.get("sum_rewards", inst.sum_rewards))
         inst.sum_squared_rewards = np.array(state.get("sum_squared_rewards", inst.sum_squared_rewards))
         return inst
@@ -490,8 +495,8 @@ class RiskController:
         ts_cfg = self.cfg.thompson_sampling
         is_exploratory = False
         exploration_risk_mult = 1.0
-        if hasattr(sym_state.atr_bandit, "counts"):
-            if sym_state.atr_bandit.counts[atr_idx] < ts_cfg.min_visits_for_exploration:
+        if hasattr(sym_state.atr_bandit, "visits"):
+            if sym_state.atr_bandit.visits[atr_idx] < ts_cfg.min_visits_for_exploration:
                 is_exploratory = True
                 exploration_risk_mult = float(ts_cfg.exploration_risk_mult)
 
@@ -523,6 +528,7 @@ class RiskController:
             return
 
         sym_state = self.symbol_states[symbol]
+        ts_decay = float(self.cfg.thompson_sampling.decay)   # forgetting factor of the Thompson bandits (1.0 = never forget)
         # Reward is profit in units of the money risked (R), so it does not depend on account size or on how much
         # the trade was scaled (exploration, streak multipliers). Without a usable risk amount (adopted or old
         # trades) there is no valid reward: the bandits must not learn from it, and units must not be mixed.
@@ -556,14 +562,14 @@ class RiskController:
                         # Also record the visit on the plain ATR bandit: get_params() reads its counts to decide
                         # whether an arm is still exploratory, and it is never sampled in contextual mode.
                         if trade.atr_idx < sym_state.atr_bandit.num_arms:
-                            sym_state.atr_bandit.update(trade.atr_idx, reward)
+                            sym_state.atr_bandit.update(trade.atr_idx, reward, decay=ts_decay)
                     else:
                         logger.warning(f"[{symbol}] Context vector dimension mismatch. Bandit dim: {sym_state.contextual_bandit.dim}, trade context dim: {context_vector.shape[0]}.")
                 else:
                     logger.warning(f"[{symbol}] Context vector not found in ClosedTrade. Cannot update contextual bandit.")
             else:
                 if trade.atr_idx < sym_state.atr_bandit.num_arms:
-                    sym_state.atr_bandit.update(trade.atr_idx, reward)
+                    sym_state.atr_bandit.update(trade.atr_idx, reward, decay=ts_decay)
                 else:
                     logger.warning(f"[{symbol}] Invalid atr_idx {trade.atr_idx} for atr_bandit with {sym_state.atr_bandit.num_arms} arms.")
 
@@ -572,12 +578,12 @@ class RiskController:
         short_traded = trade.direction == "short" and trade.min_prob_short_idx is not None and trade.min_prob_short_idx != -1
         if long_traded:
             if trade.min_prob_long_idx < sym_state.min_prob_bandit_long.num_arms:
-                sym_state.min_prob_bandit_long.update(trade.min_prob_long_idx, reward)
+                sym_state.min_prob_bandit_long.update(trade.min_prob_long_idx, reward, decay=ts_decay)
             else:
                 logger.warning(f"[{symbol}] Invalid min_prob_long_idx {trade.min_prob_long_idx} for min_prob_bandit_long with {sym_state.min_prob_bandit_long.num_arms} arms.")
         if short_traded:
             if trade.min_prob_short_idx < sym_state.min_prob_bandit_short.num_arms:
-                sym_state.min_prob_bandit_short.update(trade.min_prob_short_idx, reward)
+                sym_state.min_prob_bandit_short.update(trade.min_prob_short_idx, reward, decay=ts_decay)
             else:
                 logger.warning(f"[{symbol}] Invalid min_prob_short_idx {trade.min_prob_short_idx} for min_prob_bandit_short with {sym_state.min_prob_bandit_short.num_arms} arms.")
 
@@ -983,6 +989,7 @@ class RiskController:
                 # Transfer statistics. If multiple old arms map to the same new arm,
                 # their statistics will be summed up. This is a reasonable heuristic.
                 new_bandit.counts[new_idx] += old_bandit.counts[old_idx]
+                new_bandit.visits[new_idx] += old_bandit.visits[old_idx]
                 new_bandit.sum_rewards[new_idx] += old_bandit.sum_rewards[old_idx]
                 new_bandit.sum_squared_rewards[new_idx] += old_bandit.sum_squared_rewards[old_idx]
 

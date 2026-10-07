@@ -20,6 +20,7 @@ def make_rc(path, trades=0):
     cfg.symbols = [SYM]
     cfg.thompson_sampling.state_file = str(path)
     cfg.thompson_sampling.bandit_reset_enabled = False
+    cfg.thompson_sampling.decay = 1.0   # these tests count arm pulls, not decayed statistics
     rc = RiskController(cfg)
     for _ in range(trades):
         rc.update(closed("long", long_idx=2))
