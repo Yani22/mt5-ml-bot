@@ -32,7 +32,7 @@ fetch:
   raw_data_dir: "data/historical_data" # where to store cached data
   retrain_in_background: false      # whether retrain runs async
   retrain_time_utc: "23:55"           # scheduled daily retrain (UTC); null = disabled
-force_retrain_on_startup: false    # Set to true to force retraining of all models on bot startup (e.g., after feature changes).
+force_retrain_on_startup: false    # unused: nothing reads it (the start-up summary warns if it is true). Models retrain at fetch.retrain_time_utc; run trainer.py to retrain now.
 
 # --- Ensemble Training Control ---
 ensemble_training:
@@ -48,6 +48,8 @@ prediction_horizon: 12       # bars ahead for the label (12 bars = 1 hour on M5)
 retraining_window_bars: 45000         # Number of recent bars for rolling window retraining. null for expanding window.
 
 # --- Features ---
+# Search ranges for tuner.py: [low, high] (or [low, high, log]). The FIRST value is what a run with no tuned-params file uses
+# (e.g. ema_slow 200), so the bot builds its features from it until a tuned file overrides single keys.
 features:
   rsi_period: [14, 14]
   ema_slow: [200, 200]
@@ -97,7 +99,7 @@ trading_costs:
   defaults:
     slippage_pips: 0.1
     commission_per_trade: 0.0
-    adaptive_slippage: true        # dynamically calculate slippage based on recent spread
+    adaptive_slippage: true        # only multiplies slippage_pips by adaptive_slippage_multiplier; it does NOT read the spread
     retry_order_send: 3            # number of retries for failed order sends
     adaptive_slippage_multiplier: 1.0
 
@@ -148,7 +150,7 @@ risk:
     auc_ceiling: 0.65     # The AUC score that corresponds to max_risk
 
   dynamic_tp:
-    enabled: true
+    enabled: false        # never applied: the take-profit is always the stop multiple x atr_multiplier_tp / atr_multiplier_sl
     base_tp_mult: 2.0     # For low-confidence trades, aim for a 2x ATR take-profit
     max_tp_mult: 4.0      # For high-confidence trades, give them more room to run with a 4x ATR take-profit
     auc_floor: 0.55       # Same AUC floor as risk
